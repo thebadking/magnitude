@@ -1416,6 +1416,22 @@ native routed_route_streamed for metal from "metal/routed_route_streamed.metal":
         threads_per_threadgroup (32 * SIMDGROUPS, 1, 1)
         shared_bytes (min(ceil_div(H, 32) * (min(M, 2) + 2 * min(M / 3, 1) + 4 * min(M / 5, 1)), 448) * 64)
 
+# CUDA: 256 threads per block (8 warps). Block dispatch by blockIdx.x:
+# [0, ceil_div(E, 8)) routing GEMV — the last arriving block selects, resolves
+# and (if any choice absent) publishes the request under __threadfence_system();
+# [ceil_div(E, 8), + ceil_div(S, 8)) shared-expert gate/up GEMV; the two
+# predict-GEMV sections follow. Logits scratch: 3 * M * (E + 1) floats.
+# Arrivals scratch: 12 bytes (3 ints: routing, near, far), sync-zeroed.
+native routed_route_streamed for cuda from "cuda/routed_route_streamed.cu":
+    static (H, PT, NM, E, K, S, BANK, C, RING)
+    where H % 32 == 0 and E % 32 == 0 and E <= 1024 and K <= 32 and C >= 4 + 8 * K and RING >= 2 + 8 * K
+    scratch logits bytes (3 * M * (E + 1) * 4)
+    scratch arrivals bytes (12) sync
+    launch routed_route_streamed:
+        threadgroups (ceil_div(E, 8) + 1 + ceil_div(S, 8) + 2 * ceil_div(E, 8), 1, 1)
+        threads_per_threadgroup (256, 1, 1)
+        shared_bytes (256)
+
 # A scratch fill round's convert (4.9): the round's listed staging records
 # into their scratch slots, by the registered GGUF -> resident conversion:
 # `list[0]` is the step sequence the list was written for and `list[1]` the
@@ -1441,6 +1457,15 @@ native routed_convert_wide for metal from "metal/routed_convert_wide.metal":
         threadgroups (ceil_div(N, 32) * 2, L, 1)
         threads_per_threadgroup (256, 1, 1)
 
+# CUDA: blocks stride over record items (row_tile × column_window); 256
+# threads per block copy each window to shared memory (volatile reads for
+# system coherence) then convert all tiles in it.
+native routed_convert_wide for cuda from "cuda/routed_convert_wide.cu":
+    launch routed_convert_wide:
+        threadgroups (ceil_div(N, 32) * 2, L, 1)
+        threads_per_threadgroup (256, 1, 1)
+        shared_bytes (16384)
+
 # Expert streaming, the step sequence (4.3): a bank-served step sets it to its
 # own sequence, the host's count of the step (`sequence`, a word the host
 # wrote before submitting the step), before any of its entries read it. A
@@ -1451,6 +1476,11 @@ fn routed_step(step: &mut tensor[1] i32, sequence: &tensor[1] i32):
     step[0] = sequence[0]
 
 native routed_step for metal from "metal/routed_step.metal":
+    launch routed_step:
+        threadgroups (1, 1, 1)
+        threads_per_threadgroup (32, 1, 1)
+
+native routed_step for cuda from "cuda/routed_step.cu":
     launch routed_step:
         threadgroups (1, 1, 1)
         threads_per_threadgroup (32, 1, 1)
@@ -1490,6 +1520,13 @@ native routed_scratch_request for metal from "metal/routed_scratch_request.metal
         threadgroups (1, 1, 1)
         threads_per_threadgroup (1024, 1, 1)
 
+native routed_scratch_request for cuda from "cuda/routed_scratch_request.cu":
+    static (K, E, C)
+    where E <= 1024 and C >= 4
+    launch routed_scratch_request:
+        threadgroups (1, 1, 1)
+        threads_per_threadgroup (1024, 1, 1)
+
 # One round's park: publishes the step's sequence at word `arrival`, then
 # waits for it at word `acknowledgement` or the failure word (the host
 # enforces the one-second bound). The reference has no host and only
@@ -1501,6 +1538,12 @@ fn routed_scratch_wait[C](step: &tensor[1] i32, control: &mut tensor[C] i32,
             control[arrival] = step[0]
 
 native routed_scratch_wait for metal from "metal/routed_scratch_wait.metal":
+    static (C)
+    launch routed_scratch_wait:
+        threadgroups (1, 1, 1)
+        threads_per_threadgroup (32, 1, 1)
+
+native routed_scratch_wait for cuda from "cuda/routed_scratch_wait.cu":
     static (C)
     launch routed_scratch_wait:
         threadgroups (1, 1, 1)
@@ -1564,6 +1607,17 @@ native routed_bank_fill for metal from "metal/routed_bank_fill.metal":
         threads_per_threadgroup (256, 1, 1)
         shared_bytes (16384)
 
+# CUDA: 32 tile-groups × (M * K) choices; each block copies one window of
+# staged rows to __shared__ (16384 bytes) with volatile reads, then converts.
+# blockIdx.x = tile group (0..31), blockIdx.y = choice (0..M*K-1).
+native routed_bank_fill for cuda from "cuda/routed_bank_fill.cu":
+    static (H, K, F, T, C, P)
+    where K <= 32 and C >= 4 + 8 * K and P >= 8 * K
+    launch routed_bank_fill:
+        threadgroups (32, M * K, 1)
+        threads_per_threadgroup (32, 1, 1)
+        shared_bytes (16384)
+
 # Listed records of `source` into `destination`, byte for byte: `list[0]`
 # is the step sequence the list was written for and `list[1]` the count n;
 # entry i < n copies source record list[2 + 2 i] to destination record
@@ -1581,6 +1635,11 @@ fn routed_copy[S, D, E, N, K](source: &tensor[S, N, K] U, list: &tensor[2 + 2 * 
 # Metal: 8 threadgroup rows stride over the list entries; 64 threadgroups
 # of 256 threads stride over each matrix's bytes in 16-byte vectors.
 native routed_copy for metal from "metal/routed_copy.metal":
+    launch routed_copy:
+        threadgroups (64, 8, 1)
+        threads_per_threadgroup (256, 1, 1)
+
+native routed_copy for cuda from "cuda/routed_copy.cu":
     launch routed_copy:
         threadgroups (64, 8, 1)
         threads_per_threadgroup (256, 1, 1)
@@ -1608,6 +1667,11 @@ fn routed_seed_commit[E, X, BANK, C](list: &tensor[2 + 2 * E] i32, step: &tensor
 # Metal: one threadgroup strides over the list, publishing every map entry
 # under a system-scope fence before any commit.
 native routed_seed_commit for metal from "metal/routed_seed_commit.metal":
+    launch routed_seed_commit:
+        threadgroups (1, 1, 1)
+        threads_per_threadgroup (256, 1, 1)
+
+native routed_seed_commit for cuda from "cuda/routed_seed_commit.cu":
     launch routed_seed_commit:
         threadgroups (1, 1, 1)
         threads_per_threadgroup (256, 1, 1)

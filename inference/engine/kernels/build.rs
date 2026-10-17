@@ -60,43 +60,43 @@ const ENTRY_EXCEPTIONS: &[(&str, &[BackendName], &str)] = &[
     ),
     (
         "routed_route_streamed",
-        &[BackendName::Metal],
-        "expert streaming's routing with in-step slot resolution and prefetch hints, published to the host through a qualified system-coherent handshake; Metal is the first backend qualified for it (specs/26-10-11/expert-streaming.md 4.3)",
+        &[BackendName::Metal, BackendName::Cuda],
+        "expert streaming's routing with in-step slot resolve and prefetch hints, published to the host through system-coherent fences (specs/26-10-11/expert-streaming.md 4.3)",
     ),
     (
         "routed_bank_fill",
-        &[BackendName::Metal],
-        "expert streaming's park and conversion of a streamed layer's absent experts into their bank slots, and their commit; Metal first, with `routed_route_streamed`",
+        &[BackendName::Metal, BackendName::Cuda],
+        "expert streaming's park and conversion of a streamed layer's absent experts into their bank slots, and their commit",
     ),
     (
         "routed_scratch_request",
-        &[BackendName::Metal],
-        "expert streaming's scratch fill request, published to the host mid-step through system-coherent memory; Metal first, with `routed_route_streamed`",
+        &[BackendName::Metal, BackendName::Cuda],
+        "expert streaming's scratch fill request, published to the host mid-step through system-coherent memory",
     ),
     (
         "routed_scratch_wait",
-        &[BackendName::Metal],
-        "expert streaming's parked scratch fill rounds; Metal first, with `routed_route_streamed`",
+        &[BackendName::Metal, BackendName::Cuda],
+        "expert streaming's parked scratch fill rounds",
     ),
     (
         "routed_convert_wide",
-        &[BackendName::Metal],
-        "expert streaming's scratch-round convert of the round's staged records into their scratch slots; Metal first, with `routed_route_streamed`",
+        &[BackendName::Metal, BackendName::Cuda],
+        "expert streaming's scratch-round convert of the round's staged records into their scratch slots",
     ),
     (
         "routed_copy",
-        &[BackendName::Metal],
-        "expert streaming's copy of listed records between the bank and the scratch bank; Metal first, with `routed_route_streamed`",
+        &[BackendName::Metal, BackendName::Cuda],
+        "expert streaming's copy of listed records between the bank and the scratch bank",
     ),
     (
         "routed_seed_commit",
-        &[BackendName::Metal],
-        "expert streaming's commit of the experts a scratch fill seeded into the bank, published to the host through system-coherent memory; Metal first, with `routed_route_streamed`",
+        &[BackendName::Metal, BackendName::Cuda],
+        "expert streaming's commit of the experts a scratch fill seeded into the bank, published through system-coherent memory",
     ),
     (
         "routed_step",
-        &[BackendName::Metal],
-        "expert streaming's device step sequence, read by the request, stamp and hint words; Metal first, with `routed_route_streamed`",
+        &[BackendName::Metal, BackendName::Cuda],
+        "expert streaming's device step sequence, read by the request, stamp and hint words",
     ),
 ];
 
@@ -144,23 +144,23 @@ const TREE_EXCEPTIONS: &[(&str, &[BackendName], &str)] = &[
     ),
     (
         "lib/streaming/bind_convert",
-        &[BackendName::Metal],
-        "`routed_convert_wide`'s binding type of the Metal repack templates",
+        &[BackendName::Metal, BackendName::Cuda],
+        "`routed_convert_wide`'s conversion binding: Metal uses repack templates; CUDA uses convert_tile.cuh",
     ),
     (
         "lib/streaming/bind_gate",
-        &[BackendName::Metal],
-        "the gate conversion's binding type of the Metal repack templates in `routed_bank_fill`, which holds three conversions",
+        &[BackendName::Metal, BackendName::Cuda],
+        "the gate conversion binding in `routed_bank_fill`: Metal repack templates; CUDA convert_tile.cuh",
     ),
     (
         "lib/streaming/bind_up",
-        &[BackendName::Metal],
-        "the up conversion's binding type of the Metal repack templates in `routed_bank_fill`",
+        &[BackendName::Metal, BackendName::Cuda],
+        "the up conversion binding in `routed_bank_fill`",
     ),
     (
         "lib/streaming/bind_down",
-        &[BackendName::Metal],
-        "the down conversion's binding type of the Metal repack templates in `routed_bank_fill`",
+        &[BackendName::Metal, BackendName::Cuda],
+        "the down conversion binding in `routed_bank_fill`",
     ),
     (
         "lib/streaming/window",
@@ -169,8 +169,13 @@ const TREE_EXCEPTIONS: &[(&str, &[BackendName], &str)] = &[
     ),
     (
         "lib/streaming/control",
-        &[BackendName::Metal],
-        "expert streaming's system-coherent handshake words and fences, shared by the Metal-only streaming entries",
+        &[BackendName::Metal, BackendName::Cuda],
+        "expert streaming's system-coherent handshake words and fences for the streaming entries",
+    ),
+    (
+        "lib/streaming/convert_tile",
+        &[BackendName::Cuda],
+        "CUDA expert streaming's parameterized tile conversion (gate/up/down), included 3× via bind_gate/up/down.cuh",
     ),
     (
         "lib/repack/repack",
