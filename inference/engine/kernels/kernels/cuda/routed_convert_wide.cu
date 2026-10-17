@@ -63,7 +63,7 @@ extern "C" __global__ void routed_convert_wide(SEISMIC_KERNEL_PARAMS) {
 #if defined(SEISMIC_ELEMENT_U_LAYOUT_PACKET)
     const u64 stored_cols = 0; // unused for packet layout
 #else
-    const u64 stored_cols = (u64)SEISMIC_RESULT_0_ROW_GROUPS * group;
+    const u64 stored_cols = (u64)SEISMIC_DESTINATION_ROW_GROUPS * group;
 #endif
 
     for (u64 item = flat_block; item < total_items; item += flat_blocks) {

@@ -23,8 +23,8 @@
 #define CONV_H(name) CONV_PASTE3(CONV_FUNC, _, name)
 
 // ---- IQ3S grid (guarded: only defined once per TU) ----------------------
-#if defined(CONV_REPACK_IQ3S) && !defined(SEISMIC_IQ3S_GRID_DEFINED)
-#define SEISMIC_IQ3S_GRID_DEFINED 1
+#if defined(CONV_REPACK_IQ3S) && !defined(MAGNITUDE_IQ3S_GRID_DEFINED)
+#define MAGNITUDE_IQ3S_GRID_DEFINED 1
 __constant__ u32 iq3s_grid[512] = {
     0x01010101u, 0x01010103u, 0x01010105u, 0x0101010bu, 0x0101010fu, 0x01010301u, 0x01010303u, 0x01010305u,
     0x01010309u, 0x0101030du, 0x01010501u, 0x01010503u, 0x0101050bu, 0x01010707u, 0x01010901u, 0x01010905u,
