@@ -680,8 +680,11 @@ impl DecodeDemand {
                 FeedForwardProgramSlot::Routed(binding) => {
                     input(&mut step, scope, binding.norm)?;
                     step.launch(weight(WeightKind::Router, binding.router)?.resident_bytes)?;
+                    // A bank weight holds `slots` experts, not `experts`, so
+                    // divide its resident bytes and row count by `slots`.
+                    let expert_divisor = binding.bank.map_or(binding.experts, |b| b.slots);
                     let chosen = |weight: &WeightPlan| {
-                        selected_bytes(weight, binding.experts, binding.selected)
+                        selected_bytes(weight, expert_divisor, binding.selected)
                     };
                     let shared_expansion = [
                         weight(WeightKind::SharedGate, binding.shared_gate)?.resident_bytes,
