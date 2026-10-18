@@ -723,6 +723,14 @@ pub(crate) fn build(
     if let Some(cache) = &manifest.kernel_cache {
         residency.keep_table_rows(cache.join("table-rows"));
     }
+    if backend == BackendName::Cuda && execution_plan.load().expert_bank().is_some() {
+        if let Some(cache) = magnitude_executor::HostExpertCache::new(
+            catalog.as_ref().clone(), reserves,
+            execution_plan.load().host_table_bytes().map_err(internal)?,
+        ).map_err(internal)? {
+            residency.keep_host_experts(cache);
+        }
+    }
     let target_upload = execution_plan
         .load()
         .target_upload_peak_bytes()

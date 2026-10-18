@@ -348,8 +348,9 @@ pub(crate) fn import_target(
             let lender =
                 plan.conveyor.lender.map(|group| residency.bank_arenas(group)).transpose()?;
             let device = residency.device().clone();
+            let host_experts = residency.host_experts();
             crate::streaming::bank::ResidentBank::open(
-                &device, &plan, target, &sublayers, lender,
+                &device, &plan, target, &sublayers, lender, host_experts,
                 &mut || residency.import_checkpoint(),
             )
                 .map(std::sync::Arc::new)

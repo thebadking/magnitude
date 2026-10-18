@@ -558,7 +558,7 @@ impl StreamingRuntime {
                 .retire_step(sequence, |layer, slot| layers[layer].commits.load(slot))
                 .map_err(|e| format!("shared-cache completion: {e:?}"))?
         };
-        invalidate(&mut state, invalid);
+        invalidate(&mut state, &self.source, invalid);
         let mut failed = state.failed_steps.remove(&sequence);
         let mut device_failures = Vec::new();
         for (layer, ports) in state.layers.iter().enumerate() {
@@ -578,6 +578,9 @@ impl StreamingRuntime {
         }
         release_past(&mut state, &self.source);
         if let Some(trace) = state.trace.as_mut().and_then(|steps| steps.remove(&sequence)) {
+            let (cache_hit_bytes, file_read_bytes) = self.source.counters();
+            eprintln!("expert source bank={:p} sequence={sequence} cache_hit_bytes={cache_hit_bytes} file_read_bytes={file_read_bytes}",
+                Arc::as_ptr(&self.source));
             eprintln!(
                 "expert streaming bank={:p} sequence={sequence} requests={} choices={} misses={} staged={} ready={} demand_bytes={} prefetch_bytes={} revived={} host_service_ms={:.3} scratch_requests={} scratch_held={} scratch_misses={}",
                 Arc::as_ptr(&self.source), trace.requests, trace.choices, trace.misses,
@@ -691,21 +694,21 @@ fn advance(state: &mut State, point: Clock, source: &ExpertSource) {
                 .retire_progress(point, |layer, slot| layers[layer].commits.load(slot))
                 .expect("device-published shared-cache progress")
         };
-        invalidate(state, invalid);
+        invalidate(state, source, invalid);
         state.progress = point;
         release_past(state, source);
     }
 }
 
 /// Mappings the directory withdrew: unmap them and fail their steps.
-fn invalidate(state: &mut State, invalid: Vec<(Clock, super::arena::Location)>) {
+fn invalidate(state: &mut State, source: &ExpertSource, invalid: Vec<(Clock, super::arena::Location)>) {
     for (clock, location) in invalid {
         state.failed_steps.insert(clock.sequence);
         state.fetch_failures.entry(clock.sequence).or_insert_with(|| format!(
             "uncommitted cache fill: layer {}, expert {}, slot {}, commit {} (expected {})",
             clock.layer, location.key.expert.0, location.slot,
             state.layers[clock.layer].commits.load(location.slot), clock.sequence));
-        unmap(state, location);
+        unmap(state, source, location);
         state.layers[location.key.layer.0 as usize]
             .control
             .store(FAILURE, clock.sequence);
@@ -713,13 +716,14 @@ fn invalidate(state: &mut State, invalid: Vec<(Clock, super::arena::Location)>) 
 }
 
 /// The bank no longer holds `location`'s expert in its slot.
-fn unmap(state: &mut State, location: super::arena::Location) {
+fn unmap(state: &mut State, source: &ExpertSource, location: super::arena::Location) {
     let layer = &mut state.layers[location.key.layer.0 as usize];
     let expert = location.key.expert.0 as usize;
     if layer.slot_of[expert] == location.slot as i32 {
         layer.slot_of[expert] = -1;
         layer.slot_map.store(expert, -1);
         layer.expert_of[location.slot] = -1;
+        for tensor in layer.stored { source.device_residency(tensor, expert, false); }
     }
 }
 
@@ -728,7 +732,7 @@ fn unmap(state: &mut State, location: super::arena::Location) {
 /// fills one, when the conveyor waits for a later round. The device runs
 /// steps in order and is parked at the prompt's request, so no step reads
 /// an evicted expert after its map entry is cleared.
-fn borrow(state: &mut State) -> bool {
+fn borrow(state: &mut State, source: &ExpertSource) -> bool {
     let Some(loan) = &state.loan else {
         return true;
     };
@@ -740,7 +744,7 @@ fn borrow(state: &mut State) -> bool {
         return false;
     };
     for location in evicted {
-        unmap(state, location);
+        unmap(state, source, location);
     }
     state.loan.as_mut().expect("a loan").lent = true;
     true
@@ -1120,10 +1124,7 @@ fn serve(state: &mut State, source: &ExpertSource, layer: usize, sequence: i32) 
         }
     }
     for victim in &resolution.evicted {
-        let owner = &mut state.layers[victim.key.layer.0 as usize];
-        owner.slot_of[victim.key.expert.0 as usize] = -1;
-        owner.slot_map.store(victim.key.expert.0 as usize, -1);
-        owner.expert_of[victim.slot] = -1;
+        unmap(state, source, *victim);
     }
     let mut pending = Vec::new();
     for choice in &resolution.choices {
@@ -1137,6 +1138,7 @@ fn serve(state: &mut State, source: &ExpertSource, layer: usize, sequence: i32) 
         state.layers[layer].slot_of[expert as usize] = slot as i32;
         state.layers[layer].expert_of[slot] = expert;
         state.layers[layer].stamps.store(slot, sequence);
+        for tensor in state.layers[layer].stored { source.device_residency(tensor, expert as usize, true); }
         match state.staged.get(&(layer, expert)) {
             Some(staged) => {
                 if staged.ticket.priority() == Priority::Prefetch {
@@ -1296,7 +1298,7 @@ fn serve(state: &mut State, source: &ExpertSource, layer: usize, sequence: i32) 
 /// those the bank lacks. To make room within the share it evicts the layer's
 /// least recently read other experts, never the step's `hits`, which the fill
 /// copies; a short prompt evicts no more than its seeds need.
-fn keep_routed(state: &mut State, layer: usize, routed: &[u32], hits: &[i32]) -> Vec<i32> {
+fn keep_routed(state: &mut State, source: &ExpertSource, layer: usize, routed: &[u32], hits: &[i32]) -> Vec<i32> {
     let share = state
         .directory
         .share(layer)
@@ -1342,7 +1344,7 @@ fn keep_routed(state: &mut State, layer: usize, routed: &[u32], hits: &[i32]) ->
                 .discard(layer, expert)
                 .expect("a streamed layer of the directory");
             if let Some(location) = discarded {
-                unmap(state, location);
+                unmap(state, source, location);
             }
         }
     }
@@ -1397,7 +1399,7 @@ fn serve_scratch(state: &mut State, source: &ExpertSource, layer: usize, sequenc
         .map(|(&held, &flag)| held + flag.max(0) as u32)
         .collect::<Vec<_>>();
     let seeded = if state.seed_steps.contains(&(sequence, layer)) {
-        keep_routed(state, layer, &routed, &hits)
+        keep_routed(state, source, layer, &routed, &hits)
     } else {
         Vec::new()
     };
@@ -1419,10 +1421,7 @@ fn serve_scratch(state: &mut State, source: &ExpertSource, layer: usize, sequenc
             .begin(clock, &request)
             .expect("a scratch request within its bank group");
         for victim in &resolution.evicted {
-            let owner = &mut state.layers[victim.key.layer.0 as usize];
-            owner.slot_of[victim.key.expert.0 as usize] = -1;
-            owner.slot_map.store(victim.key.expert.0 as usize, -1);
-            owner.expert_of[victim.slot] = -1;
+            unmap(state, source, *victim);
         }
         for (&expert, choice) in request.iter().zip(&resolution.choices) {
             let slot = choice.location.slot;
@@ -1434,6 +1433,7 @@ fn serve_scratch(state: &mut State, source: &ExpertSource, layer: usize, sequenc
             state.layers[layer].slot_of[expert as usize] = slot as i32;
             state.layers[layer].expert_of[slot] = expert;
             state.layers[layer].stamps.store(slot, sequence);
+            for tensor in state.layers[layer].stored { source.device_residency(tensor, expert as usize, true); }
             seeds.push((expert as u32, slot));
         }
         state
@@ -1558,7 +1558,7 @@ fn serve_scratch(state: &mut State, source: &ExpertSource, layer: usize, sequenc
                 steps.entry(sequence).or_default().source_bytes[0] +=
                     ranges.iter().map(|range| range.bytes as u64).sum::<u64>();
             }
-            let ticket = source.submit(ranges, Priority::Demand);
+            let ticket = source.submit_bulk(ranges, Priority::Demand);
             for expert in fetched {
                 round_tickets.insert(expert, Arc::clone(&ticket));
             }
@@ -1653,7 +1653,7 @@ fn serve_scratch(state: &mut State, source: &ExpertSource, layer: usize, sequenc
 /// kept until the group's last step is past that layer. It reads into bank
 /// records the prompt borrows, when a bank group lends them.
 fn convey(state: &mut State, source: &ExpertSource, layer: usize, sequence: i32) {
-    if layer + 1 < state.layers.len() && borrow(state) {
+    if layer + 1 < state.layers.len() && borrow(state, source) {
         let last = state.last_of_group(sequence);
         for expert in 0..state.scratch.experts as i32 {
             prefetch(state, source, layer + 1, expert, last, Window::Conveyor);
@@ -1798,7 +1798,7 @@ mod tests {
         .unwrap();
         let mut state = runtime.state.lock().unwrap();
         assert_eq!(take_record(&mut state, 0, Shelf::Conveyor), None, "nothing borrowed");
-        assert!(borrow(&mut state));
+        assert!(borrow(&mut state, &runtime.source));
         assert_eq!(state.directory.share(0), Ok(6));
         let records: [u32; KINDS] =
             std::array::from_fn(|pool| take_record(&mut state, pool, Shelf::Conveyor).unwrap());

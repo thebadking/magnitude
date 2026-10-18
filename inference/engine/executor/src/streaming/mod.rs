@@ -6,6 +6,7 @@ pub(crate) mod bank;
 pub(crate) mod layout;
 pub(crate) mod runtime;
 pub(crate) mod source;
+pub(crate) mod cache;
 pub(crate) mod words;
 
 pub(crate) mod shared_bank;

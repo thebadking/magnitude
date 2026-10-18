@@ -17,6 +17,8 @@ use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Instant;
+use std::sync::atomic::{AtomicU64, Ordering};
+use super::cache::{Access, HostExpertCache};
 
 /// Persistent workers. More did not raise bandwidth on any machine measured
 /// (theory §2).
@@ -120,13 +122,41 @@ fn read_range(file: &File, range: &Range) -> std::io::Result<()> {
 }
 
 /// The model file, opened with the platform's expert-read policy.
-pub(crate) struct ModelFile(File);
+pub(crate) struct ModelFile(File, Option<(Arc<HostExpertCache>, usize)>);
 
 impl ModelFile {
     pub(crate) fn open(path: &Path) -> Result<Self, String> {
         let file = File::open(path).map_err(|error| format!("{}: {error}", path.display()))?;
         configure_reads(&file).map_err(|error| format!("{}: {error}", path.display()))?;
-        Ok(Self(file))
+        Ok(Self(file, None))
+    }
+
+    pub(crate) fn with_cache(mut self, path: &Path, cache: Arc<HostExpertCache>) -> Self {
+        let file = cache.register_file(path);
+        self.1 = Some((cache, file)); self
+    }
+
+    /// Successful explicit retention replaces, rather than duplicates, the
+    /// reclaimable file cache. Only whole pages inside this record are hinted;
+    /// adjacent records and active mapped readers keep their own lifetimes.
+    fn release_cached_file_pages(&self, range: &Range) {
+        #[cfg(target_os = "linux")]
+        {
+            static PAGE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+            let page = *PAGE.get_or_init(|| {
+                let size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+                u64::try_from(size).unwrap_or(4096).max(1)
+            });
+            let start = range.offset.div_ceil(page) * page;
+            let end = (range.offset + range.bytes as u64) / page * page;
+            if end > start && end <= i64::MAX as u64 {
+                // A cache hint cannot fail a completed expert fetch.
+                unsafe { libc::posix_fadvise(self.0.as_raw_fd(), start as i64,
+                    (end - start) as i64, libc::POSIX_FADV_DONTNEED); }
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = range;
     }
 }
 
@@ -294,6 +324,7 @@ impl Ticket {
 struct Job {
     ticket: Arc<Ticket>,
     range: Range,
+    access: Access,
 }
 
 struct Queues {
@@ -306,6 +337,8 @@ struct Shared {
     files: Vec<ModelFile>,
     queues: Mutex<Queues>,
     work: Condvar,
+    cache_hit_bytes: AtomicU64,
+    file_read_bytes: AtomicU64,
 }
 
 pub(crate) struct ExpertSource {
@@ -323,6 +356,8 @@ impl ExpertSource {
                 stopping: false,
             }),
             work: Condvar::new(),
+            cache_hit_bytes: AtomicU64::new(0),
+            file_read_bytes: AtomicU64::new(0),
         });
         let workers = (0..WORKERS)
             .map(|index| {
@@ -338,6 +373,25 @@ impl ExpertSource {
 
     /// Queue a record's ranges.
     pub(crate) fn submit(&self, ranges: Vec<Range>, priority: Priority) -> Arc<Ticket> {
+        self.submit_with_access(ranges, priority, if priority == Priority::Demand { Access::Demand } else { Access::Bulk })
+    }
+
+    pub(crate) fn submit_bulk(&self, ranges: Vec<Range>, priority: Priority) -> Arc<Ticket> {
+        self.submit_with_access(ranges, priority, Access::Bulk)
+    }
+
+    pub(crate) fn counters(&self) -> (u64, u64) {
+        (self.shared.cache_hit_bytes.load(Ordering::Relaxed), self.shared.file_read_bytes.load(Ordering::Relaxed))
+    }
+
+    pub(crate) fn device_residency(&self, tensor: super::runtime::StoredTensor, expert: usize, resident: bool) {
+        if let Some((cache, file)) = &self.shared.files[tensor.file].1 {
+            cache.device_residency(*file, tensor.base + expert as u64 * tensor.bytes,
+                tensor.bytes as usize, resident);
+        }
+    }
+
+    fn submit_with_access(&self, ranges: Vec<Range>, priority: Priority, access: Access) -> Arc<Ticket> {
         let ticket = Arc::new(Ticket {
             state: Mutex::new(TicketState {
                 queued: ranges.len(),
@@ -359,6 +413,7 @@ impl ExpertSource {
             queue.push_back(Job {
                 ticket: Arc::clone(&ticket),
                 range,
+                access,
             });
         }
         drop(queues);
@@ -433,10 +488,34 @@ fn work(shared: &Shared) {
                 queues = shared.work.wait(queues).expect("source queues");
             }
         };
-        #[cfg(target_os = "macos")]
-        let result = read_range(&shared.files[job.range.file].0, &job.range, &mut buffer);
-        #[cfg(not(target_os = "macos"))]
-        let result = read_range(&shared.files[job.range.file].0, &job.range);
+        let file = &shared.files[job.range.file];
+        let cached = file.1.as_ref().and_then(|(cache, id)|
+            cache.get(*id, job.range.offset, job.range.bytes, job.access));
+        let result = if let Some(record) = cached {
+            // The ticket still exclusively owns the destination. The Arc
+            // keeps these immutable bytes alive across eviction and copying.
+            let destination = unsafe { std::slice::from_raw_parts_mut(job.range.destination, job.range.bytes) };
+            destination.copy_from_slice(record.bytes());
+            shared.cache_hit_bytes.fetch_add(job.range.bytes as u64, Ordering::Relaxed);
+            Ok(())
+        } else {
+            #[cfg(target_os = "macos")]
+            let result = read_range(&file.0, &job.range, &mut buffer);
+            #[cfg(not(target_os = "macos"))]
+            let result = read_range(&file.0, &job.range);
+            if result.is_ok() {
+                shared.file_read_bytes.fetch_add(job.range.bytes as u64, Ordering::Relaxed);
+                if let Some((cache, id)) = &file.1 {
+                    // Retention finishes before the ticket publishes: its
+                    // staging destination cannot be reused during this copy.
+                    let bytes = unsafe { std::slice::from_raw_parts(job.range.destination, job.range.bytes) };
+                    if cache.remember(*id, job.range.offset, bytes, job.access) {
+                        file.release_cached_file_pages(&job.range);
+                    }
+                }
+            }
+            result
+        };
         let mut state = job.ticket.state.lock().expect("ticket lock");
         state.running -= 1;
         state.progress_at = Instant::now();

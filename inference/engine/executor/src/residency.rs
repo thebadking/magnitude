@@ -419,6 +419,7 @@ struct ImportProgress {
 /// Sole cache and importer for one planned device. Resident components are
 /// assembled from this store before their numerical programs are bound.
 pub struct ResidencyStore {
+    host_experts: Option<Arc<crate::HostExpertCache>>,
     shared_bank: Option<crate::streaming::shared_bank::SharedBankStore>,
     device: Rc<Device>,
     programs: Rc<crate::native::AttestedPrograms>,
@@ -483,12 +484,22 @@ impl ResidencyStore {
             .map(crate::streaming::shared_bank::SharedBankStore::new)
             .transpose().map_err(invalid)?;
         Ok(Self {
+            host_experts: None,
             shared_bank, device, programs, load, path, import_peak_bytes, owned_blocks, domain,
             resident: HashMap::new(),
             mapped_import: MappedImportReport::default(),
             import_progress: None,
             kept_table_rows: None,
         })
+    }
+
+    /// Share the target's host source cache across independently placed owners.
+    pub fn keep_host_experts(&mut self, cache: Arc<crate::HostExpertCache>) {
+        self.host_experts = Some(cache);
+    }
+
+    pub(crate) fn host_experts(&self) -> Option<Arc<crate::HostExpertCache>> {
+        self.host_experts.clone()
     }
 
     /// Cache a completed import, counting it toward the import in progress.

@@ -46,6 +46,8 @@ pub trait ProgramFamily: 'static {
     fn peer_weight_bytes(&self) -> Result<u64, &'static str> { Ok(0) }
     fn target_bank_source_bytes(&self) -> u64 { 0 }
     fn peer_bank_source_bytes(&self) -> u64 { 0 }
+    fn host_expert_cache_bytes(&self) -> u64 { 0 }
+    fn reclaim_host_expert_cache(&self) {}
     fn peer_program_bytes(&self) -> Result<u64, &'static str> { Ok(0) }
     fn peer_constant_bytes(&self) -> Result<u64, &'static str> { Ok(0) }
 
@@ -220,6 +222,17 @@ impl ProgramFamily for NativeFamily {
 
     fn target_bank_source_bytes(&self) -> u64 {
         self.resident.bank.as_ref().map_or(0, |bank| bank.source_control_bytes)
+    }
+
+    fn host_expert_cache_bytes(&self) -> u64 {
+        self.resident.bank.as_ref().and_then(|bank| bank.host_experts.as_ref())
+            .map_or(0, |cache| cache.allocated_bytes())
+    }
+
+    fn reclaim_host_expert_cache(&self) {
+        if let Some(cache) = self.resident.bank.as_ref().and_then(|bank| bank.host_experts.as_ref()) {
+            cache.reclaim_if_needed();
+        }
     }
 
     fn peer_bank_source_bytes(&self) -> u64 {

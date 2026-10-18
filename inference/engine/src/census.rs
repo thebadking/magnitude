@@ -60,7 +60,8 @@ impl MemoryDomain {
 /// Holdings in host RAM beside the device's allocation domain.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct HostAllocationBytes {
-    /// Host-resident gathered tables, which Seismic does not charge.
+    /// Host-resident gathered tables and compressed expert cache storage,
+    /// which Seismic does not charge.
     pub tables: u64,
     /// Host-shared model storage on a dedicated device whose
     /// shared storage is host RAM (`platform::shared_role`): Seismic charges
@@ -76,7 +77,8 @@ impl AllocationCensus {
         let mut domains: Vec<DomainAllocation> = Vec::new();
         for owner in owners {
             let local = Self::classify_one(&owner.charge, HostAllocationBytes {
-                tables: owner.host_tables, shared_weights: owner.host_shared_weights,
+                tables: owner.host_tables.checked_add(owner.host_expert_cache)
+                    .ok_or("host model census overflow")?, shared_weights: owner.host_shared_weights,
                 uploads: owner.host_shared_uploads,
             }, MemoryDomain::of(owner.device, owner.pool_kind))?;
             for allocation in local.domains {

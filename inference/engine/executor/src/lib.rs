@@ -35,6 +35,7 @@ pub mod platform;
 mod residency;
 mod resident_weights;
 mod streaming;
+pub use streaming::cache::HostExpertCache;
 mod resources;
 
 pub use completion::{Completed, Completion, CompletionWake};

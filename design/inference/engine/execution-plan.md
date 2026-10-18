@@ -835,6 +835,30 @@ A parent cache's capacities or lender cannot implicitly become another GPU's
 allocation authority. Physical admission must account for each resulting cache,
 including any additional staging or scratch allocation introduced by the split.
 Each physical cache needs its own directory, watcher and completion clock.
+Dedicated CUDA owners of one loaded target may opt into a shared host cache of
+immutable compressed expert records. Its key includes the source file and
+complete record geometry; cached bytes use the same staging and conversion
+protocol as file reads. The default uses ordinary platform file service without
+creating this cache. Each routed layer receives a proportional byte share.
+Bulk prompt reads may use cached records but cannot populate, evict or promote
+the decode working set. GPU mappings provide replacement hints: demand reads
+prefer unleased records already available on a GPU, then other records within
+their layer. Each class prefers reusable storage, then least recent demand.
+A record being installed on a GPU cannot
+displace one absent from it. These hints never authorize reading device bytes.
+Read leases retain bytes through copying despite eviction; replacement reuses
+unleased storage when it fits, without increasing its physical charge.
+One host-pool heap claims each new allocation from a fresh observation,
+using the ordinary reserve and distress policy. Automatic capacity takes three
+quarters of initially spare host headroom, after protected gathered tables, and
+never exceeds registered source bytes. Explicit automatic selection or a byte
+limit remains bounded by the same live claims. The diagnostic selection
+`MAGNITUDE_HOST_EXPERT_CACHE_BYTES=auto` enables automatic capacity; a positive
+integer sets a byte cap, while unset or zero disables the cache.
+Failed optional retention falls back to file service. Reclaim or Blind releases
+unleased cached payloads; their census belongs once to host model storage,
+independently of GPU weight ledgers. Linux successful retention may discard only
+the complete file-cache pages inside that record to avoid duplicate retention.
 Expert file reads follow the host platform's I/O policy. macOS uncached reads
 use a block-aligned cover buffer before copying the exact record into staging.
 The current Linux buffered path uses random-access advice and reads the exact

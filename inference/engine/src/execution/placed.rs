@@ -66,6 +66,7 @@ pub(super) fn build_placed(
         &capacities,
     )
     .map_err(internal)?;
+    let protected_host_bytes = source.host_table_bytes().map_err(internal)?;
     let mut targets = Vec::new();
     let mut readouts = Vec::new();
     for owner in &mut prepared {
@@ -138,6 +139,10 @@ pub(super) fn build_placed(
                 .map_err(internal)?
         });
     }
+    let host_experts = if prepared[0].backend == BackendName::Cuda {
+        magnitude_executor::HostExpertCache::new(catalog.as_ref().clone(), manifest.reserves,
+            protected_host_bytes).map_err(internal)?
+    } else { None };
     let mut owners = Vec::new();
     for (((owner, target), readout), plan) in
         prepared.into_iter().zip(targets).zip(readouts).zip(plans)
@@ -202,6 +207,7 @@ pub(super) fn build_placed(
         let mut residency =
             ResidencyStore::new_range(device.clone(), programs.clone(), &range, identity)
                 .map_err(|error| internal(error.to_string()))?;
+        if let Some(cache) = &host_experts { residency.keep_host_experts(cache.clone()); }
         if let Some(cache) = &manifest.kernel_cache {
             residency.keep_table_rows(cache.join("table-rows"));
         }

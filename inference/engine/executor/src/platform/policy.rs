@@ -598,6 +598,22 @@ fn domain_readings(
     ])
 }
 
+/// The host pool's ordinary live claim authority, also used by host-only
+/// model caches. It shares the catalog's displacement history with devices.
+pub fn observe_host(
+    catalog: &DeviceCatalog,
+    reserves: &MemoryReserves,
+) -> Result<DomainReading, MemoryPolicyError> {
+    let host = catalog.host_memory_status().map_err(MemoryPolicyError::Observation)?;
+    let topology = catalog.topology();
+    let pool = topology.host_pool();
+    let headroom = host.limits.iter().map(|limit| limit.remaining_bytes())
+        .fold(host.headroom.bytes, u64::min);
+    Ok(DomainReading::new(DomainRole::Allocation, pool.id, headroom,
+        MemoryConstraint::HostRam, reserves.for_domain(MemoryPoolKind::HostRam, pool.capacity_bytes),
+        host_distress(&host)))
+}
+
 /// Fresh readings of every domain a load on `device` uses: the allocation
 /// domain first, then host RAM for staging when the device is dedicated.
 /// Any failure is the Blind case: missing observations never authorize

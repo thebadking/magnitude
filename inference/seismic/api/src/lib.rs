@@ -193,13 +193,14 @@ use std::sync::Arc;
 
 /// The one device inventory: host RAM and backend devices, their memory
 /// pools and identities, scoped observations, and device opening.
+#[derive(Clone)]
 pub struct DeviceCatalog {
-    inner: seismic_runtime::devices::Catalog,
+    inner: Arc<seismic_runtime::devices::Catalog>,
 }
 
 impl DeviceCatalog {
     pub fn discover() -> Result<Self, DiscoveryError> {
-        seismic_runtime::devices::Catalog::discover().map(|inner| Self { inner })
+        seismic_runtime::devices::Catalog::discover().map(|inner| Self { inner: Arc::new(inner) })
     }
     /// The current immutable inventory snapshot.
     pub fn topology(&self) -> Arc<DeviceTopology> {

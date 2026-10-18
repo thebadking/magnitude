@@ -30,6 +30,8 @@ pub struct DeviceMemoryCharge {
     pub allocation_pool: seismic::MemoryPoolId,
     pub pool_kind: seismic::MemoryPoolKind,
     pub host_tables: u64,
+    /// The shared host source cache, attributed once to the first owner.
+    pub host_expert_cache: u64,
     pub host_shared_weights: u64,
     pub host_shared_uploads: u64,
     pub charge: MemoryChargeReconciliation,
@@ -130,6 +132,7 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
                 device: heap.device().info().selector,
                 allocation_pool, pool_kind,
                 host_tables: heap.host_table_bytes(), host_shared_weights, host_shared_uploads,
+                host_expert_cache: if peer_owner { 0 } else { self.family.host_expert_cache_bytes() },
                 charge: self.reconcile_device_charge(retained, peer_owner)?,
             });
         }
@@ -576,6 +579,7 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
     /// allocation ceiling: `Reclaim` while any domain's headroom is at or
     /// below its planning reserve, `Blind` when an observation fails.
     pub fn probe_memory(&mut self) -> Result<(), DomainError> {
+        self.family.reclaim_host_expert_cache();
         if let Some(peer) = &self.peer { peer.memory.borrow_mut().check(0, 0)?; }
         self.decide_device_growth(0, 0)
     }

@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 
 /// The resident side of a streamed target: every bank starts empty (rule 5).
 pub(crate) struct ResidentBank {
+    pub host_experts: Option<Arc<crate::HostExpertCache>>,
     pub tensors: BankTensors,
     /// Admitted source/control storage actually held by this opened bank.
     pub source_control_bytes: u64,
@@ -75,6 +76,7 @@ impl ResidentBank {
         target: &GgufArtifact,
         sublayers: &ResidentRoles,
         lender: Option<[seismic::Tensor; 3]>,
+        host_experts: Option<Arc<crate::HostExpertCache>>,
         checkpoint: &mut dyn FnMut() -> Result<(), crate::ResidencyError>,
     ) -> Result<Self, crate::ResidencyError> {
         let shared = plan
@@ -111,6 +113,9 @@ impl ResidentBank {
                         plan.experts, planned.stored_bytes
                     )
                     .into());
+                }
+                if let Some(cache) = &host_experts {
+                    cache.register_tensor(file.path(), offset, planned.stored_bytes, plan.experts, layer.scope)?;
                 }
                 let file = match paths.iter().position(|path| path == file.path()) {
                     Some(index) => index,
@@ -181,7 +186,10 @@ impl ResidentBank {
         }
         let files = paths
             .iter()
-            .map(|path| ModelFile::open(path))
+            .map(|path| ModelFile::open(path).map(|file| match &host_experts {
+                Some(cache) => file.with_cache(path, cache.clone()),
+                None => file,
+            }))
             .collect::<Result<Vec<_>, _>>()?;
         let source = ExpertSource::new(files)?;
         let words = |tensor: &seismic::Tensor| SharedWords::new(tensor.clone());
@@ -221,6 +229,7 @@ impl ResidentBank {
         let runtime =
             StreamingRuntime::new(layers, scratch, heartbeat, pools, source, directory, loan)?;
         Ok(Self {
+            host_experts,
             tensors,
             source_control_bytes: plan.shared_bytes()?.checked_add(plan.device_staging_bytes()?)
                 .ok_or("bank source/control bytes overflow")?,

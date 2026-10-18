@@ -101,6 +101,16 @@ so its reserve is a small margin over the measured residual. The values are defi
 policy the host passes to the engine; there is no other reserve. Host distress (Bands) is the only
 other condition that moves a domain's band.
 
+An optional compressed expert cache owns one host-pool heap shared by its GPU
+owners. Each new allocation is a surplus claim from the ordinary fresh
+host observation, with gathered-table holdings protected. Anonymous cached bytes
+are already absent from observed headroom and are never subtracted a second
+time. Read leases retain their charge until copying and physical release end.
+Replacing unleased contents in existing capacity preserves that charge and
+needs no new growth claim; it cannot allocate beyond the reused capacity.
+The host model census reports this cache once, separately from device weight
+charges; pressure probes release its unleased records before refusing growth.
+
 The device reserve is sized by measurement on the smallest supported devices. With every byte of
 the engine's device usage charged or held (Standing and claims), what remains is the residual: the
 capacity less observed headroom less `held`. On an 8 GiB A10-8Q vGPU (CUDA, WDDM) it stayed within
