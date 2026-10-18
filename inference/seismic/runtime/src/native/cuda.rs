@@ -6,8 +6,9 @@
 //! arguments are the plans' sealed words and geometry plus the addresses of
 //! the buffers the runs bind, so the device keeps graphs keyed by the plans
 //! and those addresses; a submission binding the same storage as an earlier
-//! one replays that submission's graph, and one binding new storage forms a
-//! new graph. Per-step values never live in arguments: host-written inputs
+//! one replays that submission's graph. New graphs are formed only with the
+//! context idle; a busy miss submits the same launches individually.
+//! Per-step values never live in arguments: host-written inputs
 //! are written into each run's upload region, which the graph addresses.
 //!
 //! Standalone calls, and every launch of a launch-detail trace (timed one by
@@ -70,20 +71,25 @@ pub(super) fn encode(
                         let mut key = plans.clone();
                         key.extend(&addresses);
                         key.extend([calls.start as u64, calls.end as u64]);
-                        replays.replay(
+                        let replayed = replays.replay(
                             key,
                             retained,
                             || {
-                                let mut builder = DirectGraphBuilder::new(device)
-                                    .map_err(CallError::Execution)?;
-                                each_launch(list, calls.clone(), |launch| match launch {
-                                    Some(launch) => builder.launch(launch),
-                                    None => Ok(()),
-                                })?;
-                                builder.instantiate().map_err(CallError::Execution)
+                                DirectGraphBuilder::record_when_idle(device, |builder| {
+                                    each_launch(list, calls.clone(), |launch| match launch {
+                                        Some(launch) => builder.launch(launch),
+                                        None => Ok(()),
+                                    })
+                                }).map_err(CallError::Execution)
                             },
                             |graph| batch.replay(graph).map_err(CallError::Execution),
                         )?;
+                        if !replayed {
+                            each_launch(list, calls.clone(), |launch| match launch {
+                                Some(launch) => batch.launch(launch),
+                                None => { batch.skip(); Ok(()) }
+                            }).map_err(CallError::Execution)?;
+                        }
                     }
                     timelines(&mut batch, list.timelines(*boundary))?;
                 }
@@ -98,7 +104,7 @@ pub(super) fn encode(
                             batch.skip();
                             Ok(())
                         }
-                    })?;
+                    }).map_err(CallError::Execution)?;
                     timelines(&mut batch, list.timelines(*boundary))?;
                 }
             }
@@ -148,7 +154,7 @@ fn each_launch(
     list: &impl DispatchList,
     calls: Range<usize>,
     mut visit: impl FnMut(Option<&DirectLaunch<'_>>) -> Result<(), ExecutionError>,
-) -> Result<(), CallError> {
+) -> Result<(), ExecutionError> {
     let mut buffers = Vec::new();
     let mut typed = Vec::new();
     for index in calls {
@@ -176,7 +182,7 @@ fn each_launch(
                 block: launch.threads,
                 shared_bytes: launch.shared_bytes,
             });
-            visit(launch.as_ref()).map_err(CallError::Execution)?;
+            visit(launch.as_ref())?;
         }
     }
     Ok(())

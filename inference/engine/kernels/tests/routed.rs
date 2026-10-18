@@ -5238,3 +5238,298 @@ fn metal_step_sets_the_steps_own_sequence() {
         assert_eq!(read_i32(&step), [sequence]);
     }
 }
+
+/// Streaming must consume the same input form as the resident router, including
+/// already normalized hyperconnection partials and distinct decode rows.
+#[test]
+fn cuda_streamed_route_input_forms() {
+    let bits = |values: &[f32]| values.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+    let catalog = seismic::DeviceCatalog::discover().unwrap();
+    let Ok(device) = catalog.open_backend(seismic::BackendName::Cuda) else {
+        return;
+    };
+    let (m, h, e, k, s, bank) = (3u64, 64u64, 32u64, 4u64, 32u64, 32u64);
+    let activation = seismic::Element::bf16();
+    let weight = seismic::Element::f32();
+    let router_values = (0..e * h)
+        .map(|i| ((i * 7 % 37) as f32 - 18.0) / 32.0)
+        .collect::<Vec<_>>();
+    let router = f32_tensor(&device, &[e, h], &router_values);
+    let shared_router = f32_tensor(&device, &[h], &vec![0.125; h as usize]);
+    let shared_weight = element(&device, "q8g32s");
+    let packed_shared = |scale: u16| {
+        let mut bytes = Vec::new();
+        for _ in 0..s * h / 32 {
+            bytes.extend_from_slice(&scale.to_le_bytes());
+            bytes.extend_from_slice(&[1; 32]);
+        }
+        let stored = shared_weight
+            .repack_host(
+                seismic::Element::named("gguf_q8_0").unwrap(),
+                &[s, h],
+                &bytes,
+            )
+            .unwrap();
+        seismic::Tensor::from_host(&device, shared_weight, &[s, h], &stored).unwrap()
+    };
+    let shared_gate = packed_shared(0x2c00);
+    let shared_up = packed_shared(0x3000);
+    let slot_map = i32_tensor(&device, &[e], &(0..e as i32).collect::<Vec<_>>());
+    let step = i32_tensor(&device, &[1], &[7]);
+    for parts in [1u64, 4] {
+        let nm = if parts == 1 { h } else { 0 };
+        let norm = f32_tensor(&device, &[nm], &vec![1.0; nm as usize]);
+        let values = (0..m * parts * h)
+            .map(|i| ((i * 13 % 43) as f32 - 21.0) / 64.0)
+            .collect::<Vec<_>>();
+        let residual = f32_tensor(&device, &[m, parts * h], &values);
+        let statics = [
+            ("H", h),
+            ("E", e),
+            ("K", k),
+            ("S", s),
+            ("PT", parts),
+            ("NM", nm),
+        ];
+        let mut routes = i32_tensor(&device, &[m, k], &vec![0; (m * k) as usize]);
+        let mut scores = f32_tensor(&device, &[m, k], &vec![0.0; (m * k) as usize]);
+        let resident = routed_route::native_for_device_with(
+            &device,
+            routed_route::Elements {
+                NW: weight,
+                RW: weight,
+                A: activation,
+            },
+            &specialize(
+                &statics
+                    .iter()
+                    .copied()
+                    .filter(|(name, _)| *name != "S")
+                    .collect::<Vec<_>>(),
+                &[("SIMDGROUPS", 8), ("SPLIT", 8)],
+            ),
+        )
+        .unwrap()
+        .call(routed_route::Args {
+            residual: &residual,
+            norm: &norm,
+            router: &router,
+            shared_router: &shared_router,
+            routes: &mut routes,
+            scores: &mut scores,
+            eps: 1e-6,
+            normalize: 1,
+        })
+        .unwrap();
+        let expected_product = read_bf16(&resident.r0)
+            .chunks(h as usize)
+            .flat_map(|row| {
+                let sum: f32 = row.iter().sum();
+                let gate = sum * 0.0625;
+                let up = sum * 0.125;
+                vec![(gate / (1.0 + (-gate).exp())) * up; s as usize]
+            })
+            .collect::<Vec<_>>();
+        let expected_routes = read_i32(&routes);
+        let expected_scores = read_f32(&scores);
+        let control_words = 4 + 8 * k;
+        let ring_words = 2 + 8 * k;
+        let mut all_statics = statics.to_vec();
+        all_statics.extend([("BANK", bank), ("C", control_words), ("RING", ring_words)]);
+        let streamed = routed_route_streamed::native_for_device_with(
+            &device,
+            routed_route_streamed::Elements {
+                NW: weight,
+                RW: weight,
+                SGW: shared_weight,
+                SUW: shared_weight,
+                A: activation,
+            },
+            &specialize(&all_statics, &[]),
+        )
+        .unwrap();
+        for ahead in [0, 2] {
+            let mut stamps = i32_tensor(&device, &[bank], &vec![0; bank as usize]);
+            let mut control =
+                i32_tensor(&device, &[control_words], &vec![0; control_words as usize]);
+            let mut near_ring = i32_tensor(&device, &[ring_words], &vec![0; ring_words as usize]);
+            let mut far_ring = i32_tensor(&device, &[ring_words], &vec![0; ring_words as usize]);
+            let result = streamed
+                .call(routed_route_streamed::Args {
+                    residual: &residual,
+                    norm: &norm,
+                    router: &router,
+                    shared_router: &shared_router,
+                    shared_gate: &shared_gate,
+                    shared_up: &shared_up,
+                    routes: &mut routes,
+                    scores: &mut scores,
+                    slot_map: &slot_map,
+                    stamps: &mut stamps,
+                    step: &step,
+                    control: &mut control,
+                    near_norm: &norm,
+                    near_router: &router,
+                    near_map: &slot_map,
+                    far_norm: &norm,
+                    far_router: &router,
+                    far_map: &slot_map,
+                    near_ring: &mut near_ring,
+                    far_ring: &mut far_ring,
+                    eps: 1e-6,
+                    normalize: 1,
+                    ahead,
+                })
+                .unwrap();
+            assert_eq!(
+                read_i32(&routes),
+                expected_routes,
+                "parts {parts} ahead {ahead}"
+            );
+            assert_near("scores", &read_f32(&scores), &expected_scores, 1e-6, 1e-5);
+            assert_eq!(
+                bits(&read_bf16(&result.r0)),
+                bits(&read_bf16(&resident.r0)),
+                "parts {parts} input"
+            );
+            assert_near(
+                "coefficient",
+                &read_f32(&result.r1),
+                &read_f32(&resident.r1),
+                1e-6,
+                1e-5,
+            );
+            assert_near(
+                "shared product",
+                &read_bf16(&result.r2),
+                &expected_product,
+                1e-3,
+                1e-2,
+            );
+            assert_eq!(read_i32(&result.r3), expected_routes);
+            assert!(read_i32(&control).iter().all(|&value| value == 0));
+            if ahead != 0 {
+                assert_eq!(&read_i32(&near_ring)[..2], &[7, 0]);
+                assert_eq!(&read_i32(&far_ring)[..2], &[7, 0]);
+            }
+        }
+    }
+}
+
+#[test]
+fn cuda_bank_fill_matches_import_across_windows() {
+    let catalog = seismic::DeviceCatalog::discover().unwrap();
+    let Ok(device) = catalog.open_backend(seismic::BackendName::Cuda) else {
+        return;
+    };
+    let (h, f, bank, p, c) = (2560u64, 32u64, 2u64, 8u64, 12u64);
+    let kinds = [
+        ("gguf_q4_k", "q4k", [f, h]),
+        ("gguf_q4_k", "q4k", [f, h]),
+        ("gguf_q8_0", "q8g32s", [h, f]),
+    ];
+    let mut sources = Vec::new();
+    let mut banks = Vec::new();
+    let mut expected = Vec::new();
+    let mut elements = Vec::new();
+    for (index, (source, resident, matrix)) in kinds.into_iter().enumerate() {
+        let source = seismic::Element::named(source).unwrap();
+        let resident = element(&device, resident);
+        let length = source
+            .canonical_byte_len(&[1, matrix[0], matrix[1]])
+            .unwrap();
+        let bytes = (0..length)
+            .map(|i| ((i.wrapping_mul(7919) + index as u64 * 37) >> 7) as u8 & 0x3b)
+            .collect::<Vec<_>>();
+        expected.push(
+            resident
+                .repack_host(source, &[1, matrix[0], matrix[1]], &bytes)
+                .unwrap(),
+        );
+        // Production CUDA streaming reads mapped host staging, rather than
+        // device-resident source tensors. Exercise that transport here too.
+        let mut staged = seismic::Tensor::shared(&device, source, &[1, matrix[0], matrix[1]])
+            .unwrap();
+        staged.write_from_host(&bytes).unwrap();
+        sources.push(staged);
+        let bank_bytes = resident
+            .canonical_byte_len(&[bank, matrix[0], matrix[1]])
+            .unwrap();
+        banks.push(
+            seismic::Tensor::from_host(
+                &device,
+                resident,
+                &[bank, matrix[0], matrix[1]],
+                &vec![0xa5; bank_bytes as usize],
+            )
+            .unwrap(),
+        );
+        elements.push((source, resident));
+    }
+    let slots = i32_tensor(&device, &[1, 1], &[-1]);
+    let mut stamps = i32_tensor(&device, &[bank], &[0, 0]);
+    let step = i32_tensor(&device, &[1], &[7]);
+    let heartbeat = i32_tensor(&device, &[1], &[1]);
+    let mut control_values = vec![0; c as usize];
+    control_values[..5].copy_from_slice(&[7, 7, 0, 1, 0]);
+    let mut control = i32_tensor(&device, &[c], &control_values);
+    let mut placed = vec![0; (5 * p) as usize];
+    placed[0] = 1;
+    placed[4 * p as usize] = 7;
+    let placement = i32_tensor(&device, &[5, p], &placed);
+    let mut slot_map = i32_tensor(&device, &[1], &[-1]);
+    let mut commits = i32_tensor(&device, &[bank], &[0, 0]);
+    let [gate, up, down] = banks.as_mut_slice() else {
+        unreachable!()
+    };
+    let result = routed_bank_fill::native_for_device_with(
+        &device,
+        routed_bank_fill::Elements {
+            SG: elements[0].0,
+            SU: elements[1].0,
+            SD: elements[2].0,
+            EGW: elements[0].1,
+            EUW: elements[1].1,
+            EDW: elements[2].1,
+        },
+        &specialize(
+            &[("H", h), ("K", 1), ("F", f), ("T", 1), ("C", c), ("P", p)],
+            &[],
+        ),
+    )
+    .unwrap()
+    .call(routed_bank_fill::Args {
+        slots: &slots,
+        stamps: &mut stamps,
+        step: &step,
+        control: &mut control,
+        placement: &placement,
+        heartbeat: &heartbeat,
+        staged_gate: &sources[0],
+        staged_up: &sources[1],
+        staged_down: &sources[2],
+        expert_gate: gate,
+        expert_up: up,
+        expert_down: down,
+        slot_map: &mut slot_map,
+        commits: &mut commits,
+    })
+    .unwrap()
+    .value;
+    assert_eq!(read_i32(&result), [1]);
+    assert_eq!(read_i32(&slot_map), [1]);
+    assert_eq!(read_i32(&commits), [0, 7]);
+    for (kind, actual) in banks.iter().enumerate() {
+        let bytes = actual.read_to_host().unwrap();
+        let size = expected[kind].len();
+        assert!(
+            bytes[..size].iter().all(|&value| value == 0xa5),
+            "kind {kind}: untouched slot"
+        );
+        assert_eq!(
+            &bytes[size..],
+            expected[kind].as_slice(),
+            "kind {kind}: imported slot"
+        );
+    }
+}

@@ -1569,6 +1569,11 @@ pub trait DeviceService<T: seismic_native_target::TargetFamily>: Send + Sync + '
     ) -> Result<Self::Buffer, ExecutionError> {
         self.allocate(bytes, alignment)
     }
+    /// Live allocation bytes physically in host RAM rather than the device pool.
+    /// Unified memory services report zero: their host memory is their device pool.
+    fn host_shared_bytes(&self) -> u64 {
+        0
+    }
     /// Device memory the service holds beyond its live allocations (free
     /// space of blocks, driver objects); zero for a service that takes
     /// device memory exactly per allocation.

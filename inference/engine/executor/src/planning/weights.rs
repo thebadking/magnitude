@@ -789,6 +789,8 @@ pub struct ExpertBankPlan {
     pub selected: u64,
     /// Each staging pool's own records (`T`): demand reads and hints.
     pub staging_records: u64,
+    /// Copy ready source bytes through CUDA's transfer stream before conversion.
+    pub(crate) device_staging: bool,
     /// Every routed layer of the target, in decoder order.
     pub layers: Vec<BankLayer>,
     /// Staging pools: one per routed tensor (gate, up, down) and distinct
@@ -810,6 +812,8 @@ pub struct ExpertBankPlan {
 /// tensor for it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConveyorPlan {
+    /// Source records per staging pool, independent of resident bank slots.
+    pub records: u64,
     pub lender: Option<usize>,
     pub lent: u64,
     pub offsets: Vec<u64>,
@@ -859,9 +863,93 @@ pub struct StagingPoolPlan {
 }
 
 impl ExpertBankPlan {
+    /// Form an independent cache for a contiguous decoder range. Layer scopes
+    /// remain global, while pool, scratch and watcher layer indices become local.
+    /// Capacities are admitted for this device's groups; a parent group's spare
+    /// records and conveyor loans never carry across a device boundary.
+    pub fn for_decoder_range(
+        &self,
+        blocks: std::ops::Range<usize>,
+        shared_records: Option<&[u64]>,
+    ) -> Result<Option<Self>, String> {
+        if blocks.is_empty() {
+            return Err("expert cache needs a nonempty decoder range".into());
+        }
+        let mut local = self.clone();
+        local.layers.clear();
+        local.pools.clear();
+        local.scratch.clear();
+        local.shared = None;
+        let mut pools = vec![None; self.pools.len()];
+        let mut scratch = vec![None; self.scratch.len()];
+        for layer in &self.layers {
+            let block = match layer.scope {
+                WeightScope::TargetSublayer(index)
+                | WeightScope::TargetBranch {
+                    sublayer: index, ..
+                } => index.block as usize,
+                _ => return Err("expert cache contains a non-target layer".into()),
+            };
+            if !blocks.contains(&block) {
+                continue;
+            }
+            let mut layer = layer.clone();
+            for tensor in &mut layer.tensors {
+                let pool = pools
+                    .get_mut(tensor.pool)
+                    .ok_or("expert staging pool is absent")?;
+                tensor.pool = *pool.get_or_insert_with(|| {
+                    let index = local.pools.len();
+                    local.pools.push(self.pools[tensor.pool].clone());
+                    index
+                });
+                let form = scratch
+                    .get_mut(tensor.scratch)
+                    .ok_or("expert scratch form is absent")?;
+                tensor.scratch = *form.get_or_insert_with(|| {
+                    let index = local.scratch.len();
+                    local.scratch.push(self.scratch[tensor.scratch]);
+                    index
+                });
+            }
+            local.layers.push(layer);
+        }
+        if local.layers.is_empty() {
+            if shared_records.is_some_and(|records| !records.is_empty()) {
+                return Err("cache capacity supplied for a range without experts".into());
+            }
+            return Ok(None);
+        }
+        local.conveyor = local.held_conveyor()?;
+        if self.shared.is_some() {
+            let shared = crate::streaming::shared_bank::SharedBankPlan::from_bank(&local)?;
+            let minimum = crate::operators::routed::fused_graph::DECODE_ROWS
+                .checked_mul(local.selected)
+                .ok_or("route union overflow")?
+                .min(local.experts);
+            let defaults = shared
+                .groups
+                .iter()
+                .map(|group| group.records.max(minimum))
+                .collect::<Vec<_>>();
+            let shared = shared.with_records(&local, shared_records.unwrap_or(&defaults))?;
+            // A held parent conveyor can encode a device requirement:
+            // dedicated GPU banks cannot supply host-visible staging. Range
+            // projection must preserve that requirement even if its smaller
+            // cache would otherwise have enough records to lend.
+            if self.conveyor.lender.is_some() {
+                local.conveyor = local.lent_conveyor(&shared)?;
+            }
+            local.shared = Some(shared);
+        } else if shared_records.is_some() {
+            return Err("shared cache capacities supplied for a per-layer bank".into());
+        }
+        Ok(Some(local))
+    }
+
     /// Records of each staging pool's conveyor (spec 4.9).
     pub fn conveyor_records(&self) -> u64 {
-        crate::streaming::layout::conveyor_records(self.experts)
+        self.conveyor.records
     }
 
     /// The bytes of routed tensor `kind`'s conveyors, laid end to end in
@@ -883,6 +971,7 @@ impl ExpertBankPlan {
     /// The conveyor on held arenas: what a bank without a lender holds.
     fn held_conveyor(&self) -> Result<ConveyorPlan, String> {
         Ok(ConveyorPlan {
+            records: self.conveyor.records,
             lender: None,
             lent: 0,
             offsets: self.conveyor_extents()?.1,
@@ -928,6 +1017,7 @@ impl ExpertBankPlan {
             })
             .collect::<Result<Vec<_>, String>>()?;
         Ok(ConveyorPlan {
+            records: self.conveyor.records,
             lender: Some(lender),
             lent,
             offsets,
@@ -992,19 +1082,20 @@ impl ExpertBankPlan {
         2 + 2 * self.experts
     }
 
-    /// Bytes a streamed load holds beside its banks: the scratch banks, the
-    /// staging pools, every layer's directory words, each bank group's stamps
-    /// and commits, and the load's step, heartbeat and scratch fill words
-    /// (flags, convert, copy and seed lists).
-    pub fn charged_bytes(&self) -> Result<u64, String> {
-        let shared = self.shared.as_ref().ok_or("a streamed load without its shared bank plan")?;
+    /// Control words held by layers, bank groups and the load.
+    fn directory_bytes(&self) -> Result<u64, String> {
+        let shared = self
+            .shared
+            .as_ref()
+            .ok_or("a streamed load without its shared bank plan")?;
         let layer = self.experts
             + self.control_words()
             + 5 * self.placement_choices()
             + self.scratch_control_words()
             + 2 * self.ring_words();
         let groups = shared.groups.iter().try_fold(0u64, |n, group| {
-            n.checked_add(2 * group.records).ok_or("bank group words overflow")
+            n.checked_add(2 * group.records)
+                .ok_or("bank group words overflow")
         })?;
         let load =
             2 + self.experts + 3 * self.rounds() * self.list_words() + 4 * self.copy_list_words();
@@ -1013,10 +1104,27 @@ impl ExpertBankPlan {
             .and_then(|words| words.checked_add(groups + load))
             .and_then(|words| words.checked_mul(4))
             .ok_or("bank directory bytes overflow")?;
-        self.scratch_bytes()?.checked_add(self.staging_bytes()?)
-            .and_then(|bytes| bytes.checked_add(directory))
+        Ok(directory)
+    }
+
+
+    /// Words and staging that the host accesses while device work runs.
+    pub fn shared_bytes(&self) -> Result<u64, String> {
+        self.directory_bytes()?
+            .checked_add(self.staging_bytes()?)
+            .ok_or_else(|| "shared streaming bytes overflow".to_owned())
+    }
+
+
+    /// Scratch and shared control/staging held beside the resident banks.
+    pub fn charged_bytes(&self) -> Result<u64, String> {
+        let device = self.device_staging_bytes()?;
+        self.scratch_bytes()?
+            .checked_add(self.shared_bytes()?)
+            .and_then(|bytes| bytes.checked_add(device))
             .ok_or_else(|| "streamed bytes overflow".to_owned())
     }
+
 
     /// Physical record extent of the bank a layer binds. Shared groups
     /// retain fixed placement for the entire load, including queued steps.
@@ -1047,7 +1155,7 @@ impl ExpertBankPlan {
         Some(RoutedBank {
             slots: self.records(scope).ok()?,
             sources: layer.tensors.map(|tensor| self.pools[tensor.pool].source),
-            staging_records: self.staging_records,
+            staging_records: self.graph_staging_records(),
         })
     }
 
@@ -1065,6 +1173,38 @@ impl ExpertBankPlan {
                 .checked_add(self.conveyor_arena_bytes(kind)?)
                 .ok_or_else(|| "staging bytes overflow".to_owned())
         })
+    }
+
+    /// Two scratch rounds, also sufficient for the largest decode union.
+    /// The same three arenas are reused by each layer after its predecessor
+    /// releases them, independently of the source encoding.
+    pub(crate) fn graph_staging_records(&self) -> u64 {
+        if self.device_staging {
+            (2 * self.round_records()).max(
+                crate::operators::routed::fused_graph::DECODE_ROWS * self.selected,
+            )
+        } else { self.staging_records }
+    }
+
+    pub(crate) fn device_staging_arena_bytes(&self, kind: usize) -> Result<u64, String> {
+        if !self.device_staging { return Ok(0); }
+        self.pools.iter().filter(|pool| pool.kind == kind).try_fold(0, |largest, pool| {
+            pool.record_bytes.checked_mul(self.graph_staging_records())
+                .map(|bytes| largest.max(bytes))
+                .ok_or_else(|| "device staging bytes overflow".to_owned())
+        })
+    }
+
+    pub(crate) fn device_staging_bytes(&self) -> Result<u64, String> {
+        let metadata = if self.device_staging {
+            self.rounds().checked_mul(3).and_then(|rounds| rounds.checked_mul(self.list_words()))
+                .and_then(|words| words.checked_add(4 * self.copy_list_words() + 1))
+                .and_then(|words| words.checked_mul(4))
+                .ok_or("device source metadata bytes overflow")?
+        } else { 0 };
+        (0..3).try_fold(metadata, |total, kind| total
+            .checked_add(self.device_staging_arena_bytes(kind)?)
+            .ok_or_else(|| "device staging bytes overflow".to_owned()))
     }
 
     /// The scratch arena of routed tensor `kind`: every expert of one layer
@@ -1137,20 +1277,44 @@ impl ModelLoadPlan {
         })
     }
 
-    /// The host-shared bytes of the target's stored tables
-    /// (`TableFill::Stored`): their slots and directories, part of the
+    /// Host-shared stored table slots, directories and expert-streaming
+    /// control/staging buffers, all part of the
     /// target's weights, in the domain the device's host-shared storage
     /// consumes (`platform::shared_role`).
-    pub fn shared_table_bytes(&self) -> Result<u64, String> {
-        self.target
+    pub fn shared_weight_bytes(&self) -> Result<u64, String> {
+        let tables = self
+            .target
             .iter()
             .filter(|weight| weight.stored_in_slots())
             .try_fold(0u64, |total, weight| {
                 total
                     .checked_add(weight.storage_bytes()?)
                     .ok_or_else(|| "stored table bytes overflow".to_owned())
-            })
+            })?;
+        let streaming = self
+            .bank
+            .as_ref()
+            .map_or(Ok(0), ExpertBankPlan::shared_bytes)?;
+        tables
+            .checked_add(streaming)
+            .ok_or_else(|| "shared weight bytes overflow".to_owned())
     }
+
+
+    /// A dedicated device's resident banks cannot lend host-visible staging.
+    /// Keep a two-round source window rather than pinning a whole layer
+    /// per source format in host RAM; completed rounds replenish it.
+    pub(crate) fn with_host_expert_staging(mut self, device_staging: bool) -> Result<Self, String> {
+        if let Some(bank) = &mut self.bank {
+            bank.device_staging = device_staging;
+            bank.conveyor.records = crate::streaming::layout::host_conveyor_records(
+                bank.experts, bank.selected,
+            );
+            bank.conveyor = bank.held_conveyor()?;
+        }
+        Ok(self)
+    }
+
 
     /// The most of one target weight's import the host holds at once. A
     /// weight uploaded as stored never lies on the host whole: its upload
@@ -1288,6 +1452,61 @@ pub(super) fn weight_bytes_by_component(load: &ModelLoadPlan) -> Result<[u64; 3]
 }
 
 impl ModelLoadPlan {
+    /// Full model inventory before expert cache placement. Cache sizes and
+    /// staging policy are physical decisions made independently by each owner.
+    pub(super) fn resident_inventory(&self) -> Self {
+        let mut inventory = self.clone();
+        if let Some(bank) = inventory.bank.take() {
+            for weight in &mut inventory.target {
+                if let Some(resident) = bank.resident_plan(weight.role) {
+                    *weight = resident.clone();
+                }
+            }
+        }
+        inventory
+    }
+
+    /// Metadata used to certify one decoder range. Semantic roles outside
+    /// the range remain available for topology derivation, in their resident
+    /// form; only this range has a streaming bank. Physical import/admission
+    /// must use the range's required roles, not this full metadata slice.
+    pub fn for_decoder_graph_range(
+        &self,
+        blocks: std::ops::Range<usize>,
+        shared_records: Option<&[u64]>,
+    ) -> Result<Self, String> {
+        if blocks.is_empty() {
+            return Err("decoder graph range is empty".into());
+        }
+        let mut local = self.clone();
+        if let Some(bank) = &self.bank {
+            local.bank = bank.for_decoder_range(blocks, shared_records)?;
+            // Restore full resident metadata before giving the owned experts
+            // their local cache extents. Outside roles are never cache aliases.
+            for weight in &mut local.target {
+                if let Some(resident) = bank.resident_plan(weight.role) {
+                    *weight = resident.clone();
+                }
+            }
+            if let Some(bank) = &local.bank {
+                for weight in &mut local.target {
+                    if bank.holds(weight.role) {
+                        weight.shape[0] = match &bank.shared {
+                            Some(_) => bank.records(weight.role.scope)?,
+                            None => bank.slots,
+                        };
+                        weight.resident_bytes =
+                            representation_bytes(weight.resident, &weight.shape)?;
+                        weight.source_bytes = 0;
+                    }
+                }
+            }
+        } else if shared_records.is_some() {
+            return Err("cache capacity supplied for a resident decoder".into());
+        }
+        Ok(local)
+    }
+
     pub fn target(&self) -> &[WeightPlan] {
         &self.target
     }
@@ -1749,10 +1968,12 @@ impl ModelLoadPlan {
             experts,
             selected,
             staging_records: crate::streaming::layout::demand_records(selected),
+            device_staging: false,
             layers: bank_layers,
             pools,
             scratch,
             conveyor: ConveyorPlan {
+                records: experts,
                 lender: None,
                 lent: 0,
                 offsets: Vec::new(),

@@ -4,6 +4,7 @@
 
 use crate::blocks::Range;
 use crate::driver::{self, DriverError, HostMapped, Reservation};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -15,7 +16,7 @@ enum Memory {
     /// A range of one of the device's blocks.
     Device(Range),
     /// Host-written inputs: filled by the host without a driver call.
-    Mapped(HostMapped),
+    Mapped(Mapped),
     /// The leading `bytes` of a reservation, which are backed. Buffers of
     /// one reservation share its base address.
     Reserved {
@@ -24,15 +25,37 @@ enum Memory {
     },
 }
 
+/// The counter follows the physical allocation, including all buffer aliases.
+struct Mapped {
+    allocation: HostMapped,
+    total: Arc<AtomicU64>,
+}
+impl std::ops::Deref for Mapped {
+    type Target = HostMapped;
+    fn deref(&self) -> &HostMapped {
+        &self.allocation
+    }
+}
+impl Drop for Mapped {
+    fn drop(&mut self) {
+        self.total
+            .fetch_sub(self.allocation.bytes as u64, Ordering::Relaxed);
+    }
+}
+
 impl Buffer {
     pub(crate) fn device(range: Range) -> Self {
         Self {
             memory: Arc::new(Memory::Device(range)),
         }
     }
-    pub(crate) fn mapped(mapped: HostMapped) -> Self {
+    pub(crate) fn mapped(mapped: HostMapped, total: Arc<AtomicU64>) -> Self {
+        total.fetch_add(mapped.bytes as u64, Ordering::Relaxed);
         Self {
-            memory: Arc::new(Memory::Mapped(mapped)),
+            memory: Arc::new(Memory::Mapped(Mapped {
+                allocation: mapped,
+                total,
+            })),
         }
     }
     pub(crate) fn reserved(reservation: Arc<Reservation>, bytes: usize) -> Self {
@@ -65,6 +88,13 @@ impl Buffer {
             Memory::Device(range) => range.pointer(),
             Memory::Mapped(mapped) => mapped.device,
             Memory::Reserved { reservation, .. } => reservation.base,
+        }
+    }
+    /// Only mapped pinned storage has an address the host may access in place.
+    pub(crate) fn host_address(&self) -> Option<std::ptr::NonNull<u8>> {
+        match &*self.memory {
+            Memory::Mapped(mapped) => std::ptr::NonNull::new(mapped.host()),
+            Memory::Device(_) | Memory::Reserved { .. } => None,
         }
     }
     /// Synchronous host write. Device memory is written by a driver copy

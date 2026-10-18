@@ -481,3 +481,23 @@ fn harness_tool_sets_bind_over_the_real_vocabulary() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// The paired Qwen3.8 evaluation must be allowed to emit both requested calls,
+/// with its actual three-tool schema and full artifact vocabulary.
+#[test]
+#[ignore = "requires MAGNITUDE_TEST_GGUF pointing to Qwen3.8 Flash Next"]
+fn qwen_parallel_circle_calls_over_real_vocabulary() {
+    let mut model = model();
+    let fixture: Value = serde_json::from_str(
+        include_str!("assets/qwen-parallel-circle-tools.json")).unwrap();
+    let mut request = ChatRequest::new(
+        fixture["messages"].as_array().unwrap().clone(), 946684800);
+    request.tools = fixture["tools"].as_array().unwrap().clone();
+    request.tool_choice = ToolChoice::Required;
+    request.parallel_tool_calls = true;
+    request.template_arguments.insert("enable_thinking".into(), json!(false));
+    let completion = format!("{}\n{}",
+        call("circle.calculate_area", &[("radius", "5")]),
+        call("circle.calculate_circumference", &[("diameter", "10")]));
+    walk(&mut model, &request, &completion).unwrap();
+}

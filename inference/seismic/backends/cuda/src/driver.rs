@@ -17,7 +17,7 @@
 use libloading::Library;
 use std::ffi::{c_char, c_int, c_uchar, c_uint, c_void, CStr};
 use std::fmt;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, RwLockReadGuard, Weak};
 
 pub type Handle = *mut c_void;
 type ResultCode = c_int;
@@ -88,6 +88,7 @@ driver! {
     stream_create: unsafe extern "system" fn(*mut Handle, c_uint) -> ResultCode => "cuStreamCreate",
     stream_destroy: unsafe extern "system" fn(Handle) -> ResultCode => "cuStreamDestroy_v2",
     stream_synchronize: unsafe extern "system" fn(Handle) -> ResultCode => "cuStreamSynchronize",
+    stream_query: unsafe extern "system" fn(Handle) -> ResultCode => "cuStreamQuery",
     stream_wait_event: unsafe extern "system" fn(Handle, Handle, c_uint) -> ResultCode => "cuStreamWaitEvent",
     event_create: unsafe extern "system" fn(*mut Handle, c_uint) -> ResultCode => "cuEventCreate",
     event_destroy: unsafe extern "system" fn(Handle) -> ResultCode => "cuEventDestroy_v2",
@@ -256,6 +257,10 @@ pub(crate) struct Context {
     /// default stream it would also wait for every later queued launch of
     /// the blocking execution streams (a pipelined next step).
     transfer: Handle,
+    /// Idle graph recording excludes new queue work. Protocol transfers
+    /// share the read side and remain runnable while kernels await them.
+    pub(crate) graph_recording: RwLock<()>,
+    streams: Mutex<Vec<Weak<Stream>>>,
 }
 
 // The raw handle is an opaque driver object usable from any thread once made
@@ -264,6 +269,27 @@ unsafe impl Send for Context {}
 unsafe impl Sync for Context {}
 
 impl Context {
+    pub(crate) fn submission(&self) -> RwLockReadGuard<'_, ()> {
+        self.graph_recording.read().expect("CUDA graph recording lock")
+    }
+
+    /// The exclusive recording guard prevents queueing new dependent work
+    /// while every production stream and the transfer stream are queried.
+    pub(crate) fn idle(&self) -> Result<bool, DriverError> {
+        let _current = self.enter()?;
+        let streams = {
+            let mut streams = self.streams.lock().expect("CUDA stream registry");
+            streams.retain(|stream| stream.strong_count() != 0);
+            streams.iter().filter_map(Weak::upgrade).collect::<Vec<_>>()
+        };
+        for stream in std::iter::once(self.transfer).chain(streams.iter().map(|stream| stream.raw())) {
+            let status = unsafe { (self.driver.stream_query)(stream) };
+            if status == 600 { return Ok(false); } // CUDA_ERROR_NOT_READY
+            self.driver.check(status, "stream idle query")?;
+        }
+        Ok(true)
+    }
+
     pub fn retain(driver: Arc<Driver>, ordinal: c_int) -> Result<Arc<Self>, DriverError> {
         let mut raw = std::ptr::null_mut();
         unsafe {
@@ -277,6 +303,8 @@ impl Context {
             raw,
             ordinal,
             transfer: std::ptr::null_mut(),
+            graph_recording: RwLock::new(()),
+            streams: Mutex::new(Vec::new()),
         };
         let mut transfer = std::ptr::null_mut();
         {
@@ -354,10 +382,12 @@ impl Stream {
                 "stream creation",
             )?;
         }
-        Ok(Arc::new(Self {
+        let stream = Arc::new(Self {
             raw,
             context: context.clone(),
-        }))
+        });
+        context.streams.lock().expect("CUDA stream registry").push(Arc::downgrade(&stream));
+        Ok(stream)
     }
 
     pub fn raw(&self) -> Handle {
@@ -387,6 +417,7 @@ impl Stream {
             Arc::ptr_eq(&self.context, event.context()),
             "Stream::wait_event precondition: event and stream belong to one opened CUDA context"
         );
+        let _submission = self.context.submission();
         let _current = self.context.enter()?;
         unsafe {
             self.context.driver.check(
@@ -435,6 +466,7 @@ impl Event {
             Arc::ptr_eq(&self.context, stream.context()),
             "Event::record precondition: event and stream belong to one opened CUDA context"
         );
+        let _submission = self.context.submission();
         let _current = self.context.enter()?;
         unsafe {
             self.context.driver.check(
@@ -847,6 +879,7 @@ pub(crate) fn upload(context: &Context, pointer: u64, bytes: &[u8]) -> Result<()
     if bytes.is_empty() {
         return Ok(());
     }
+    let _submission = context.submission();
     let _current = context.enter()?;
     unsafe {
         context.driver.check(
@@ -876,6 +909,7 @@ pub(crate) fn download(
     if bytes.is_empty() {
         return Ok(());
     }
+    let _submission = context.submission();
     let _current = context.enter()?;
     unsafe {
         context.driver.check(
@@ -1218,6 +1252,7 @@ impl PinnedUpload {
             Arc::ptr_eq(&self.context, stream.context()),
             "PinnedUpload::upload precondition: staging and stream belong to one opened CUDA context"
         );
+        let _submission = self.context.submission();
         let _current = self.context.enter()?;
         unsafe {
             self.context.driver.check(

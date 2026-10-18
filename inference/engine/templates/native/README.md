@@ -43,6 +43,10 @@ Patch 0024 makes the key grammar of an object's additional properties valid JSON
 spells keys other than the listed properties as escaped JSON text, never as raw characters a JSON
 string cannot hold.
 
+Patch 0025 keeps Qwen's native content preamble available when a tool call is required. The call
+remains mandatory before the turn can end, with the requested parallel-call limit. Suppressing that
+preamble changes the model's planning path and can omit another requested call.
+
 To refresh the extraction, use the provenance record and patch series in a maintainer workflow,
 then check in the resulting patched sources. Source preparation is deliberately not part of a
 consumer build.

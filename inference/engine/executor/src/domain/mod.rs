@@ -50,7 +50,7 @@ pub use in_flight::{
 };
 use in_flight::{PrimingFlight, TargetRequests, TargetWork, decode_selected};
 pub use ownership::OpenRequirements;
-pub use state::MemoryChargeReconciliation;
+pub use state::{DeviceMemoryCharge, MemoryChargeReconciliation};
 pub use target::TargetHostTiming;
 pub(crate) use target::{
     AppendedRuns, accepted_history, cached_causal_domain, indexer_domain, indexer_history,
@@ -471,6 +471,13 @@ impl ResumeState {
 
 /// Native executor with no erased stage or executor type parameters. The
 /// accepted map is vacant while that request's advance is in flight.
+struct PeerDeviceResources {
+    execution: Rc<ExecutionPlan>,
+    memory: RefCell<DeviceHeap>,
+    resources: Rc<RefCell<AllocatedResources>>,
+    static_holding: Option<HoldingId>,
+}
+
 pub struct ExecutorDomain<F: ProgramFamily = NativeFamily> {
     execution: Rc<ExecutionPlan>,
     definition: Rc<ModelDefinition>,
@@ -478,6 +485,7 @@ pub struct ExecutorDomain<F: ProgramFamily = NativeFamily> {
     domain: ResourceDomain,
     /// The device's heap, carried over from the startup claims.
     memory: RefCell<DeviceHeap>,
+    peer: Option<PeerDeviceResources>,
     static_holding: Option<HoldingId>,
     optional_holding: Option<HoldingId>,
     target_store: Rc<StateStore>,
@@ -522,8 +530,55 @@ impl ExecutorDomain<NativeFamily> {
             .heap_mut()
             .insert(static_bytes, HoldingClass::Model)
             .map_err(|error| format!("static memory holding rejected: {error:?}"))?;
+        if let Some(peer) = &self.peer {
+            let bytes = match self.peer_static_holding_bytes() {
+                Ok(bytes) => bytes,
+                Err(error) => { let _ = self.memory.borrow_mut().heap_mut().remove(holding); return Err(error); }
+            };
+            let result = peer.memory.borrow_mut().heap_mut().insert(bytes, HoldingClass::Model);
+            match result {
+                Ok(id) => self.peer.as_mut().unwrap().static_holding = Some(id),
+                Err(error) => {
+                    let _ = self.memory.borrow_mut().heap_mut().remove(holding);
+                    return Err(format!("peer static memory holding rejected: {error:?}"));
+                }
+            }
+        }
         self.static_holding = Some(holding);
         Ok(holding)
+    }
+
+    pub fn new_placed(
+        execution: Rc<ExecutionPlan>, definition: Rc<ModelDefinition>,
+        memory: DeviceHeap, programs: Rc<AttestedPrograms>, resources: AllocatedResources,
+        resident: crate::ResidentTarget, target_state: StoreBindings,
+        peer_execution: Rc<ExecutionPlan>, peer_memory: DeviceHeap, peer_programs: Rc<AttestedPrograms>,
+        peer_resources: AllocatedResources, peer_resident: crate::ResidentTarget,
+    ) -> Result<(Self, StateBindings), String> {
+        if execution.policy().method() != crate::PlannedMethod::Plain {
+            return Err("placed executor requires plain execution".into());
+        }
+        if execution.policy().limits().lookahead && !programs.target_graphs()
+            .is_some_and(|graphs| graphs.supports_selected_return()) {
+            return Err("placed lookahead requires admitted selected-token return storage".into());
+        }
+        if execution.device().selector() != memory.device().info().selector
+            || peer_execution.device().selector() != peer_memory.device().info().selector
+            || !resident.embedding.tensor().belongs_to(memory.device())
+            || !peer_resident.embedding.tensor().belongs_to(peer_memory.device())
+            || memory.device().same_device(peer_memory.device()) {
+            return Err("placed executor heaps differ from resident device owners".into());
+        }
+        let peer_resources = Rc::new(RefCell::new(peer_resources));
+        let family = NativeFamily::new_placed(programs, resident, peer_programs, peer_resident,
+            peer_resources.clone(), definition.decoder.clone())?;
+        let (mut executor, bindings) = Self::with_family(execution, definition, resources, memory,
+            target_state, None, None, None, family);
+        executor.domain.set_graph_output_device(peer_memory.device().clone());
+        executor.peer = Some(PeerDeviceResources {
+            execution: peer_execution, memory: RefCell::new(peer_memory), resources: peer_resources, static_holding: None,
+        });
+        Ok((executor, bindings))
     }
 
     pub fn new(
@@ -615,17 +670,17 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
             .committed_bytes()
             .map_err(|error| error.to_owned())?;
         bytes = bytes
-            .checked_add(self.target_store.committed_bytes())
+            .checked_add(self.target_store.committed_bytes_on(self.domain.device()))
             .ok_or_else(|| "static holding byte count overflow".to_owned())?;
         if let Some(store) = &self.head_store {
             bytes = bytes
-                .checked_add(store.committed_bytes())
+                .checked_add(store.committed_bytes_on(self.domain.device()))
                 .ok_or_else(|| "static holding byte count overflow".to_owned())?;
         }
         bytes = bytes
             .checked_add(
                 self.target_store
-                    .external_pinned_bytes()
+                    .external_pinned_bytes_on(self.domain.device())
                     .map_err(|error| error.to_string())?,
             )
             .ok_or_else(|| "static holding byte count overflow".to_owned())?;
@@ -633,7 +688,7 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
             bytes = bytes
                 .checked_add(
                     store
-                        .external_pinned_bytes()
+                        .external_pinned_bytes_on(self.domain.device())
                         .map_err(|error| error.to_string())?,
                 )
                 .ok_or_else(|| "static holding byte count overflow".to_owned())?;
@@ -648,6 +703,27 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
                 .ok_or_else(|| "static holding byte count overflow".to_owned())?;
         }
         Ok(bytes)
+    }
+
+    fn peer_static_holding_bytes(&self) -> Result<u64, String> {
+        let Some(peer) = &self.peer else { return Ok(0); };
+        let memory = peer.memory.borrow();
+        let device = memory.device();
+        let pins = self.target_store.external_pinned_bytes_on(device).map_err(|error| error.to_string())?;
+        let model = self.family.peer_model_bytes()?;
+        peer.resources.borrow().committed_bytes().map_err(str::to_owned)?
+            .checked_add(self.target_store.committed_bytes_on(device))
+            .and_then(|bytes| bytes.checked_add(pins))
+            .and_then(|bytes| bytes.checked_add(model))
+            .ok_or_else(|| "peer static holding byte count overflow".into())
+    }
+
+    fn heap_for_device(&self, device: &seismic::Device) -> Result<&RefCell<DeviceHeap>, DomainError> {
+        if self.memory.borrow().device().same_device(device) { return Ok(&self.memory); }
+        if let Some(peer) = &self.peer {
+            if peer.memory.borrow().device().same_device(device) { return Ok(&peer.memory); }
+        }
+        Err(DomainError::Input("state device has no registered heap".into()))
     }
 
     pub(super) fn sync_optional_holding(&mut self) -> Result<(), String> {
@@ -697,6 +773,13 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
     }
 
     pub(super) fn sync_static_holding(&mut self) -> Result<(), String> {
+        if let Some(peer) = &self.peer {
+            if let Some(id) = peer.static_holding {
+                let bytes = self.peer_static_holding_bytes()?;
+                peer.memory.borrow_mut().heap_mut().resize(id, bytes)
+                    .map_err(|error| format!("peer holding update rejected: {error:?}"))?;
+            }
+        }
         let Some(holding) = self.static_holding else {
             return Ok(());
         };
@@ -714,11 +797,20 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
     /// classifies ownership and issues claims. A failed observation revokes
     /// unspent grants and leaves the heap Blind.
     pub fn refresh_memory(&self) -> Result<Vec<DomainReading>, DomainError> {
-        let readings = self
+        let mut readings = self
             .memory
             .borrow_mut()
             .refresh()
             .map_err(|error| DomainError::Blind(error.to_string()))?;
+        if let Some(peer) = &self.peer {
+            readings.extend(peer.memory.borrow_mut().refresh()
+                .map_err(|error| DomainError::Blind(error.to_string()))?);
+            if let Some(id) = peer.static_holding {
+                let bytes = self.peer_static_holding_bytes().map_err(DomainError::Input)?;
+                peer.memory.borrow_mut().heap_mut().resize(id, bytes)
+                    .map_err(|error| DomainError::Input(format!("peer holding update rejected: {error:?}")))?;
+            }
+        }
         // A released slab can remain charged while an outside tensor view
         // retains it. Its final release happens when that view is dropped, so
         // reconcile this holding on every fresh charge observation.
@@ -742,23 +834,6 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
 
     pub fn memory(&self) -> std::cell::Ref<'_, MemoryHeap> {
         std::cell::Ref::map(self.memory.borrow(), DeviceHeap::heap)
-    }
-
-    /// Bytes of the model's host-resident tables held in host RAM.
-    pub fn host_table_bytes(&self) -> u64 {
-        self.memory.borrow().host_table_bytes()
-    }
-
-    /// Bytes of the target's stored tables in host RAM rather than the
-    /// device's own memory: those of a dedicated device whose host-shared
-    /// storage is host RAM (`platform::shared_role`); 0 elsewhere.
-    pub fn host_stored_table_bytes(&self) -> Result<u64, String> {
-        let role = crate::platform::shared_role(self.memory.borrow().device().info())
-            .map_err(|error| error.to_string())?;
-        match role {
-            crate::platform::DomainRole::Allocation => Ok(0),
-            crate::platform::DomainRole::Staging => self.execution.load().shared_table_bytes(),
-        }
     }
 
     /// Refuse a launch whose vocabulary work the load did not plan: more
@@ -1064,7 +1139,7 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
                     segments = segments.max(if lane == ReservationLane::Target {
                         target::reserved_segments(
                             &self.target_store,
-                            state.span_count(),
+                            |domain| state.domain_span_count(domain),
                             operation.row_count(),
                         )
                     } else {
@@ -1544,6 +1619,7 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
             resources,
             domain: ResourceDomain::new(id, memory.device().clone()),
             memory: RefCell::new(memory),
+            peer: None,
             static_holding: None,
             optional_holding: None,
             target_store: Rc::clone(&target_state),

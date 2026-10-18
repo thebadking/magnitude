@@ -20,6 +20,7 @@ pub struct PlannedDevice {
     name: String,
     assessment_capacity_bytes: u64,
     tensor_operations: bool,
+    shared_in_host: bool,
 }
 
 impl PlannedDevice {
@@ -172,12 +173,16 @@ impl ExecutionPlanDraft {
             let assessment =
                 crate::assessment::prepare_execution_assessment(definition, &self, context_limit)
                     .map_err(|error| PlanError::ResourcePlanning(error.to_string()))?;
-            if assessment.memory_charge().allocation_bytes > self.device.assessment_capacity_bytes {
+            let memory = assessment.memory_charge();
+            let allocation = memory.device_allocation_bytes(self.device.shared_in_host)
+                .map_err(PlanError::ResourcePlanning)?;
+            if allocation > self.device.assessment_capacity_bytes {
                 return canonical.finalize_readout(definition, &[]);
             }
         }
         Ok(self)
     }
+
 
     /// The weight cap (spec 6.1). The resident plan when the standard
     /// workload fits the device with every weight resident and `cap` (when
@@ -203,10 +208,10 @@ impl ExecutionPlanDraft {
                     .map_err(|error| PlanError::ResourcePlanning(error.to_string()))?;
             let [target, head, vision] = super::weights::weight_bytes_by_component(&draft.load)
                 .map_err(PlanError::ResourcePlanning)?;
-            Ok((
-                assessment.memory_charge().allocation_bytes,
-                target + head + vision,
-            ))
+            let memory = assessment.memory_charge();
+            let allocation = memory.device_allocation_bytes(draft.device.shared_in_host)
+                .map_err(PlanError::ResourcePlanning)?;
+            Ok((allocation, target + head + vision))
         };
         let capacity = self.device.assessment_capacity_bytes;
         let (allocation, weights) = charge(&self)?;
@@ -220,6 +225,12 @@ impl ExecutionPlanDraft {
                 .load
                 .with_shared_expert_bank(slots, selected)
                 .map_err(PlanError::InvalidDefinition)?;
+            if draft.device.shared_in_host {
+                draft.load = draft
+                    .load
+                    .with_host_expert_staging(draft.device.backend == BackendName::Cuda)
+                    .map_err(PlanError::InvalidDefinition)?;
+            }
             draft.policy.limits.group_capacity = prefill_group.capacity(true);
             draft.programs = draft.load.program_plan(definition, draft.policy.codec)?;
             Ok(draft)
@@ -237,22 +248,37 @@ impl ExecutionPlanDraft {
             // Reject over-cap candidates before constructing graph-resource
             // assessment. Every retained candidate still passes the original
             // complete allocation assessment; no measured peak substitutes it.
-            let [target,head,vision]=super::weights::weight_bytes_by_component(&candidate.load)
+            let [target, head, vision] = super::weights::weight_bytes_by_component(&candidate.load)
                 .map_err(PlanError::ResourcePlanning)?;
-            let weights=target+head+vision;
-            if cap.is_some_and(|cap|weights>cap) {
-                slots-=1;
+            let weights = target + head + vision;
+            let shared = if candidate.device.shared_in_host {
+                candidate
+                    .load
+                    .shared_weight_bytes()
+                    .map_err(PlanError::ResourcePlanning)?
+            } else {
+                0
+            };
+            let minimum_allocation = weights
+                .checked_sub(shared)
+                .ok_or(PlanError::Arithmetic("shared weights exceed weight charge"))?;
+            // Graphs and state only add storage. Exact weight metadata already
+            // rules out these candidates without building their graph families.
+            if minimum_allocation > capacity || cap.is_some_and(|cap| weights > cap) {
+                slots -= 1;
                 continue;
             }
             let (allocation, assessed_weights) = charge(&candidate)?;
-            if assessed_weights!=weights {
-                return Err(PlanError::ResourcePlanning("weight metadata changed during bank assessment".into()));
+            if assessed_weights != weights {
+                return Err(PlanError::ResourcePlanning(
+                    "weight metadata changed during bank assessment".into(),
+                ));
             }
             if allocation <= capacity && cap.is_none_or(|cap| weights <= cap) {
                 eprintln!("magnitude-engine: streamed load: {slots} of {experts} expert slots per routed layer (weights {weights}, allocation {allocation}, weight cap {cap:?}, device capacity {capacity})");
                 return Ok(candidate);
             }
-            slots-=1;
+            slots -= 1;
         }
         // Preserve the detailed minimum-bank refusal after the exhaustive
         // descending search finds no admissible capacity.
@@ -266,7 +292,47 @@ impl ExecutionPlanDraft {
         )))
     }
 
+
+    /// Prepare one owner's exact program bindings while retaining global
+    /// decoder indices. The paired inventory remains the import authority.
+    pub fn for_decoder_range(
+        mut self, definition: &ModelDefinition, range: &super::DecoderRangeLoadPlan,
+    ) -> Result<Self, PlanError> {
+        if self.device.selector != range.range().device || !range.derives_from(&self.load)
+            || range.decoder_blocks() != definition.decoder.blocks.len()
+            || self.policy.method != PlannedMethod::Plain {
+            return Err(PlanError::Topology("range differs from the selected model/device"));
+        }
+        self.load = range.graph_load().clone();
+        self.programs = self.load.program_plan(definition, self.policy.codec)?;
+        Ok(self)
+    }
+
+    /// Seal a projected draft with physical inventory rather than retaining
+    /// outside-layer graph metadata as if the device owned those weights.
+    pub fn admit_range(
+        mut self, range: &super::DecoderRangeLoadPlan, resources: ResourcePlan,
+    ) -> Result<ExecutionPlan, PlanError> {
+        if self.device.selector != range.range().device || &self.load != range.graph_load()
+            || resources.decoder_range() != Some(range.range())
+            || resources.bytes().target_weights != range.weight_bytes() {
+            return Err(PlanError::Topology("range resource admission differs from its inventory"));
+        }
+        if range.range().blocks.start > 0 && resources.boundary().is_none() {
+            return Err(PlanError::Topology("noninitial range has no admitted transfer buffers"));
+        }
+        self.load = range.physical_load().clone();
+        self.finish_admission(resources)
+    }
+
     pub fn admit(self, resources: ResourcePlan) -> Result<ExecutionPlan, PlanError> {
+        if resources.decoder_range().is_some() {
+            return Err(PlanError::Topology("range resources require explicit range admission"));
+        }
+        self.finish_admission(resources)
+    }
+
+    fn finish_admission(self, resources: ResourcePlan) -> Result<ExecutionPlan, PlanError> {
         let planned_weight_bytes = resources
             .bytes()
             .target_weights
@@ -382,6 +448,9 @@ impl ExecutionPlanner {
                 name: device.info.name.clone(),
                 assessment_capacity_bytes: device.assessment_capacity_bytes,
                 tensor_operations: device.tensor_operations,
+                shared_in_host: crate::platform::shared_role(&device.info)
+                    .map_err(|error| PlanError::ResourcePlanning(error.to_string()))?
+                    == crate::platform::DomainRole::Staging,
             },
             components,
             load,

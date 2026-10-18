@@ -203,15 +203,15 @@ pub struct RoutedKernels {
 }
 
 /// A streamed layer's entries beside the resident ones (spec 4.6, 4.7,
-/// 4.9). Its decode rows run the resident shared-route form's `choices` and
-/// `output` over the bank and the bound slots, so every value is the
-/// resident load's; these entries route with resolve and hints, fill the
+/// 4.9). Its decode rows run expert expansion and output over the bank and
+/// the bound slots; these entries route with resolve and hints, fill the
 /// absent experts, and fill the scratch banks of larger row classes.
 #[derive(Clone, Debug)]
 pub struct StreamedRoutedKernels {
+    pub choices: NativeKernel<routed_gate_up::Entry>,
     pub step: NativeKernel<routed_step::Entry>,
-    /// The routing with resolve and the hints of the layers ahead, at the
-    /// resident shared route's parameters.
+    /// Routing with resolve and hints; a backend with a resident shared
+    /// route reuses its parameters.
     pub route: NativeKernel<routed_route_streamed::Entry>,
     /// The park and conversion of the absent experts into their slots.
     pub fill: NativeKernel<routed_bank_fill::Entry>,

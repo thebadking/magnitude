@@ -404,6 +404,7 @@ mod tests {
             // Each pool is its routed tensor's only one: its conveyor opens
             // the tensor's held arena.
             conveyor: crate::planning::ConveyorPlan {
+                records: 256,
                 lender: None,
                 lent: 0,
                 offsets: vec![0; 3],
@@ -535,7 +536,7 @@ mod tests {
         let shared = SharedBankPlan::from_bank(&metadata).unwrap();
         metadata.shared = Some(shared.clone());
         let tensors =
-            BankTensors::allocate(&device, &metadata, &shared, None).unwrap();
+            BankTensors::allocate(&device, &metadata, &shared, None, &mut || Ok(())).unwrap();
         assert!(tensors.layers[0]
             .stamps
             .shares_allocation(&tensors.layers[1].stamps));
@@ -573,11 +574,11 @@ mod tests {
         metadata.shared = Some(shared.clone());
         let charge = metadata.charged_bytes().unwrap();
         device.set_memory_limit(Some(baseline + charge - 1));
-        assert!(BankTensors::allocate(&device, &metadata, &shared, None).is_err());
+        assert!(BankTensors::allocate(&device, &metadata, &shared, None, &mut || Ok(())).is_err());
         assert_eq!(device.memory_usage().charged, baseline);
         device.set_memory_limit(Some(baseline + charge));
         let tensors =
-            BankTensors::allocate(&device, &metadata, &shared, None).unwrap();
+            BankTensors::allocate(&device, &metadata, &shared, None, &mut || Ok(())).unwrap();
         assert_eq!(device.memory_usage().charged, baseline + charge);
         drop(tensors);
         assert_eq!(device.memory_usage().charged, baseline);
@@ -585,7 +586,7 @@ mod tests {
         let mut foreign = shared.clone();
         foreign.group_of_layer.swap(0, 1); // identical members: still valid
         foreign.groups[0].records += 1;
-        assert!(BankTensors::allocate(&device, &metadata, &foreign, None).is_err());
+        assert!(BankTensors::allocate(&device, &metadata, &foreign, None, &mut || Ok(())).is_err());
         assert_eq!(device.memory_usage().charged, baseline);
     }
 }

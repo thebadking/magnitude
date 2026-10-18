@@ -91,7 +91,11 @@ The mapped window stays owned through completion. Resident weights on macOS are 
 engine holding ([engine memory](memory.md)); the mapped window is file-backed and is not. Other backends use a one-shot staged source
 upload, also without a prefill. The source file streams into that upload in bounded chunks, without
 a second whole-tensor host copy. Residency publishes each weight
-only after its submission completes; failed imports leave no cache entry.
+only after its submission completes; failed imports leave no cache entry. Streamed expert records
+retain their source-file identity and byte offset independently: one persistent source worker pool
+reads all shards, preserving demand priority and cancellation across files. Prompt cache hits stay
+pinned through their scratch copies; optional seeds use only the bank slots left after those hits.
+A full set of hits can defer seeding without refusing the prompt or evicting an in-use record.
 
 A gathered table (a weight a step reads by row index: the token embedding, a per-layer input table,
 an n-gram input table) is streamed instead of held whole wherever it can be. There is no setting: the weight plan decides,
@@ -191,3 +195,19 @@ imported from that component like a separate draft's own weights, while its toke
 target's resident table.
 Numerical stages receive loaders rather than shared mutable
 cache access. No warm token path prepares or searches for an import kernel.
+
+## Decoder range residency
+
+A range load separates global graph metadata from the physical weight inventory
+of one device. Only that inventory authorizes import lookup, preload and source
+staging. The import transient is bounded by the range's projected source and
+qualification peaks. Tied storage is deduplicated inside the owner's inventory;
+weights duplicated across devices carry separate physical charges.
+
+Each range owns its residency cache, shared expert bank, staging pools, watcher
+and visit clock. Target import retains global semantic roles while filtering
+block weights to the assigned range. Entry/readout holdings that a range binder
+requires are explicitly present in its inventory and charged on that device.
+Opened device identity must match both the range selector and its attested
+kernels; a catalog ordinal alone does not establish an opened-device match.
+A decoder extent mismatch is rejected before target preload.

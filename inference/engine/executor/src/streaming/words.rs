@@ -17,6 +17,8 @@ pub(crate) struct SharedWords {
     _storage: Tensor,
     base: NonNull<AtomicI32>,
     len: usize,
+    /// A read-only device list published before its separate readiness gate.
+    mirror: Option<Tensor>,
 }
 
 // The words are only touched through atomics; the tensor keeps them alive.
@@ -34,7 +36,29 @@ impl SharedWords {
             _storage: tensor,
             base: address.cast(),
             len,
+            mirror: None,
         })
+    }
+
+    pub(crate) fn with_mirror(mut self, mirror: Tensor) -> Result<Self, String> {
+        if mirror.extents() != self._storage.extents() || mirror.element() != self._storage.element() {
+            return Err("a device list differs from its host publication shape".into());
+        }
+        self.mirror = Some(mirror);
+        Ok(self)
+    }
+
+    /// The list has one host writer and no device writer. Its consumer
+    /// remains behind a separate gate until this complete copy succeeds.
+    pub(crate) fn publish(&self) -> Result<(), String> {
+        if let Some(mirror) = &self.mirror {
+            // SAFETY: list words are stable from the last host store through
+            // this synchronous copy. The caller has not opened their consumer
+            // gate, and has fenced every previous use of this list.
+            let bytes = unsafe { std::slice::from_raw_parts(self.base.as_ptr().cast::<u8>(), self.len * 4) };
+            unsafe { mirror.write_in_protocol(0, bytes) }.map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 
     pub(crate) fn len(&self) -> usize {

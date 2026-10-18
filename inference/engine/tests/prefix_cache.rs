@@ -262,7 +262,7 @@ fn conversation_turns_resume_at_the_previous_reply() {
         prompt = path(&done);
         prompt.extend(text(&tokenizer, 100 + turn, 40));
     }
-    assert_eq!(host.owner().reconcile_memory_charge().unwrap().unattributed, 0);
+    assert_eq!(host.owner().reconcile_memory_charge().unwrap()[0].charge.unattributed, 0);
 }
 
 /// A template that rewrites the previous reply (dropping reasoning, say)
@@ -326,7 +326,7 @@ fn a_changed_last_message_resumes_at_its_declared_start() {
         cached.push(done.cached);
     }
     assert_eq!(cached, [0, system.len(), system.len()]);
-    assert_eq!(host.owner().reconcile_memory_charge().unwrap().unattributed, 0);
+    assert_eq!(host.owner().reconcile_memory_charge().unwrap()[0].charge.unattributed, 0);
 }
 
 /// Without a declared cache point, a changed last message diverges below
@@ -428,7 +428,7 @@ fn arbitrary_request_sequences_resume_from_their_deepest_cached_prefix() {
             assert!(turn.cached < turn.prompt.len());
         }
         finished.extend(turns);
-        assert_eq!(host.owner().reconcile_memory_charge().unwrap().unattributed, 0);
+        assert_eq!(host.owner().reconcile_memory_charge().unwrap()[0].charge.unattributed, 0);
     }
 }
 
@@ -565,7 +565,7 @@ fn vision_claims_its_slots_on_an_image_and_releases_them_at_idle() {
         let idle = charged(&domain);
         assert_eq!(encoded - idle, released);
         assert!(released > 0, "idle released no vision storage");
-        let accounted = domain.reconcile_memory_charge(&[]).unwrap();
+        let accounted = domain.reconcile_memory_charge(&[]).unwrap()[0].charge;
         assert_eq!(accounted.unattributed, 0, "{accounted:?}");
         eprintln!(
             "vision cycle: opened={opened} encoded={encoded} idle={idle} released={released}"
@@ -611,7 +611,7 @@ fn image_conditioning_survives_eviction_and_cached_resumption() {
     let encodes = domain.open_state(&mut bindings, reference, None).unwrap();
     assert_eq!(encodes.len(), 1);
     bindings = encode(&mut domain, bindings, encodes);
-    let encoded = domain.reconcile_memory_charge(&[]).unwrap();
+    let encoded = domain.reconcile_memory_charge(&[]).unwrap()[0].charge;
     assert_eq!(encoded.unattributed, 0, "{encoded:?}");
     bindings = forward(&mut domain, bindings, reference, &input, 0..split).1;
     let after_image = domain.resume_state(reference).unwrap();
@@ -647,9 +647,9 @@ fn image_conditioning_survives_eviction_and_cached_resumption() {
     assert_eq!(bits(&continued), bits(&expected));
     domain.close(resumed).unwrap();
 
-    let held = domain.reconcile_memory_charge(&[&after_image]).unwrap();
+    let held = domain.reconcile_memory_charge(&[&after_image]).unwrap()[0].charge;
     assert_eq!(held.unattributed, 0, "{held:?}");
     drop(after_image);
-    let released = domain.reconcile_memory_charge(&[]).unwrap();
+    let released = domain.reconcile_memory_charge(&[]).unwrap()[0].charge;
     assert_eq!(released.unattributed, 0, "{released:?}");
 }

@@ -3,6 +3,8 @@ applies_to:
   - inference/engine/grammar/**
   - inference/engine/src/worker/binding.rs
   - inference/engine/chat/src/preparation.rs
+  - inference/engine/chat/src/templates.rs
+  - inference/engine/templates/native/source/common/parsers/qwen3-coder.cpp
 ---
 
 # Constrained generation
@@ -25,6 +27,10 @@ generation constraint.
 GBNF remains the external format. The constrained language itself (argument
 order, raw-string policy, reasoning format) is decided by the templates, never
 by this layer.
+A required tool selection requires a complete call before the turn can end.
+Required selections and required allowed-tool subsets preserve caller messages.
+Qwen's native content preamble may precede the required calls; their grammar
+enforces the call requirement and the caller's parallel-call setting.
 
 ## Guarantees
 

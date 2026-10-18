@@ -91,7 +91,7 @@ pub fn require_normal(
     reserves: &MemoryReserves,
 ) -> Result<(), ClaimRefusal> {
     let readings =
-        crate::platform::observe_domains(catalog, device, reserves).map_err(ClaimRefusal::Blind)?;
+        crate::platform::refresh_device_ceiling(catalog, device, reserves).map_err(ClaimRefusal::Blind)?;
     reclaiming(&readings).map_or(Ok(()), Err)
 }
 
@@ -305,6 +305,16 @@ impl DeviceHeap {
             .ok_or(ClaimRefusal::Accounting(MemoryError::HoldingOverflow))?;
         self.refresh().map_err(ClaimRefusal::Blind)?;
         Ok(())
+    }
+
+    pub(crate) fn allocation_pool(&self) -> Result<(seismic::MemoryPoolId, seismic::MemoryPoolKind), String> {
+        let seismic::DeviceMemory::Established(memory) = &self.device.info().memory else {
+            return Err("device has no established allocation pool".into());
+        };
+        let topology = self.catalog.topology();
+        let pool = topology.pool(memory.allocation_pool)
+            .ok_or("device allocation pool is absent from its catalog")?;
+        Ok((memory.allocation_pool, pool.kind))
     }
 
     /// Bytes of the host-resident tables held in the host-RAM domain.

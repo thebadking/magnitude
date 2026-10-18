@@ -38,13 +38,14 @@ const SCRATCH_HEADER: usize = 4;
 /// The routed tensors of an expert record, in convert order.
 pub(crate) const KINDS: usize = 3;
 
-/// How long a parked step may wait for its fetches (spec 4.6).
+/// Maximum idle interval of source reads, and maximum device-handshake wait.
 pub(crate) const PARK_BOUND: Duration = Duration::from_secs(1);
 
 /// One routed tensor of a layer as the model file stores it: expert `e`'s
 /// bytes are `[base + e * bytes, + bytes)`.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct StoredTensor {
+    pub file: usize,
     pub base: u64,
     pub bytes: u64,
     /// The staging pool records of this tensor go to.
@@ -68,6 +69,9 @@ pub(crate) struct StagingPool {
     holds: Vec<Option<(usize, i32)>>,
     /// Free own records a hint leaves (spec 4.7).
     hint_keep: usize,
+    /// A CUDA view into the source arena shared by this tensor kind's
+    /// encodings. Its ranges are reused only at device publication gates.
+    device: Option<seismic::Tensor>,
 }
 
 /// Which records of a staging pool a read takes.
@@ -107,7 +111,27 @@ impl StagingPool {
             free: [(0..own).collect(), (own..own + conveyor).collect()],
             holds: vec![None; (own + conveyor) as usize],
             hint_keep: own.saturating_sub(hints) as usize,
+            device: None,
         }
+    }
+
+    pub(crate) fn with_device(mut self, device: seismic::Tensor) -> Self {
+        self.device = Some(device);
+        self
+    }
+
+    /// The source ticket has finished and the destination slot's earlier
+    /// converter is past its arrival gate. No readiness has been published
+    /// for the new converter yet.
+    fn copy_to_device(&self, source: u32, destination: usize, bytes: u64) -> Result<(), String> {
+        let device = self.device.as_ref().ok_or("missing CUDA source window")?;
+        let count = usize::try_from(bytes).map_err(|_| "source record exceeds host address range")?;
+        let offset = (destination as u64).checked_mul(self.record_bytes)
+            .ok_or("device source offset overflow")?;
+        // SAFETY: the completed ticket owns these host bytes; the caller
+        // owns this device slot until it publishes the converter's gate.
+        let source = unsafe { std::slice::from_raw_parts(self.at(source, bytes), count) };
+        unsafe { device.write_in_protocol(offset, source) }.map_err(|error| error.to_string())
     }
 
     fn shelf(&self, record: u32) -> Shelf {
@@ -248,10 +272,13 @@ impl Heartbeat {
 /// memory the device is using.
 const IDLE: Duration = Duration::from_micros(20);
 
-/// Wait for `ticket` until `deadline`, beating meanwhile.
-fn wait_ticket(ticket: &Ticket, deadline: Instant, heartbeat: &mut Heartbeat) -> Option<Outcome> {
+/// Wait while source ranges make progress, keeping the device heartbeat live.
+/// A batch may take longer than PARK_BOUND; only a full idle interval fails it.
+fn wait_ticket(ticket: &Ticket, heartbeat: &mut Heartbeat) -> Option<Outcome> {
+    let mut deadline = Instant::now() + PARK_BOUND;
     loop {
         heartbeat.beat();
+        deadline = deadline.max(ticket.progress_at() + PARK_BOUND);
         let slice = (Instant::now() + Duration::from_millis(1)).min(deadline);
         if let Some(outcome) = ticket.wait_until(slice) {
             return Some(outcome);
@@ -335,10 +362,26 @@ struct Staged {
     sequence: i32,
 }
 
+#[derive(Default)]
+struct StepTrace {
+    requests: usize,
+    choices: usize,
+    misses: usize,
+    staged: usize,
+    ready: usize,
+    source_bytes: [u64; 2],
+    revived: usize,
+    host_service: Duration,
+    scratch_requests: usize,
+    scratch_held: usize,
+    scratch_misses: usize,
+}
+
 struct State {
     directory: SharedDirectory,
     /// Steps a shared-cache invalidation failed.
     failed_steps: std::collections::BTreeSet<i32>,
+    fetch_failures: HashMap<i32, String>,
     layers: Vec<StreamedLayer>,
     scratch: ScratchFill,
     heartbeat: Heartbeat,
@@ -355,6 +398,9 @@ struct State {
     /// sequence of each of its later steps; any other step is its own group.
     /// Steps before the progress's group leave it.
     groups: std::collections::BTreeMap<i32, i32>,
+    /// (sequence, local layer) at the last scratch member of each group.
+    /// Later decode members cannot seed from the scratch banks.
+    seed_steps: std::collections::BTreeSet<(i32, usize)>,
     /// The device's progress: the newest point a hint or request proved.
     progress: Clock,
     /// The bank records the conveyor lies on, when a bank group lends them.
@@ -362,9 +408,14 @@ struct State {
     /// The newest scratch-served step: a prompt holds the loan until the
     /// device is past its group.
     prompt: i32,
+    /// Diagnostic observations only; absent on the ordinary serving path.
+    trace: Option<HashMap<i32, StepTrace>>,
 }
 
 impl State {
+    fn device_staging(&self) -> bool {
+        self.pools.first().is_some_and(|pool| pool.device.is_some())
+    }
     /// The device point of step `sequence` at `layer`.
     fn clock(&self, sequence: i32, layer: usize) -> Clock {
         clock(&self.groups, sequence, layer)
@@ -392,8 +443,9 @@ fn clock(groups: &std::collections::BTreeMap<i32, i32>, sequence: i32, layer: us
 
 /// The watcher's shared state and lifecycle.
 pub(crate) struct StreamingRuntime {
-    state: Arc<Mutex<State>>,
+    // Drop joins source workers before releasing their staging destinations.
     source: Arc<ExpertSource>,
+    state: Arc<Mutex<State>>,
     in_flight: Arc<(AtomicUsize, Mutex<()>, Condvar)>,
     stopping: Arc<AtomicBool>,
     watcher: Option<JoinHandle<()>>,
@@ -414,6 +466,7 @@ impl StreamingRuntime {
         let state = Arc::new(Mutex::new(State {
             directory,
             failed_steps: Default::default(),
+            fetch_failures: HashMap::new(),
             layers,
             scratch,
             heartbeat,
@@ -422,6 +475,7 @@ impl StreamingRuntime {
             converted: Vec::new(),
             kept: HashMap::new(),
             groups: Default::default(),
+            seed_steps: Default::default(),
             progress: Clock {
                 group: 0,
                 layer: 0,
@@ -429,6 +483,8 @@ impl StreamingRuntime {
             },
             loan,
             prompt: 0,
+            trace: std::env::var_os("MAGNITUDE_TRACE_EXPERT_STREAMING")
+                .is_some().then(HashMap::new),
         }));
         let source = Arc::new(source);
         let in_flight = Arc::new((AtomicUsize::new(0), Mutex::new(()), Condvar::new()));
@@ -457,13 +513,30 @@ impl StreamingRuntime {
     /// Steps `first..first + count` are about to be submitted, as one
     /// layer-major group when more than one: the watcher polls until every
     /// submitted step has completed. Called before any of their launches is
-    /// committed.
-    pub(crate) fn steps_submitted(&self, first: i32, count: i32) {
-        if count > 1 {
+    /// committed. `seeds` supplies each local layer's last scratch sequence.
+    pub(crate) fn steps_submitted(
+        &self,
+        first: i32,
+        count: i32,
+        seeds: impl IntoIterator<Item = Option<i32>>,
+    ) {
+        {
             let mut state = self.state.lock().expect("streaming state");
-            state
-                .groups
-                .extend((first + 1..first + count).map(|sequence| (sequence, first)));
+            if count > 1 {
+                state.groups.extend(
+                    (first + 1..first + count).map(|sequence| (sequence, first)),
+                );
+            }
+            let seeds = seeds.into_iter().collect::<Vec<_>>();
+            assert_eq!(
+                seeds.len(), state.layers.len(), "one seed boundary per local layer",
+            );
+            for (layer, sequence) in seeds.into_iter().enumerate() {
+                if let Some(sequence) = sequence {
+                    assert!((first..first + count).contains(&sequence));
+                    state.seed_steps.insert((sequence, layer));
+                }
+            }
         }
         let (in_flight, lock, wake) = &*self.in_flight;
         let _guard = lock.lock().expect("watcher lock");
@@ -487,14 +560,14 @@ impl StreamingRuntime {
         };
         invalidate(&mut state, invalid);
         let mut failed = state.failed_steps.remove(&sequence);
-        for control in state
-            .layers
-            .iter()
-            .flat_map(|layer| [&layer.control, &layer.scratch_control])
-        {
-            if control.load(FAILURE) == sequence {
-                failed = true;
-                control.store(FAILURE, 0);
+        let mut device_failures = Vec::new();
+        for (layer, ports) in state.layers.iter().enumerate() {
+            for (kind, control) in [("decode", &ports.control), ("scratch", &ports.scratch_control)] {
+                if control.load(FAILURE) == sequence {
+                    failed = true;
+                    device_failures.push(format!("layer {layer} {kind} device handshake"));
+                    control.store(FAILURE, 0);
+                }
             }
         }
         // Everything converted up to this step is in its slots now: a step
@@ -504,10 +577,20 @@ impl StreamingRuntime {
             state.progress = done;
         }
         release_past(&mut state, &self.source);
+        if let Some(trace) = state.trace.as_mut().and_then(|steps| steps.remove(&sequence)) {
+            eprintln!(
+                "expert streaming bank={:p} sequence={sequence} requests={} choices={} misses={} staged={} ready={} demand_bytes={} prefetch_bytes={} revived={} host_service_ms={:.3} scratch_requests={} scratch_held={} scratch_misses={}",
+                Arc::as_ptr(&self.source), trace.requests, trace.choices, trace.misses,
+                trace.staged, trace.ready, trace.source_bytes[0], trace.source_bytes[1],
+                trace.revived, trace.host_service.as_secs_f64() * 1000.0,
+                trace.scratch_requests, trace.scratch_held, trace.scratch_misses,
+            );
+        }
+        let detail = state.fetch_failures.remove(&sequence);
         if failed {
-            return Err(format!(
-                "step {sequence}: an expert fetch failed or exceeded {PARK_BOUND:?}"
-            ));
+            return Err(format!("step {sequence}: {}", detail.unwrap_or_else(||
+                if device_failures.is_empty() { "shared-cache invalidation failed".into() }
+                else { device_failures.join("; ") })));
         }
         Ok(())
     }
@@ -618,6 +701,10 @@ fn advance(state: &mut State, point: Clock, source: &ExpertSource) {
 fn invalidate(state: &mut State, invalid: Vec<(Clock, super::arena::Location)>) {
     for (clock, location) in invalid {
         state.failed_steps.insert(clock.sequence);
+        state.fetch_failures.entry(clock.sequence).or_insert_with(|| format!(
+            "uncommitted cache fill: layer {}, expert {}, slot {}, commit {} (expected {})",
+            clock.layer, location.key.expert.0, location.slot,
+            state.layers[clock.layer].commits.load(location.slot), clock.sequence));
         unmap(state, location);
         state.layers[location.key.layer.0 as usize]
             .control
@@ -704,6 +791,7 @@ fn release_past(state: &mut State, source: &ExpertSource) {
     // A step before the progress's group is past at every layer, as its own
     // group or its layer-major one.
     groups.retain(|&sequence, _| sequence >= progress.group);
+    state.seed_steps.retain(|&(sequence, _)| sequence >= progress.group);
     for (records, layer, expert) in freed {
         free_records(state, layer, records, (expert >= 0).then_some(expert));
     }
@@ -826,6 +914,9 @@ fn fetch(
                 .all(|(&record, pool)| state.pools[pool].shelf(record) == Shelf::Own)
     });
     if let Some(records) = revivable.then(|| revive(state, layer, expert)).flatten() {
+        if let Some(steps) = &mut state.trace {
+            steps.entry(sequence).or_default().revived += 1;
+        }
         state.staged.insert(
             (layer, expert),
             Staged {
@@ -846,10 +937,16 @@ fn fetch(
         let record = take_record(state, tensor.pool, shelf).expect("checked free");
         records[kind] = record;
         ranges.push(Range {
+            file: tensor.file,
             offset: tensor.base + u64::try_from(expert).expect("an expert index") * tensor.bytes,
             bytes: usize::try_from(tensor.bytes).expect("a record fits the host"),
             destination: state.pools[tensor.pool].at(record, tensor.bytes),
         });
+    }
+    if let Some(steps) = &mut state.trace {
+        let kind = if priority == Priority::Demand { 0 } else { 1 };
+        steps.entry(sequence).or_default().source_bytes[kind] +=
+            ranges.iter().map(|range| range.bytes as u64).sum::<u64>();
     }
     let ticket = source.submit(ranges, priority);
     state.staged.insert(
@@ -861,6 +958,66 @@ fn fetch(
         },
     );
     true
+}
+
+/// Decode's converter addresses only the own shelf. A prompt's conveyor
+/// read may still be running when a small member of its group needs it.
+/// Complete that read before moving its bytes, retaining its original
+/// destination through a failure or timeout.
+fn stage_for_decode(
+    state: &mut State,
+    source: &ExpertSource,
+    layer: usize,
+    expert: i32,
+    sequence: i32,
+) -> Result<(), String> {
+    let key = (layer, expert);
+    if state.device_staging() {
+        state.staged.get_mut(&key).expect("a pending decode source").sequence = sequence;
+        return Ok(());
+    }
+    let staged = state.staged.get(&key).expect("a pending decode source");
+    let records = staged.records;
+    let stored = state.layers[layer].stored;
+    let own = records.iter().zip(stored).all(|(&record, tensor)|
+        state.pools[tensor.pool].shelf(record) == Shelf::Own);
+    if own {
+        state.staged.get_mut(&key).unwrap().sequence = sequence;
+        return Ok(());
+    }
+    let ticket = Arc::clone(&staged.ticket);
+    source.promote(&ticket);
+    if wait_ticket(&ticket, &mut state.heartbeat) != Some(Outcome::Done) {
+        return Err(format!("conveyor source: {}", ticket.diagnostic()));
+    }
+    let mut needed = HashMap::<usize, usize>::new();
+    for tensor in stored { *needed.entry(tensor.pool).or_default() += 1; }
+    let available = |state: &State| needed.iter().all(|(&pool, &count)|
+        state.pools[pool].free[Shelf::Own as usize].len() >= count);
+    if !available(state) { reclaim_prefetches(state, source, layer); }
+    if !available(state) { return Err("no decode staging for a conveyor source".into()); }
+    let copied = std::array::from_fn(|kind|
+        take_record(state, stored[kind].pool, Shelf::Own).expect("reserved own capacity"));
+    for (kind, tensor) in stored.iter().enumerate() {
+        let pool = &state.pools[tensor.pool];
+        let from = pool.at(records[kind], tensor.bytes);
+        let to = pool.at(copied[kind], tensor.bytes);
+        // The ticket completed, the old records remain reserved, and the
+        // new own records are distinct reserved ranges with no device reader.
+        let bytes = usize::try_from(tensor.bytes).expect("an admitted source record fits the host");
+        for offset in (0..bytes).step_by(1024 * 1024) {
+            state.heartbeat.beat();
+            let count = (bytes - offset).min(1024 * 1024);
+            unsafe { std::ptr::copy_nonoverlapping(from.add(offset), to.add(offset), count); }
+        }
+    }
+    state.staged.insert(key, Staged {
+        records: copied,
+        ticket: Ticket::done(Priority::Demand),
+        sequence,
+    });
+    free_records(state, layer, records, None);
+    Ok(())
 }
 
 /// A hint: prefetch the expert unless it is resident, staged or fetching.
@@ -903,7 +1060,7 @@ fn prefetch(
 /// placement and its acknowledgement as its record arrives, then the request's.
 fn serve(state: &mut State, source: &ExpertSource, layer: usize, sequence: i32) {
     let started = Instant::now();
-    let deadline = started + PARK_BOUND;
+    let mut deadline = started + PARK_BOUND;
     let point = state.clock(sequence, layer);
     advance(state, point, source);
     let width = state.layers[layer].placement.len() / 5;
@@ -949,6 +1106,19 @@ fn serve(state: &mut State, source: &ExpertSource, layer: usize, sequence: i32) 
         .directory
         .begin(state.clock(sequence, layer), &routed)
         .expect("validated shared route union");
+    if let Some(steps) = &mut state.trace {
+        let trace = steps.entry(sequence).or_default();
+        trace.requests += 1;
+        trace.choices += resolution.choices.len();
+        for choice in &resolution.choices {
+            if !choice.needs_conversion { continue; }
+            trace.misses += 1;
+            if let Some(staged) = state.staged.get(&(layer, choice.location.key.expert.0 as i32)) {
+                trace.staged += 1;
+                trace.ready += usize::from(staged.ticket.poll() == Some(Outcome::Done));
+            }
+        }
+    }
     for victim in &resolution.evicted {
         let owner = &mut state.layers[victim.key.layer.0 as usize];
         owner.slot_of[victim.key.expert.0 as usize] = -1;
@@ -992,9 +1162,19 @@ fn serve(state: &mut State, source: &ExpertSource, layer: usize, sequence: i32) 
             }
         }
     }
+    for &expert in &pending {
+        if let Err(detail) = stage_for_decode(state, source, layer, expert, sequence) {
+            state.directory.submitted(point).expect("failed immutable frame");
+            state.fetch_failures.entry(sequence).or_insert_with(||
+                format!("layer {layer}, expert {expert}: {detail}"));
+            fail(state);
+            return;
+        }
+    }
     // All slots and raw source addresses become immutable before any source
     // readiness is published. Reserved source records remain staged until
     // their tickets finish, even when another record fails mid-request.
+    let device_staging = state.device_staging();
     for (c, choice) in resolution.choices.iter().enumerate() {
         if choices[c] < 0 {
             continue;
@@ -1002,7 +1182,11 @@ fn serve(state: &mut State, source: &ExpertSource, layer: usize, sequence: i32) 
         state.layers[layer]
             .placement
             .store(c, choice.location.slot as i32);
-        let records = if choice.needs_conversion {
+        let records = if choice.needs_conversion && device_staging {
+            let index = pending.iter().position(|&expert| expert == routed[c])
+                .expect("a pending conversion");
+            [index as i32; KINDS]
+        } else if choice.needs_conversion {
             state.staged[&(layer, routed[c])].records.map(|r| r as i32)
         } else {
             [-1; KINDS]
@@ -1030,7 +1214,16 @@ fn serve(state: &mut State, source: &ExpertSource, layer: usize, sequence: i32) 
     }
     while !outstanding.is_empty() {
         state.heartbeat.beat();
+        for expert in &outstanding {
+            deadline = deadline.max(state.staged[&(layer, *expert)].ticket.progress_at() + PARK_BOUND);
+        }
         if Instant::now() >= deadline || state.layers[layer].control.load(FAILURE) == sequence {
+            let reason = if Instant::now() >= deadline { "fetch made no progress" } else { "device handshake" };
+            let tickets = outstanding.iter().map(|expert| format!(
+                "expert {expert}: {}", state.staged[&(layer, *expert)].ticket.diagnostic()))
+                .collect::<Vec<_>>().join("; ");
+            state.fetch_failures.entry(sequence).or_insert_with(|| format!(
+                "layer {layer} {reason} after {:?}: {tickets}", started.elapsed()));
             fail(state);
             return;
         }
@@ -1045,8 +1238,27 @@ fn serve(state: &mut State, source: &ExpertSource, layer: usize, sequence: i32) 
                 }
                 Some(Outcome::Done) => {}
                 Some(_) => {
+                    let detail = state.staged[&(layer, expert)].ticket.diagnostic();
+                    state.fetch_failures.entry(sequence).or_insert_with(||
+                        format!("layer {layer}, expert {expert}: {detail}"));
                     fail(state);
                     return;
+                }
+            }
+            if device_staging {
+                let staged = &state.staged[&(layer, expert)];
+                let destination = pending.iter().position(|&pending| pending == expert)
+                    .expect("a pending conversion");
+                for (kind, tensor) in state.layers[layer].stored.iter().enumerate() {
+                    state.heartbeat.beat();
+                    if let Err(error) = state.pools[tensor.pool]
+                        .copy_to_device(staged.records[kind], destination, tensor.bytes)
+                    {
+                        state.fetch_failures.entry(sequence).or_insert_with(||
+                            format!("layer {layer}, expert {expert}: device source transfer: {error}"));
+                        fail(state);
+                        return;
+                    }
                 }
             }
             let staged = state
@@ -1074,9 +1286,12 @@ fn serve(state: &mut State, source: &ExpertSource, layer: usize, sequence: i32) 
         }
     }
     state.layers[layer].served = sequence;
+    if let Some(steps) = &mut state.trace {
+        steps.entry(sequence).or_default().host_service += started.elapsed();
+    }
 }
 
-/// The experts of `layer` a prompt group seeds at its last step: its most
+/// The experts of `layer` a prompt group seeds at its last scratch step: its most
 /// routed (`routed`, the group's choices per expert) up to the layer's share,
 /// those the bank lacks. To make room within the share it evicts the layer's
 /// least recently read other experts, never the step's `hits`, which the fill
@@ -1092,23 +1307,34 @@ fn keep_routed(state: &mut State, layer: usize, routed: &[u32], hits: &[i32]) ->
     kept.sort_by_key(|&expert| std::cmp::Reverse(routed[expert as usize]));
     kept.truncate(share);
     let slot_of = &state.layers[layer].slot_of;
-    let seeded = kept
+    let mut seeded = kept
         .iter()
         .copied()
         .filter(|&expert| slot_of[expert as usize] < 0)
         .collect::<Vec<_>>();
+    // Hits remain pinned until their scratch copies finish. New seeds share
+    // that frame and can use only the slots not occupied by those hits.
+    let capacity = state
+        .directory
+        .request_capacity(layer)
+        .expect("a streamed layer");
+    seeded.truncate(capacity.saturating_sub(hits.len()));
     let resident = slot_of.iter().filter(|&&slot| slot >= 0).count();
+    let mut others = (0..slot_of.len() as i32)
+        .filter(|&expert| {
+            slot_of[expert as usize] >= 0 && !kept.contains(&expert) && !hits.contains(&expert)
+        })
+        .map(|expert| {
+            let slot = slot_of[expert as usize] as usize;
+            (state.layers[layer].stamps.load(slot), expert)
+        })
+        .collect::<Vec<_>>();
+    // Protected hits can already occupy the whole share. Defer optional
+    // seeds rather than evicting another layer's prompt working set.
+    let protected = resident - others.len();
+    seeded.truncate(share.saturating_sub(protected));
     let excess = (resident + seeded.len()).saturating_sub(share);
     if excess > 0 {
-        let mut others = (0..slot_of.len() as i32)
-            .filter(|&expert| {
-                slot_of[expert as usize] >= 0 && !kept.contains(&expert) && !hits.contains(&expert)
-            })
-            .map(|expert| {
-                let slot = slot_of[expert as usize] as usize;
-                (state.layers[layer].stamps.load(slot), expert)
-            })
-            .collect::<Vec<_>>();
         others.sort_unstable();
         for (_, expert) in others.into_iter().take(excess) {
             let discarded = state
@@ -1126,7 +1352,8 @@ fn keep_routed(state: &mut State, layer: usize, routed: &[u32], hits: &[i32]) ->
 /// A scratch-served launch's fill (spec 4.9): of the routed experts the
 /// scratch banks lack, list those in the layer's bank for the copy, then
 /// stage the rest round by round, each
-/// round's park bounded by `PARK_BOUND` from its start. Round `r`'s records
+/// source reads bounded by idle intervals and device arrivals by `PARK_BOUND`.
+/// Round `r`'s records
 /// are freed once the device arrives at round `r + 1`, after converting
 /// them; the last rounds' once the device is past the layer.
 fn serve_scratch(state: &mut State, source: &ExpertSource, layer: usize, sequence: i32) {
@@ -1148,8 +1375,8 @@ fn serve_scratch(state: &mut State, source: &ExpertSource, layer: usize, sequenc
     // The launch's experts resolve against the shared directory as a decode
     // request does: its hits are pinned while the fill copies them into the
     // scratch banks. The fill reads and converts every absent expert into the
-    // scratch banks. At the group's last step of the layer the bank keeps the
-    // group's most routed experts, up to the layer's share of its bank group:
+    // scratch banks. At the layer's last scratch member the bank keeps the
+    // scratch members' most routed experts, up to its share of the bank group:
     // the fill seeds them from the scratch banks into their slots and the
     // device commits them (`routed_seed_commit`). The decode that follows
     // reads what the prompt read most. A prompt reads every layer in turn:
@@ -1158,12 +1385,18 @@ fn serve_scratch(state: &mut State, source: &ExpertSource, layer: usize, sequenc
     let (hits, absent): (Vec<i32>, Vec<i32>) = flagged
         .iter()
         .partition(|&&expert| state.layers[layer].slot_of[expert as usize] >= 0);
+    if let Some(steps) = &mut state.trace {
+        let trace = steps.entry(sequence).or_default();
+        trace.scratch_requests += 1;
+        trace.scratch_held += held.iter().filter(|&&count| count > 0).count();
+        trace.scratch_misses += absent.len();
+    }
     let routed = held
         .iter()
         .zip(&flags)
         .map(|(&held, &flag)| held + flag.max(0) as u32)
         .collect::<Vec<_>>();
-    let seeded = if sequence == state.last_of_group(sequence) {
+    let seeded = if state.seed_steps.contains(&(sequence, layer)) {
         keep_routed(state, layer, &routed, &hits)
     } else {
         Vec::new()
@@ -1203,16 +1436,25 @@ fn serve_scratch(state: &mut State, source: &ExpertSource, layer: usize, sequenc
             state.layers[layer].stamps.store(slot, sequence);
             seeds.push((expert as u32, slot));
         }
-        publish_list(&state.scratch.seeds, sequence, &seeds);
         state
             .directory
             .submitted(clock)
             .expect("immutable scratch publication");
-    } else {
-        publish_list(&state.scratch.seeds, sequence, &[]);
+    }
+    let failure = |state: &mut State, error: String| {
+        state.fetch_failures.entry(sequence).or_insert_with(||
+            format!("layer {layer}: source list transfer: {error}"));
+        state.layers[layer].scratch_control.store(FAILURE, sequence);
+    };
+    if let Err(error) = publish_list(&state.scratch.seeds, sequence, &seeds) {
+        failure(state, error);
+        return;
     }
     for list in &state.scratch.copies {
-        publish_list(list, sequence, &copies);
+        if let Err(error) = publish_list(list, sequence, &copies) {
+            failure(state, error);
+            return;
+        }
     }
     let pools = state.layers[layer].stored.map(|stored| stored.pool);
     convey(state, source, layer, sequence);
@@ -1229,10 +1471,15 @@ fn serve_scratch(state: &mut State, source: &ExpertSource, layer: usize, sequenc
         .chunks(state.scratch.round_records.max(1))
         .map(<[i32]>::to_vec)
         .collect::<Vec<_>>();
-    // Records of the rounds the device may still be converting, with the
-    // expert each holds (-1 once a read of its round failed).
+    // Records of published rounds the device may still be converting, with
+    // the expert each holds. Unpublished failed rounds stay ticket-owned.
     let mut held: Vec<Vec<(i32, [u32; KINDS])>> = Vec::new();
     let mut failed = chunks.len() > state.scratch.rounds();
+    if failed {
+        state.fetch_failures.entry(sequence).or_insert_with(|| format!(
+            "layer {layer}: scratch fill needs {} rounds, plan holds {}",
+            chunks.len(), state.scratch.rounds()));
+    }
     for round in 0..state.scratch.rounds() {
         let deadline = Instant::now() + PARK_BOUND;
         if failed {
@@ -1245,6 +1492,10 @@ fn serve_scratch(state: &mut State, source: &ExpertSource, layer: usize, sequenc
             let arrival = state.scratch.arrival(round - 1);
             while state.layers[layer].scratch_control.load(arrival) != sequence {
                 if Instant::now() >= deadline {
+                    let observed = state.layers[layer].scratch_control.load(arrival);
+                    state.fetch_failures.entry(sequence).or_insert_with(|| format!(
+                        "layer {layer}, scratch round {round}: device arrival {} stayed at {observed}, expected {sequence}",
+                        round - 1));
                     failed = true;
                     break;
                 }
@@ -1261,7 +1512,8 @@ fn serve_scratch(state: &mut State, source: &ExpertSource, layer: usize, sequenc
         }
         let mut records = Vec::with_capacity(experts.len());
         let mut ranges = Vec::with_capacity(experts.len() * KINDS);
-        let mut conveyed = Vec::new();
+        let mut fetched = Vec::new();
+        let mut round_tickets = HashMap::new();
         for &expert in &experts {
             if let Some(kept) = revive(state, layer, expert) {
                 records.push((expert, kept));
@@ -1273,13 +1525,16 @@ fn serve_scratch(state: &mut State, source: &ExpertSource, layer: usize, sequenc
                     source.promote(&staged.ticket);
                 }
                 records.push((expert, staged.records));
-                conveyed.push(staged.ticket);
+                round_tickets.insert(expert, staged.ticket);
                 continue;
             }
             if !pools.iter().all(|&pool| available(state, pool, Shelf::Own)) {
                 reclaim_prefetches(state, source, layer);
             }
             if !pools.iter().all(|&pool| available(state, pool, Shelf::Own)) {
+                let free = pools.map(|pool| state.pools[pool].free[Shelf::Own as usize].len());
+                state.fetch_failures.entry(sequence).or_insert_with(|| format!(
+                    "layer {layer}, scratch round {round}: staging exhausted (own free {free:?})"));
                 failed = true;
                 break;
             }
@@ -1288,6 +1543,7 @@ fn serve_scratch(state: &mut State, source: &ExpertSource, layer: usize, sequenc
             for (kind, tensor) in stored.iter().enumerate() {
                 record[kind] = take_record(state, tensor.pool, Shelf::Own).expect("checked free");
                 ranges.push(Range {
+                    file: tensor.file,
                     offset: tensor.base
                         + u64::try_from(expert).expect("an expert index") * tensor.bytes,
                     bytes: usize::try_from(tensor.bytes).expect("a record fits the host"),
@@ -1295,26 +1551,85 @@ fn serve_scratch(state: &mut State, source: &ExpertSource, layer: usize, sequenc
                 });
             }
             records.push((expert, record));
+            fetched.push(expert);
         }
         if !ranges.is_empty() {
+            if let Some(steps) = &mut state.trace {
+                steps.entry(sequence).or_default().source_bytes[0] +=
+                    ranges.iter().map(|range| range.bytes as u64).sum::<u64>();
+            }
             let ticket = source.submit(ranges, Priority::Demand);
-            failed |= wait_ticket(&ticket, deadline, &mut state.heartbeat) != Some(Outcome::Done);
+            for expert in fetched {
+                round_tickets.insert(expert, Arc::clone(&ticket));
+            }
         }
-        for ticket in &conveyed {
-            failed |= wait_ticket(ticket, deadline, &mut state.heartbeat) != Some(Outcome::Done);
+        for ticket in round_tickets.values() {
+            if wait_ticket(ticket, &mut state.heartbeat) != Some(Outcome::Done) {
+                failed = true;
+                state.fetch_failures.entry(sequence).or_insert_with(|| format!(
+                    "layer {layer}, scratch round {round}: fetch made no progress for {PARK_BOUND:?}: {}",
+                    ticket.diagnostic()));
+            }
         }
         if failed {
-            held.push(records.into_iter().map(|(_, record)| (-1, record)).collect());
+            // This round was never published to the device. A timed-out read
+            // still owns its destination: release_past must observe its ticket
+            // finish before the staging record can be reused.
+            for (expert, records) in records {
+                let ticket = round_tickets.remove(&expert)
+                    .unwrap_or_else(|| Ticket::done(Priority::Demand));
+                state.staged.insert((layer, expert), Staged {
+                    records,
+                    ticket,
+                    sequence,
+                });
+            }
             break;
+        }
+        let device_staging = state.device_staging();
+        if device_staging {
+            for (index, &(_, record)) in records.iter().enumerate() {
+                let destination = (round % 2) * state.scratch.round_records + index;
+                for (kind, tensor) in state.layers[layer].stored.iter().enumerate() {
+                    state.heartbeat.beat();
+                    if let Err(error) = state.pools[tensor.pool]
+                        .copy_to_device(record[kind], destination, tensor.bytes)
+                    {
+                        state.fetch_failures.entry(sequence).or_insert_with(|| format!(
+                            "layer {layer}, scratch round {round}: device source transfer: {error}"));
+                        failed = true;
+                        break;
+                    }
+                }
+                if failed { break; }
+            }
+            if failed {
+                // All source reads have completed. The unpublished copies
+                // have no device consumer; retain host records until the
+                // failed step's physical completion like published rounds.
+                held.push(records);
+                break;
+            }
         }
         for (kind, list) in state.scratch.lists[round].iter().enumerate() {
             let entries = records
                 .iter()
-                .map(|&(expert, record)| (record[kind], expert as usize))
+                .enumerate()
+                .map(|(index, &(expert, record))| {
+                    let source = if device_staging {
+                        ((round % 2) * state.scratch.round_records + index) as u32
+                    } else { record[kind] };
+                    (source, expert as usize)
+                })
                 .collect::<Vec<_>>();
-            publish_list(list, sequence, &entries);
+            if let Err(error) = publish_list(list, sequence, &entries) {
+                failure(state, error);
+                failed = true;
+                break;
+            }
         }
         held.push(records);
+        if failed { break; }
         state.layers[layer]
             .scratch_control
             .store(state.scratch.acknowledgement(round), sequence);
@@ -1349,13 +1664,14 @@ fn convey(state: &mut State, source: &ExpertSource, layer: usize, sequence: i32)
 /// Write a convert or copy list for step `sequence`: its (source, target)
 /// pairs, then the count, then the sequence, which the device checks against
 /// its own step before it reads the rest (`routed_convert_wide`, `routed_copy`).
-fn publish_list(list: &SharedWords, sequence: i32, entries: &[(u32, usize)]) {
+fn publish_list(list: &SharedWords, sequence: i32, entries: &[(u32, usize)]) -> Result<(), String> {
     for (index, &(source, target)) in entries.iter().enumerate() {
         list.store(2 + 2 * index, source as i32);
         list.store(3 + 2 * index, target as i32);
     }
     list.store(1, entries.len() as i32);
     list.store(0, sequence);
+    list.publish()
 }
 
 /// Cancel every unstarted hint prefetch of the other layers so a demand read
@@ -1389,8 +1705,28 @@ mod tests {
     use super::*;
     use seismic::{BackendName, DeviceCatalog, Element, Tensor};
     fn words(device: &seismic::Device, n: u64) -> SharedWords {
-        SharedWords::new(Tensor::zeros(device, Element::i32(), &[n]).unwrap()).unwrap()
+        SharedWords::new(Tensor::shared(device, Element::i32(), &[n]).unwrap()).unwrap()
     }
+    #[test]
+    fn progressing_source_batch_can_exceed_one_park_interval() {
+        let device = DeviceCatalog::discover().unwrap().open_backend(
+            if cfg!(target_os = "macos") { BackendName::Metal } else { BackendName::Cuda }
+        ).unwrap();
+        let ticket = Ticket::controlled_ranges(5);
+        let worker_ticket = Arc::clone(&ticket);
+        let worker = std::thread::spawn(move || {
+            for _ in 0..5 {
+                std::thread::sleep(PARK_BOUND / 3);
+                worker_ticket.complete_controlled_range();
+            }
+        });
+        let started = Instant::now();
+        let outcome = wait_ticket(&ticket, &mut Heartbeat::new(words(&device, 1)));
+        worker.join().unwrap();
+        assert_eq!(outcome, Some(Outcome::Done));
+        assert!(started.elapsed() > PARK_BOUND);
+    }
+
     #[test]
     fn first_record_publishes_before_last_source_and_neither_becomes_a_cache_hit() {
         publication_case(false);
@@ -1403,17 +1739,22 @@ mod tests {
     fn the_conveyor_borrows_bank_records_for_a_prompt_and_gives_them_back() {
         let device = DeviceCatalog::discover()
             .unwrap()
-            .open_backend(BackendName::Metal)
+            .open_backend(if cfg!(target_os = "macos") {
+                BackendName::Metal
+            } else {
+                BackendName::Cuda
+            })
             .unwrap();
         let layers = vec![StreamedLayer::new(
             words(&device, 256),
             words(&device, 8),
             words(&device, 8),
             words(&device, 68),
-            SharedWords::new(Tensor::zeros(&device, Element::i32(), &[5, 64]).unwrap()).unwrap(),
+            SharedWords::new(Tensor::shared(&device, Element::i32(), &[5, 64]).unwrap()).unwrap(),
             words(&device, 18),
             [words(&device, 66), words(&device, 66)],
             std::array::from_fn(|pool| StoredTensor {
+                file: 0,
                 base: 0,
                 bytes: 16,
                 pool,
@@ -1422,9 +1763,9 @@ mod tests {
         let pools = (0..3)
             .map(|_| {
                 StagingPool::new(
-                    SharedBytes::new(Tensor::zeros(&device, Element::f32(), &[64, 2, 2]).unwrap())
+                    SharedBytes::new(Tensor::shared(&device, Element::f32(), &[64, 2, 2]).unwrap())
                         .unwrap(),
-                    SharedBytes::new(Tensor::zeros(&device, Element::f32(), &[16, 2, 2]).unwrap())
+                    SharedBytes::new(Tensor::shared(&device, Element::f32(), &[16, 2, 2]).unwrap())
                         .unwrap(),
                     64,
                     16,
@@ -1437,7 +1778,7 @@ mod tests {
             std::env::temp_dir().join(format!("expert-conveyor-loan-{}", std::process::id()));
         std::fs::write(&file, [0u8; 512]).unwrap();
         let source =
-            ExpertSource::new(crate::streaming::source::ModelFile::open(&file).unwrap()).unwrap();
+            ExpertSource::new(vec![crate::streaming::source::ModelFile::open(&file).unwrap()]).unwrap();
         let runtime = StreamingRuntime::new(
             layers,
             ScratchFill::new(
@@ -1493,10 +1834,14 @@ mod tests {
     fn publication_case(fail_last: bool) {
         let device = DeviceCatalog::discover()
             .unwrap()
-            .open_backend(BackendName::Metal)
+            .open_backend(if cfg!(target_os = "macos") {
+                BackendName::Metal
+            } else {
+                BackendName::Cuda
+            })
             .unwrap();
-        let control_tensor = Tensor::zeros(&device, Element::i32(), &[68]).unwrap();
-        let placement_tensor = Tensor::zeros(&device, Element::i32(), &[5, 64]).unwrap();
+        let control_tensor = Tensor::shared(&device, Element::i32(), &[68]).unwrap();
+        let placement_tensor = Tensor::shared(&device, Element::i32(), &[5, 64]).unwrap();
         let control = SharedWords::new(control_tensor.clone()).unwrap();
         let placement = SharedWords::new(placement_tensor.clone()).unwrap();
         let layers = vec![StreamedLayer::new(
@@ -1508,6 +1853,7 @@ mod tests {
             words(&device, 18),
             [words(&device, 66), words(&device, 66)],
             std::array::from_fn(|pool| StoredTensor {
+                file: 0,
                 base: 0,
                 bytes: 16,
                 pool,
@@ -1528,9 +1874,9 @@ mod tests {
         let pools = (0..3)
             .map(|_| {
                 StagingPool::new(
-                    SharedBytes::new(Tensor::zeros(&device, Element::f32(), &[64, 2, 2]).unwrap())
+                    SharedBytes::new(Tensor::shared(&device, Element::f32(), &[64, 2, 2]).unwrap())
                         .unwrap(),
-                    SharedBytes::new(Tensor::zeros(&device, Element::f32(), &[16, 2, 2]).unwrap())
+                    SharedBytes::new(Tensor::shared(&device, Element::f32(), &[16, 2, 2]).unwrap())
                         .unwrap(),
                     64,
                     16,
@@ -1543,7 +1889,7 @@ mod tests {
             std::env::temp_dir().join(format!("expert-ready-control-{}", std::process::id()));
         std::fs::write(&file, [0u8; 512]).unwrap();
         let source =
-            ExpertSource::new(crate::streaming::source::ModelFile::open(&file).unwrap()).unwrap();
+            ExpertSource::new(vec![crate::streaming::source::ModelFile::open(&file).unwrap()]).unwrap();
         let runtime = StreamingRuntime::new(
             layers,
             scratch,
@@ -1579,9 +1925,12 @@ mod tests {
             control.store(EXPERTS + index, expert);
         }
         control.store(REQUEST, 1);
-        runtime.steps_submitted(1, 1);
+        runtime.steps_submitted(1, 1, [None]);
         let deadline = Instant::now() + Duration::from_secs(2);
-        while placement.load(4 * 64) != 1 && Instant::now() < deadline {
+        // Each choice publishes its own flag, including duplicate choices.
+        while (placement.load(4 * 64) != 1 || placement.load(4 * 64 + 1) != 1)
+            && Instant::now() < deadline
+        {
             std::thread::yield_now();
         }
         assert_eq!(placement.load(4 * 64), 1);
@@ -1613,16 +1962,20 @@ mod tests {
 
     /// A layer-major group's later steps at a layer find what the earlier
     /// steps' fills left in the scratch banks and read only the experts they
-    /// lack; the group's last step seeds the bank with its most routed.
+    /// lack; its last scratch step seeds even before a small decode tail.
     #[test]
     fn a_prompt_group_reads_what_scratch_lacks_and_keeps_its_most_routed_experts() {
         let device = DeviceCatalog::discover()
             .unwrap()
-            .open_backend(BackendName::Metal)
+            .open_backend(if cfg!(target_os = "macos") {
+                BackendName::Metal
+            } else {
+                BackendName::Cuda
+            })
             .unwrap();
         // Two views of one device tensor: the runtime's and the device's.
         let shared = |n| {
-            let tensor = Tensor::zeros(&device, Element::i32(), &[n]).unwrap();
+            let tensor = Tensor::shared(&device, Element::i32(), &[n]).unwrap();
             (
                 SharedWords::new(tensor.clone()).unwrap(),
                 SharedWords::new(tensor).unwrap(),
@@ -1635,10 +1988,11 @@ mod tests {
             words(&device, 8),
             commits,
             words(&device, 68),
-            SharedWords::new(Tensor::zeros(&device, Element::i32(), &[5, 64]).unwrap()).unwrap(),
+            SharedWords::new(Tensor::shared(&device, Element::i32(), &[5, 64]).unwrap()).unwrap(),
             scratch_control,
             [words(&device, 66), words(&device, 66)],
             std::array::from_fn(|pool| StoredTensor {
+                file: 0,
                 base: 0,
                 bytes: 16,
                 pool,
@@ -1660,9 +2014,9 @@ mod tests {
         let pools = (0..3)
             .map(|_| {
                 StagingPool::new(
-                    SharedBytes::new(Tensor::zeros(&device, Element::f32(), &[64, 2, 2]).unwrap())
+                    SharedBytes::new(Tensor::shared(&device, Element::f32(), &[64, 2, 2]).unwrap())
                         .unwrap(),
-                    SharedBytes::new(Tensor::zeros(&device, Element::f32(), &[16, 2, 2]).unwrap())
+                    SharedBytes::new(Tensor::shared(&device, Element::f32(), &[16, 2, 2]).unwrap())
                         .unwrap(),
                     64,
                     16,
@@ -1674,7 +2028,7 @@ mod tests {
         let file = std::env::temp_dir().join(format!("expert-union-fill-{}", std::process::id()));
         std::fs::write(&file, [0u8; 512]).unwrap();
         let source =
-            ExpertSource::new(crate::streaming::source::ModelFile::open(&file).unwrap()).unwrap();
+            ExpertSource::new(vec![crate::streaming::source::ModelFile::open(&file).unwrap()]).unwrap();
         let runtime = StreamingRuntime::new(
             layers,
             scratch,
@@ -1685,7 +2039,9 @@ mod tests {
             None,
         )
         .unwrap();
-        runtime.steps_submitted(1, 3);
+        // Three scratch members followed by a decode member. The latter
+        // has no scratch fill from which it could seed the bank.
+        runtime.steps_submitted(1, 4, [Some(3)]);
         let listed = |list: &SharedWords, at: usize| {
             (0..list.load(1) as usize)
                 .map(|i| list.load(at + 2 * i))
@@ -1729,13 +2085,77 @@ mod tests {
                 device_commits.store(device_seeds.load(3 + 2 * i) as usize, sequence);
             }
         }
-        // Only the group's last step seeds: the layer's share (all 8
+        // Only the group's last scratch step seeds: the layer's share (all 8
         // records) of the group's most routed experts, the group's choices
         // summed over its steps. Experts 7 and 8 are read but not kept.
         assert_eq!(seeded, [vec![], vec![], vec![4, 9, 10, 11, 12, 3, 5, 6]]);
         runtime.step_completed(1, true).unwrap();
         runtime.step_completed(2, true).unwrap();
         runtime.step_completed(3, true).unwrap();
+        runtime.step_completed(4, true).unwrap();
+        // A later prompt needs every cached expert and a more popular cold
+        // one. All hits must remain pinned for copying; optional seeding may
+        // not reserve a ninth slot in this eight-slot bank.
+        runtime.state.lock().unwrap().scratch.holds = None;
+        runtime.steps_submitted(5, 1, [Some(5)]);
+        device_flags.fill(0);
+        for &expert in &seeded[2] {
+            device_flags.store(expert as usize, 1);
+        }
+        device_flags.store(13, 10);
+        device_control.store(REQUEST, 5);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while device_control.load(SCRATCH_HEADER) != 5 && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(device_control.load(SCRATCH_HEADER), 5);
+        assert_eq!(device_control.load(FAILURE), 0);
+        assert_eq!(listed(&device_lists[0], 3), [13]);
+        assert_eq!(listed(&device_seeds, 2), Vec::<i32>::new());
+        let mut copied = listed(&device_copies[0], 3);
+        copied.sort();
+        let mut cached = seeded[2].clone();
+        cached.sort();
+        assert_eq!(copied, cached);
+        runtime.step_completed(5, true).unwrap();
+
+        // A failed scratch round must keep a still-running source's staging
+        // even after device progress passes the failed layer.
+        runtime.steps_submitted(6, 1, [Some(6)]);
+        let delayed = Ticket::controlled();
+        {
+            let mut state = runtime.state.lock().unwrap();
+            state.scratch.holds = None;
+            device_flags.fill(0);
+            device_flags.store(14, 1);
+            let records = std::array::from_fn(|pool|
+                take_record(&mut state, pool, Shelf::Own).unwrap());
+            state.staged.insert((0, 14), Staged {
+                records,
+                ticket: Arc::clone(&delayed),
+                sequence: 6,
+            });
+            // Keep the emulated device request consistent with the manual
+            // serve, so the watcher cannot rediscover the older request 5.
+            device_control.store(REQUEST, 6);
+            serve_scratch(&mut state, &runtime.source, 0, 6);
+            assert_eq!(device_control.load(FAILURE), 6);
+            assert!(state.fetch_failures[&6].contains("running=1"));
+            state.progress = state.clock(6, usize::MAX);
+            release_past(&mut state, &runtime.source);
+            assert!(state.staged.contains_key(&(0, 14)));
+            for (pool, record) in records.into_iter().enumerate() {
+                assert!(!state.pools[pool].free[Shelf::Own as usize].contains(&record));
+            }
+            delayed.finish_controlled(true);
+            release_past(&mut state, &runtime.source);
+            assert!(!state.staged.contains_key(&(0, 14)));
+            assert!(!state.kept.contains_key(&(0, 14)));
+            for (pool, record) in records.into_iter().enumerate() {
+                assert!(state.pools[pool].free[Shelf::Own as usize].contains(&record));
+            }
+        }
+        assert!(runtime.step_completed(6, true).is_err());
         drop(runtime);
         std::fs::remove_file(file).unwrap();
     }

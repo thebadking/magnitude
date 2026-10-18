@@ -116,12 +116,16 @@ def measurement_options(parser: argparse.ArgumentParser) -> None:
                            help='the binary\'s source build, {"commit", "dirty_digest"} JSON')
     magnitude.add_argument("--harness", type=Path, help="magnitude-harness, for rendering")
     magnitude.add_argument("--magnitude-device", default="auto")
+    magnitude.add_argument("--magnitude-decoder-ranges", help="exact decoder range JSON")
+    magnitude.add_argument("--magnitude-lookahead", choices=("on", "off"), help="override selected-token lookahead")
     magnitude.add_argument("--magnitude-cache-dir", type=Path,
                            help="the engine's kernel cache, exactly this directory")
     magnitude.add_argument("--magnitude-kernel-cache-root", type=Path,
                            help="persistent per-model, per-binary kernel caches under this root "
                                 f"(`run` default: {KERNEL_CACHE_ROOT})")
     magnitude.add_argument("--magnitude-prefill-tokens", type=int)
+    magnitude.add_argument("--magnitude-prefill-group", metavar="auto|CHUNKS",
+                           help="override the engine's layer-major prompt group capacity")
     magnitude.add_argument("--magnitude-mtp-proposals", type=int)
     magnitude.add_argument("--magnitude-draft-budget",
                            help="exact draft-budget JSON, or `adaptive`")
@@ -188,9 +192,12 @@ def artifact_pairs(values: list[str]) -> dict[str, str]:
 def engine_options(args: argparse.Namespace) -> EngineOptions:
     magnitude = MagnitudeOptions(
         device=args.magnitude_device,
+        decoder_ranges=args.magnitude_decoder_ranges,
+        lookahead=None if args.magnitude_lookahead is None else args.magnitude_lookahead == "on",
         cache_dir=args.magnitude_cache_dir,
         kernel_cache_root=args.magnitude_kernel_cache_root,
         prefill_tokens=args.magnitude_prefill_tokens,
+        prefill_group=args.magnitude_prefill_group,
         mtp_proposals=args.magnitude_mtp_proposals,
         draft_budget=args.magnitude_draft_budget,
         method=args.magnitude_method,

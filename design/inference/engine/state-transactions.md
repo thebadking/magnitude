@@ -48,7 +48,28 @@ span bound, free space and per-row references. A domain is one of:
 - **Block(rate)**: one row per `rate` tokens: block `b`'s row is written by the advance whose rows
   reach position `(b + 1)·rate`, and a history at position `p` references blocks `[0, p/rate)`.
 
-A model has one Window domain per distinct window size. Qwen's stores have one Token domain.
+A model has one Window domain per distinct window size before physical device
+partitioning. Qwen's unpartitioned stores have one Token domain. Each stored
+domain has one explicit device owner; Shared readers retain their source's
+owner. Distinct domains may reside on different devices while keeping one
+transaction and binding right. Recurrent components are grouped into one slab store per opened device,
+with common bank indices and the original logical component order. Compaction
+copies every group before publishing bank placement; slab removal retains all
+groups until their address tables have been updated. Device assignments are validated before allocation, and growth is
+claimed separately on every owning device. A refusal on one device rolls back
+new backing on all devices without changing accepted state. A decoder handoff
+preserves the global block and recurrent-component cursors and copies all carried
+activation and token tensors into storage reserved on the next owner. The source
+work completes before copying or recycling its outputs. Each owner's streamed
+expert bank supplies its own sequence; sequence numbers are never transferred
+between banks. A logical submission retains every owner's bank step and graph
+leases through physical completion. Stored-table failures are attributed to the
+logical launch that queued each read, including reads on earlier owners. Every
+owner's bank outcome is completed before state reconciliation. Physical state
+maintenance dispatches each pinned plane through that plane's opened device and
+its local graph workspace; an unknown owner is refused before copying any plane.
+All plane copies finish before the logical maintenance result is returned. A
+failed handoff aborts the logical advance across all owners.
 
 A selected attention read's indexer (`LayerRef::Indexer`) keeps its raw keys, each with its row's
 rotary coordinates, in a Window(rate − 1) domain and its finished block keys in a Block(rate)
@@ -144,7 +165,11 @@ drafter priming, is the only work that holds state between flights and lives in 
 right. Its tentative rows are indistinguishable from another history's in every layout question
 (a blocked last page, rows in place, growth), so it lives only until the next operation that
 uses the binding right: a matching submission claims it, and every other such operation orphans
-it on entry, before asking any layout question. A lookahead that embeds a device-selected row of
+it on entry, before asking any layout question. Orphaning waits for physical
+completion, retires stored-table reads and completes every physical owner's
+expert-cache ticket, including when another owner's ticket reports failure.
+Discarding speculative sequence state does not discard completed cache effects.
+A lookahead that embeds a device-selected row of
 a streamed table ([residency](residency.md)) is queued before the host knows whether the device
 holds that row. One whose row the device did not hold is not the continuation: no submission
 claims it, it is orphaned, and the step is submitted again with the row brought. Growth has no

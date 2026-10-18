@@ -327,6 +327,8 @@ pub struct ExecutionManifest {
     pub service: ServiceLimits,
     pub path: ExecutionPath,
     pub device: DeviceRequest,
+    #[serde(default)]
+    pub decoder_ranges: Vec<magnitude_executor::DecoderRange>,
     /// The kernel cache directory the host names; `None` caches nothing.
     pub kernel_cache: Option<PathBuf>,
     /// The host's threshold policy: every engine claim keeps each domain's
@@ -345,7 +347,19 @@ pub struct ExecutionManifest {
 /// Device-free readiness evidence returned only after worker construction has
 /// committed the complete resource plan and qualified execution pack.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceResourcePlanSummary {
+    pub device: seismic::DeviceSelector,
+    pub domain_capacity_bytes: u64,
+    pub planned_bytes: u64,
+    pub immutable_bytes: u64,
+    pub state_bytes: u64,
+    pub scratch_bytes: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourcePlanSummary {
+    #[serde(default)]
+    pub owners: Vec<DeviceResourcePlanSummary>,
     pub domain_capacity_bytes: u64,
     /// Planned charges when every selected component is resident, not the
     /// opened device's current Seismic charge.
@@ -361,10 +375,33 @@ pub struct ResourcePlanSummary {
 }
 
 impl ResourcePlanSummary {
+    pub fn from_owner_plans(plans: &[(seismic::DeviceSelector, ResourcePlan)]) -> Result<Self, String> {
+        let (_, first) = plans.first().ok_or("readiness has no physical owner")?;
+        let mut summary = Self::from_plan(first)?;
+        summary.planned_bytes = 0;
+        summary.immutable_bytes = 0;
+        summary.state_bytes = 0;
+        summary.scratch_bytes = 0;
+        for (device, plan) in plans {
+            let owner = Self::from_plan(plan)?;
+            summary.domain_capacity_bytes = summary.domain_capacity_bytes.min(owner.domain_capacity_bytes);
+            for (total, bytes) in [(&mut summary.planned_bytes, owner.planned_bytes),
+                (&mut summary.immutable_bytes, owner.immutable_bytes), (&mut summary.state_bytes, owner.state_bytes),
+                (&mut summary.scratch_bytes, owner.scratch_bytes)] {
+                *total = total.checked_add(bytes).ok_or("placed resource summary overflows")?;
+            }
+            summary.owners.push(DeviceResourcePlanSummary { device: *device,
+                domain_capacity_bytes: owner.domain_capacity_bytes, planned_bytes: owner.planned_bytes,
+                immutable_bytes: owner.immutable_bytes, state_bytes: owner.state_bytes, scratch_bytes: owner.scratch_bytes });
+        }
+        Ok(summary)
+    }
+
     pub fn from_plan(plan: &ResourcePlan) -> Result<Self, String> {
         let bytes = plan.bytes();
         let capacity = plan.capacity();
         Ok(Self {
+            owners: Vec::new(),
             domain_capacity_bytes: plan.domain_capacity_bytes(),
             planned_bytes: bytes.total()?,
             immutable_bytes: bytes
@@ -470,6 +507,7 @@ impl ExecutionManifest {
             service,
             path,
             device,
+            decoder_ranges: Vec::new(),
             kernel_cache,
             reserves,
             tuning: TuningSettings::STANDARD,

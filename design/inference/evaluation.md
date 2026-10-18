@@ -86,6 +86,11 @@ Development probes check the precision model against the real engine:
 ## Serving benchmark
 
 Each adapter owns its engine's preparation, launch, readiness and cleanup. Shared code owns scheduling, HTTP/SSE, validation and reporting.
+- Magnitude's explicit decoder ranges and lookahead override are recorded in
+  the launch arguments. Placement does not implicitly disable lookahead;
+  comparisons can select it independently with `--magnitude-lookahead on|off`.
+  The optional `--magnitude-prefill-group auto|CHUNKS` records and forwards the
+  engine's prompt group policy; changing it never changes the fixture or sizing.
 - An adapter that can configure serving context sets it to the launched block's context and requires readiness to report that value.
 - Traffic shapes (single, session, concurrency, fork, memory) describe offered traffic. History sharing is not evidence of retained-prefix reuse.
 - Sampling is greedy, with seed 42 where supported and model-selected thinking disabled.

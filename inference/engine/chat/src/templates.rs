@@ -92,19 +92,10 @@ fn apply_tool_selection_instruction(
         ToolChoice::Named(name) => {
             format!("Call the supplied tool '{name}' to answer this request.")
         }
-        ToolChoice::Required | ToolChoice::Allowed { required: true, .. }
-            if request.parallel_tool_calls =>
-        {
-            "Call at least one of the supplied tools to answer this request.".into()
-        }
-        ToolChoice::Required | ToolChoice::Allowed { required: true, .. } => {
-            "Call one of the supplied tools to answer this request.".into()
-        }
-        ToolChoice::Auto
+        ToolChoice::Required
+        | ToolChoice::Auto
         | ToolChoice::None
-        | ToolChoice::Allowed {
-            required: false, ..
-        } => return Ok(()),
+        | ToolChoice::Allowed { .. } => return Ok(()),
     };
     if let Some(system) = request
         .messages
@@ -373,8 +364,8 @@ impl From<&str> for Prepare {
 }
 
 /// Version of the template fingerprint derivation. Changes whenever the
-/// digest's inputs change.
-pub const TEMPLATE_FINGERPRINT_VERSION: &str = "v4-template-fingerprint-1";
+/// digest's inputs or request preparation policy change.
+pub const TEMPLATE_FINGERPRINT_VERSION: &str = "v4-template-fingerprint-2";
 
 /// Header-only chat facts of a bundle, established through the same
 /// preparation path requests use. Nothing is tokenized or generated.
@@ -498,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_selection_instructions_cover_named_and_required_modes() {
+    fn named_selection_instructs_and_required_selection_preserves_messages() {
         let original = vec![json!({"role":"user", "content":"weather"})];
         let mut named = native(original.clone(), true);
         apply_tool_selection_instruction(&mut named, &ToolChoice::Named("lookup".into())).unwrap();
@@ -515,14 +506,14 @@ mod tests {
         apply_tool_selection_instruction(&mut parallel, &ToolChoice::Required).unwrap();
         assert_eq!(
             parallel.messages[0]["content"],
-            "Be concise.\n\nCall at least one of the supplied tools to answer this request."
+            "Be concise."
         );
 
         let mut single = native(vec![json!({"role":"user", "content":"weather"})], false);
         apply_tool_selection_instruction(&mut single, &ToolChoice::Required).unwrap();
         assert_eq!(
-            single.messages[0]["content"],
-            "Call one of the supplied tools to answer this request."
+            single.messages,
+            original
         );
     }
 }

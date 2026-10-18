@@ -117,6 +117,14 @@ impl SharedDirectory {
         }
         Ok(())
     }
+    /// Slots available to one request while the prompt conveyor holds its loan.
+    pub fn request_capacity(&self, layer: usize) -> Result<usize, Error> {
+        let group = *self
+            .group_of_layer
+            .get(layer)
+            .ok_or(Error::InvalidRequest)?;
+        Ok(self.capacities[group] - self.lent[group])
+    }
     /// `layer`'s even share of its bank group's unlent records: the most a
     /// prompt seeds the layer up to (spec 4.9). A prompt reads every layer
     /// in turn, so seeding past a layer's share would evict another layer's

@@ -235,7 +235,7 @@ fn concurrent_cohort_memory_growth_and_idle_release() {
         locality_seconds: 1.0,
     };
     let (mut host, vocabulary, tokenizer) = plain_owner(limits, 0);
-    let baseline = host.owner().reconcile_memory_charge().unwrap();
+    let baseline = host.owner().reconcile_memory_charge().unwrap()[0].charge;
     assert_eq!(baseline.unattributed, 0);
     eprintln!("cohort baseline: {baseline:?}");
 
@@ -252,12 +252,12 @@ fn concurrent_cohort_memory_growth_and_idle_release() {
                 .unwrap()
             })
             .collect::<Vec<_>>();
-        let mut peak = host.owner().reconcile_memory_charge().unwrap();
+        let mut peak = host.owner().reconcile_memory_charge().unwrap()[0].charge;
         host.step_until(
             &mut streams.iter_mut().collect::<Vec<_>>(),
             Duration::from_secs(90),
             |host, streams| {
-                let charge = host.owner().reconcile_memory_charge().unwrap();
+                let charge = host.owner().reconcile_memory_charge().unwrap()[0].charge;
                 assert_eq!(charge.unattributed, 0);
                 if charge.charged > peak.charged {
                     peak = charge;
@@ -265,7 +265,7 @@ fn concurrent_cohort_memory_growth_and_idle_release() {
                 streams.iter().all(|stream| stream.finished())
             },
         );
-        let completed = host.owner().reconcile_memory_charge().unwrap();
+        let completed = host.owner().reconcile_memory_charge().unwrap()[0].charge;
         for stream in &streams {
             assert!(
                 stream.failure().is_none(),
@@ -277,7 +277,7 @@ fn concurrent_cohort_memory_growth_and_idle_release() {
             assert!(host.snapshot(stream.id).is_none(), "a completed request is retired");
         }
         host.settle();
-        let idle = host.owner().reconcile_memory_charge().unwrap();
+        let idle = host.owner().reconcile_memory_charge().unwrap()[0].charge;
         eprintln!("cohort N={count}: peak={peak:?} completed={completed:?} idle={idle:?}");
         assert_eq!(idle.unattributed, 0);
         assert_eq!(idle.target_state.live, 0);
@@ -383,7 +383,7 @@ fn mtp_head_charge_releases_and_reloads_after_idle() {
         }
         let retained = domain.resume_state(request).unwrap();
         domain.close(request).unwrap();
-        let resident = domain.reconcile_memory_charge(&[&retained]).unwrap();
+        let resident = domain.reconcile_memory_charge(&[&retained]).unwrap()[0].charge;
         assert!(resident.optional_weights > 0);
         assert!(charge(&domain) > baseline);
         let before = charge(&domain);
@@ -393,7 +393,7 @@ fn mtp_head_charge_releases_and_reloads_after_idle() {
         let after = charge(&domain);
         assert!(released > 0, "optional component held no physical charge");
         assert_eq!(before - after, released);
-        let idle = domain.reconcile_memory_charge(&[&retained]).unwrap();
+        let idle = domain.reconcile_memory_charge(&[&retained]).unwrap()[0].charge;
         assert_eq!(idle.optional_weights, 0);
         assert_eq!(resident.unattributed, 0);
         assert_eq!(idle.unattributed, 0);
@@ -505,7 +505,7 @@ fn concurrent_mtp_first_head_bind_reconciles_memory() {
         Duration::from_secs(60),
     );
     assert!(streams.iter().all(|stream| !stream.output.is_empty()));
-    let charge = host.owner().reconcile_memory_charge().unwrap();
+    let charge = host.owner().reconcile_memory_charge().unwrap()[0].charge;
     assert!(charge.optional_weights > 0);
     assert_eq!(charge.unattributed, 0);
 }
@@ -572,7 +572,7 @@ fn admission_reclaims_under_a_real_process_limit() {
     let available = allocation(domain.resources().device()).unwrap();
     assert_eq!(available.constraint, MemoryConstraint::HostRam);
     let planning = available.thresholds.planning_bytes;
-    let seed_bytes = domain.state_holding_census(&[]).unwrap().0.model_seed;
+    let seed_bytes = domain.reconcile_memory_charge(&[]).unwrap()[0].charge.target_state.model_seed;
     assert!(seed_bytes > 0, "fixture needs recurrent banks");
     let mut host = Host::new(|wakes| Owner::new(domain, bindings, limits, wakes));
     let generation = |prompt_tokens: usize| {
@@ -624,7 +624,7 @@ fn admission_reclaims_under_a_real_process_limit() {
     );
     let before = host
         .owner()
-        .inspect_domain(|domain| domain.reconcile_memory_charge(&[]))
+        .inspect_domain(|domain| domain.reconcile_memory_charge(&[]).map(|owners| owners[0].charge))
         .unwrap();
 
     let vm_kib = std::fs::read_to_string("/proc/self/status")
@@ -726,7 +726,7 @@ fn admission_reclaims_under_a_real_process_limit() {
     }
     let after = host
         .owner()
-        .inspect_domain(|domain| domain.reconcile_memory_charge(&[]))
+        .inspect_domain(|domain| domain.reconcile_memory_charge(&[]).map(|owners| owners[0].charge))
         .unwrap();
     let existing_snapshots = existing
         .iter()
@@ -994,12 +994,12 @@ fn idle_shrink_preserves_a_retained_session() {
             .map(|peer| host.snapshot(peer.id))
             .collect::<Vec<_>>()
     );
-    let before = host.owner().reconcile_memory_charge().unwrap();
+    let before = host.owner().reconcile_memory_charge().unwrap()[0].charge;
     for peer in peers {
         host.release(peer, Duration::from_secs(20));
     }
     host.settle();
-    let after = host.owner().reconcile_memory_charge().unwrap();
+    let after = host.owner().reconcile_memory_charge().unwrap()[0].charge;
     eprintln!(
         "idle shrink: retained={} charged {} -> {} state {:?} -> {:?} unattributed {} -> {}",
         host.owner().cached_prefixes(),
@@ -1021,7 +1021,7 @@ fn idle_shrink_preserves_a_retained_session() {
         "the retained session still serves the turn"
     );
     assert_eq!(replayed, reference);
-    assert_eq!(host.owner().reconcile_memory_charge().unwrap().unattributed, 0);
+    assert_eq!(host.owner().reconcile_memory_charge().unwrap()[0].charge.unattributed, 0);
 }
 
 /// Retained-state release in the Reclaim band, with replay. A session's
@@ -1070,7 +1070,7 @@ fn reclaim_releases_retained_sessions_and_replays_them() {
     assert_eq!(cached, resumed);
     host.settle();
     let retained = host.owner().cached_prefixes();
-    let before = host.owner().reconcile_memory_charge().unwrap();
+    let before = host.owner().reconcile_memory_charge().unwrap()[0].charge;
     assert!(retained >= 2 && before.target_state.retained > 0);
     assert_eq!(before.unattributed, 0);
 
@@ -1111,7 +1111,7 @@ fn reclaim_releases_retained_sessions_and_replays_them() {
     // The next memory observation enters Reclaim and, with the bindings
     // between flights, runs its releases.
     let unloading = host.observe().unload;
-    let released = host.owner().reconcile_memory_charge().unwrap();
+    let released = host.owner().reconcile_memory_charge().unwrap()[0].charge;
     drop(guard);
     host.observe();
     assert_eq!(band(&host).band, MemoryBand::Normal);
@@ -1140,5 +1140,5 @@ fn reclaim_releases_retained_sessions_and_replays_them() {
     );
     assert_eq!(cached, 0, "nothing retained survived the Reclaim release");
     assert_eq!(replayed, cold);
-    assert_eq!(host.owner().reconcile_memory_charge().unwrap().unattributed, 0);
+    assert_eq!(host.owner().reconcile_memory_charge().unwrap()[0].charge.unattributed, 0);
 }

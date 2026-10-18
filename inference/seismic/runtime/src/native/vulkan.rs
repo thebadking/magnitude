@@ -175,12 +175,12 @@ fn encode_measured(
                             launches.extend(launch.map(DirectLaunch::kind));
                             Ok(())
                         })?;
-                        Ok(Divided {
+                        Ok(Some((Divided {
                             launches,
                             parts: Vec::new(),
                             graph: None,
                             measured: false,
-                        })
+                        }, ())))
                     },
                     |divided| {
                         divided.refresh(device, list, calls.clone(), &replays.costs)?;

@@ -521,11 +521,15 @@ pub mod tensor {
     /// A non-owning observation of one physical tensor allocation. It keeps
     /// no storage alive and reads the same charge as the device ledger.
     pub struct TensorStorageObserver {
+        device: Weak<DeviceInner>,
         allocation: Weak<Allocation>,
         identity: u64,
     }
 
     impl TensorStorageObserver {
+        pub fn belongs_to(&self, device: &Arc<DeviceInner>) -> bool {
+            self.device.upgrade().is_some_and(|owner| Arc::ptr_eq(&owner, device))
+        }
         pub fn identity(&self) -> u64 {
             self.identity
         }
@@ -1205,6 +1209,69 @@ pub mod tensor {
             let access = self.allocation.acquire(false);
             self.read_with(&access)
         }
+        /// Copy a canonical tensor from another device through bounded host
+        /// staging. Both allocations remain exclusively ordered against device
+        /// work for the entire transfer; no device pointer crosses the boundary.
+        pub fn copy_from_device(&self, source: &Self) -> Result<(), TensorError> {
+            if self.device.kind.identity() == source.device.kind.identity() {
+                return Err(TensorError::HostRegion(
+                    "device transfer requires distinct devices".into(),
+                ));
+            }
+            if self.slabs.is_some() || source.slabs.is_some() {
+                return Err(TensorError::SlabLayout(
+                    "device transfer requires contiguous tensors".into(),
+                ));
+            }
+            self.backed()?;
+            source.backed()?;
+            if self.representation != source.representation || self.extents != source.extents {
+                return Err(TensorError::HostRegion(
+                    "device transfer requires identical representations and shapes".into(),
+                ));
+            }
+            let canonical = layout::canonical(self.representation, &self.extents)?;
+            if self.strides != canonical.strides
+                || source.strides != canonical.strides
+                || self.byte_len != canonical.byte_len
+                || source.byte_len != canonical.byte_len
+            {
+                return Err(TensorError::HostRegion(
+                    "device transfer requires canonical contiguous tensors".into(),
+                ));
+            }
+            if self.allocation.storage().read_only() {
+                return Err(TensorError::HostRegion(
+                    "transfer destination is read-only".into(),
+                ));
+            }
+            // A fixed allocation order also covers simultaneous A -> B and
+            // B -> A transfers. Distinct devices cannot share an access group.
+            let (_destination, source_access) =
+                if self.allocation.identity() < source.allocation.identity() {
+                    let destination = self.allocation.acquire(true);
+                    (destination, source.allocation.acquire(false))
+                } else {
+                    let source_access = source.allocation.acquire(false);
+                    (self.allocation.acquire(true), source_access)
+                };
+            let mut staging = vec![0u8; self.byte_len.min(1024 * 1024) as usize];
+            let mut copied = 0;
+            while copied < self.byte_len {
+                let count = (self.byte_len - copied).min(staging.len() as u64) as usize;
+                source_access.read(
+                    &source.allocation,
+                    source.byte_offset + copied,
+                    &mut staging[..count],
+                )?;
+                self.allocation
+                    .storage()
+                    .write(self.byte_offset + copied, &staging[..count])?;
+                copied += count as u64;
+            }
+            Ok(())
+        }
+
         pub(crate) fn read_with(
             &self,
             access: &crate::driver::AllocationPermit,
@@ -1235,7 +1302,7 @@ pub mod tensor {
         }
         /// The host address and byte length of this tensor's bytes where its
         /// device keeps them in memory the host addresses directly (unified
-        /// memory), for protocols in which the host and running device work
+        /// or mapped pinned memory), for protocols in which the host and running device work
         /// read and write the same words. Unlike every other host access it
         /// neither waits for submitted device work nor excludes it: ordering
         /// against the device is the caller's, through the backend's
@@ -1258,6 +1325,37 @@ pub mod tensor {
                 std::ptr::NonNull::new(address).expect("a non-null base plus an offset"),
                 self.byte_len,
             ))
+        }
+
+        /// A CUDA transfer ordered by a caller-owned publication protocol.
+        ///
+        /// # Safety
+        /// No device or host access overlaps the destination bytes until
+        /// successful return and the caller's subsequent readiness publication.
+        pub unsafe fn write_in_protocol(&self, offset: u64, bytes: &[u8]) -> Result<(), TensorError> {
+            if self.device.info().backend != seismic_lang::registry::BackendName::Cuda
+                || self.slabs.is_some() || self.reserved
+            {
+                return Err(TensorError::HostRegion(
+                    "protocol transfer requires a contiguous CUDA allocation".into(),
+                ));
+            }
+            self.backed()?;
+            let canonical = crate::layout::canonical(self.representation, &self.extents)?;
+            if self.strides != canonical.strides || self.byte_len != canonical.byte_len {
+                return Err(TensorError::HostRegion("protocol transfer requires a canonical view".into()));
+            }
+            let end = offset.checked_add(bytes.len() as u64).ok_or_else(||
+                TensorError::HostRegion("protocol transfer range overflows".into()))?;
+            if end > self.byte_len {
+                return Err(TensorError::HostByteLength { expected: self.byte_len, actual: end });
+            }
+            let destination = self.byte_offset.checked_add(offset).ok_or_else(||
+                TensorError::HostRegion("protocol transfer address overflows".into()))?;
+            // Storage owns the non-blocking CUDA transfer stream and waits
+            // for this copy alone. Acquiring the ordinary allocation fence
+            // here would wait on the kernel parked at our publication gate.
+            self.allocation.storage().write(destination, bytes).map_err(TensorError::Execution)
         }
 
         pub fn write_from_host(&self, bytes: &[u8]) -> Result<(), TensorError> {
@@ -1400,6 +1498,7 @@ pub mod tensor {
         }
         pub fn observe_storage(&self) -> TensorStorageObserver {
             TensorStorageObserver {
+                device: Arc::downgrade(&self.device),
                 allocation: Arc::downgrade(&self.allocation),
                 identity: self.allocation.identity(),
             }
@@ -1606,6 +1705,54 @@ pub mod tensor {
         use super::TensorInner;
         use seismic_lang::registry;
         use seismic_lang::types::DType;
+
+        #[test]
+        #[ignore = "requires two CUDA devices"]
+        fn cross_device_transfer_preserves_views_and_bytes() {
+            let catalog = crate::devices::Catalog::discover().unwrap();
+            let topology = catalog.topology();
+            let devices = topology
+                .devices()
+                .iter()
+                .filter(|device| device.backend == registry::BackendName::Cuda)
+                .take(2)
+                .map(|device| catalog.open(device.id).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(devices.len(), 2, "two CUDA devices are required");
+            // Cross more than one staging chunk, with a partial last chunk and
+            // nonzero offsets on both devices. Compare bytes, including arbitrary
+            // floating payloads, rather than introducing a numerical tolerance.
+            let rows = 1024 * 1024 + 17;
+            let bytes = (0..(rows + 2) * 4)
+                .map(|i| (i * 31 + i / 251) as u8)
+                .collect::<Vec<_>>();
+            let source = TensorInner::from_host(
+                &devices[0],
+                registry::dense(DType::F32),
+                &[rows + 2],
+                &bytes,
+            )
+            .unwrap();
+            let sentinel = vec![0xa5; bytes.len()];
+            let destination = TensorInner::from_host(
+                &devices[1],
+                registry::dense(DType::F32),
+                &[rows + 2],
+                &sentinel,
+            )
+            .unwrap();
+            let src = source.slice_leading(1, rows + 1).unwrap();
+            let dst = destination.slice_leading(1, rows + 1).unwrap();
+            dst.copy_from_device(&src).unwrap();
+            let mut expected = sentinel;
+            expected[4..bytes.len() - 4].copy_from_slice(&bytes[4..bytes.len() - 4]);
+            assert_eq!(destination.read_to_host().unwrap(), expected);
+            assert!(destination.copy_from_device(&src).is_err());
+            assert_eq!(destination.read_to_host().unwrap(), expected);
+            assert!(src.copy_from_device(&src).is_err());
+            src.copy_from_device(&dst).unwrap();
+            assert_eq!(source.read_to_host().unwrap(), bytes);
+        }
 
         /// A reader upload runs on a Windows main thread (1 MiB of stack) in a
         /// model's Prepare; it must not need a stack of its own size.

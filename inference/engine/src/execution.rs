@@ -2,6 +2,9 @@
 //! executor domain. Every device-bound value is created inside the numerical
 //! worker that runs this.
 
+mod placed;
+use placed::build_placed;
+
 use crate::census::MemoryDomain;
 use crate::error::{
     ArtifactError, InsufficientMemory, LoadError, classify_catalog, classify_plan,
@@ -38,8 +41,9 @@ pub(crate) struct NativeDomain {
     /// The domain's one right to change its stores' bindings.
     pub bindings: StateBindings,
     pub plan: ResourcePlan,
+    pub owner_plans: Vec<(DeviceSelector, ResourcePlan)>,
     pub device: DeviceSelector,
-    pub pool: MemoryPoolKind,
+
 }
 
 fn internal(reason: impl Into<String>) -> LoadError {
@@ -93,6 +97,7 @@ pub fn build_native_domain(
 /// tuning records.
 pub(crate) struct PreparedPrograms {
     startup: StartupClaims,
+    range: Option<magnitude_executor::DecoderRangeLoadPlan>,
     pub draft: ExecutionPlanDraft,
     pub opened: OpenedPlatform,
     pub programs: AttestedPrograms,
@@ -110,6 +115,7 @@ pub(crate) struct PreparedPrograms {
 /// search and a load both start, so both derive the same tuning keys.
 struct PlannedModel {
     startup: StartupClaims,
+    range: Option<magnitude_executor::DecoderRangeLoadPlan>,
     draft: ExecutionPlanDraft,
     opened: OpenedPlatform,
     backend: BackendName,
@@ -163,6 +169,22 @@ fn plan_on_device(
             }
             error => internal(error.to_string()),
         })?;
+    let (draft, range) = if manifest.decoder_ranges.is_empty() {
+        (draft, None)
+    } else {
+        let placement = magnitude_executor::DecoderPlacement::new(
+            manifest.definition.decoder.blocks.len(), manifest.decoder_ranges.clone()).map_err(internal)?;
+        if placement.ranges().len() != 2 { return Err(internal("placed startup requires two decoder owners")); }
+        let owner = placement.ranges().iter().position(|range| range.device == draft.device().selector())
+            .ok_or_else(|| internal("selected device is absent from decoder placement"))?;
+        let shared_in_host = platform::shared_role(&selected.info)
+            .map_err(|error| internal(error.to_string()))? == DomainRole::Staging;
+        let range = placement.load_range_with_cache_budget(owner, draft.load(), shared_in_host)
+            .map_err(internal)?;
+        let draft = draft.for_decoder_range(&manifest.definition, &range)
+            .map_err(|error| LoadError::from(classify_plan(error, backend)))?;
+        (draft, Some(range))
+    };
     let kernel_cache = manifest
         .kernel_cache
         .clone()
@@ -209,6 +231,7 @@ fn plan_on_device(
     startup.claim("program preparation", preparation_peak, 0)?;
     Ok(PlannedModel {
         startup,
+        range,
         draft,
         opened,
         backend,
@@ -244,6 +267,21 @@ fn tuning_report(
 /// unit's record as it stands. Nothing is prepared for serving and the model
 /// is not imported: the process ends here, and a load reads the records.
 pub(crate) fn search(
+    catalog: Rc<DeviceCatalog>, manifest: &ExecutionManifest, package: &Package,
+    progress: Rc<dyn Fn(LoadProgress)>,
+) -> Result<(), LoadError> {
+    if manifest.decoder_ranges.is_empty() { return search_one(catalog, manifest, package, progress); }
+    let placement = magnitude_executor::DecoderPlacement::new(
+        manifest.definition.decoder.blocks.len(), manifest.decoder_ranges.clone()).map_err(internal)?;
+    for range in placement.ranges() {
+        let mut local = manifest.clone();
+        local.device = DeviceRequest::Selector(range.device);
+        search_one(catalog.clone(), &local, package, progress.clone())?;
+    }
+    Ok(())
+}
+
+fn search_one(
     catalog: Rc<DeviceCatalog>,
     manifest: &ExecutionManifest,
     package: &Package,
@@ -389,6 +427,7 @@ fn prepare(
     }
     let PlannedModel {
         startup,
+        range,
         draft,
         opened,
         backend,
@@ -431,6 +470,11 @@ fn prepare(
         }
         Err(error) => return Err(LoadError::from(classify_catalog(error))),
     };
+    let draft = if range.is_some() {
+        programs.discard_readout_choices(draft.programs())
+            .map_err(|error| LoadError::from(classify_plan(error, backend)))?;
+        draft
+    } else {
     let draft = draft
         .finalize_readout(&manifest.definition, programs.readout_choices())
         .map_err(|error| LoadError::from(classify_plan(error, backend)))?;
@@ -439,6 +483,8 @@ fn prepare(
             .discard_readout_choices(draft.programs())
             .map_err(|error| LoadError::from(classify_plan(error, backend)))?;
     }
+        draft
+    };
     let tuned = programs.tuned();
     if let Some(trace) = &report.trace {
         trace.conclude(tuned).map_err(internal)?;
@@ -453,6 +499,7 @@ fn prepare(
     report_load_memory("programs prepared", opened.device());
     Ok(LoadAttempt::Loaded(PreparedPrograms {
         startup,
+        range,
         draft,
         opened,
         programs,
@@ -473,9 +520,13 @@ pub(crate) fn build(
     unprepared: UnpreparedUnits,
     progress: Rc<dyn Fn(LoadProgress)>,
 ) -> Result<LoadAttempt<NativeDomain>, LoadError> {
+    if !manifest.decoder_ranges.is_empty() {
+        return build_placed(catalog, manifest, package, unprepared, progress);
+    }
     let catalog = Rc::new(catalog);
     let PreparedPrograms {
         mut startup,
+        range: _,
         draft,
         opened,
         mut programs,
@@ -532,6 +583,8 @@ pub(crate) fn build(
         .map_err(internal)?;
     let resources = ResourcePlanner::plan_with_state(
         opened.device().backend(),
+        magnitude_executor::platform::shared_role(opened.device().info())
+            .map_err(|error| internal(error.to_string()))?,
         state,
         &target_graphs,
         &target_readout_graphs,
@@ -644,7 +697,7 @@ pub(crate) fn build(
     let state_graphs = programs
         .state_graphs()
         .ok_or_else(|| internal("qualified program set has no state graphs"))?;
-    startup.claim("graph scratch", plan.bytes().scratch, 0)?;
+    startup.claim_graphs("graph scratch", &plan)?;
     let resources = ResourceAllocator::allocate(
         &execution_plan,
         &device,
@@ -695,7 +748,7 @@ pub(crate) fn build(
         DomainRole::Allocation => 0,
         DomainRole::Staging => execution_plan
             .load()
-            .shared_table_bytes()
+            .shared_weight_bytes()
             .map_err(|error| internal(error.to_string()))?,
     };
     startup.claim(
@@ -714,12 +767,12 @@ pub(crate) fn build(
         .load_target(
             &manifest.definition,
             &package,
-            Box::new(move |completed_bytes, total_bytes| {
+            Box::new(move |completed_bytes, total_bytes, checkpoint| {
                 import_progress(LoadProgress::ImportingWeights {
                     completed_bytes,
                     total_bytes,
                 });
-                if band_observed.elapsed() >= IMPORT_OBSERVATION_INTERVAL {
+                if checkpoint || band_observed.elapsed() >= IMPORT_OBSERVATION_INTERVAL {
                     band_observed = Instant::now();
                     require_normal(&catalog, &import_device, &reserves)?;
                 }
@@ -826,9 +879,9 @@ pub(crate) fn build(
     Ok(LoadAttempt::Loaded(NativeDomain {
         domain,
         bindings,
+        owner_plans: vec![(device_selector, plan.clone())],
         plan,
         device: device_selector,
-        pool,
     }))
 }
 
@@ -883,6 +936,19 @@ impl StartupClaims {
     /// host-backed device has no staging domain: its staged bytes are part
     /// of `allocation`. Releases the previous startup claim, whose
     /// allocation Seismic now charges.
+    fn claim_graphs(
+        &mut self,
+        purpose: &str,
+        plan: &magnitude_executor::ResourcePlan,
+    ) -> Result<(), LoadError> {
+        let shared_in_host = magnitude_executor::platform::shared_role(self.heap.device().info())
+            .map_err(|error| internal(error.to_string()))? == DomainRole::Staging;
+        let uploads = if shared_in_host { plan.shared_upload_bytes().map_err(internal)? } else { 0 };
+        let allocation = plan.bytes().scratch.checked_sub(uploads)
+            .ok_or_else(|| internal("shared uploads exceed graph scratch charge"))?;
+        self.claim(purpose, allocation, uploads)
+    }
+
     fn claim(&mut self, purpose: &str, allocation: u64, staged: u64) -> Result<(), LoadError> {
         if let Some(held) = self.held.take() {
             self.heap.release(held);

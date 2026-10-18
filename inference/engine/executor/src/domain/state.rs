@@ -23,6 +23,18 @@ pub struct MemoryChargeReconciliation {
     pub unattributed: u64,
 }
 
+/// One physical owner's charge and the domains in which its storage lives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeviceMemoryCharge {
+    pub device: seismic::DeviceSelector,
+    pub allocation_pool: seismic::MemoryPoolId,
+    pub pool_kind: seismic::MemoryPoolKind,
+    pub host_tables: u64,
+    pub host_shared_weights: u64,
+    pub host_shared_uploads: u64,
+    pub charge: MemoryChargeReconciliation,
+}
+
 impl MemoryChargeReconciliation {
     pub fn complete(self) -> bool {
         self.unattributed == 0
@@ -91,21 +103,64 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
     pub fn reconcile_memory_charge(
         &self,
         retained: &[&ResumeState],
+    ) -> Result<Vec<DeviceMemoryCharge>, String> {
+        let mut owners = Vec::new();
+        for peer_owner in [false, true] {
+            if peer_owner && self.peer.is_none() { break; }
+            let (heap, execution) = if peer_owner {
+                let peer = self.peer.as_ref().unwrap();
+                (peer.memory.borrow(), peer.execution.as_ref())
+            } else {
+                (self.memory.borrow(), self.execution.as_ref())
+            };
+            let (allocation_pool, pool_kind) = heap.allocation_pool()?;
+            let shared_in_host = crate::platform::shared_role(heap.device().info())
+                .map_err(|error| error.to_string())? == crate::platform::DomainRole::Staging;
+            let host_shared_weights = if shared_in_host {
+                execution.load().shared_weight_bytes()?
+            } else { 0 };
+            let host_shared_uploads = if shared_in_host {
+                if peer_owner {
+                    self.peer.as_ref().unwrap().resources.borrow().upload_bytes()?
+                } else {
+                    self.resources.upload_bytes()?
+                }
+            } else { 0 };
+            owners.push(DeviceMemoryCharge {
+                device: heap.device().info().selector,
+                allocation_pool, pool_kind,
+                host_tables: heap.host_table_bytes(), host_shared_weights, host_shared_uploads,
+                charge: self.reconcile_device_charge(retained, peer_owner)?,
+            });
+        }
+        Ok(owners)
+    }
+
+    fn reconcile_device_charge(
+        &self,
+        retained: &[&ResumeState],
+        peer_owner: bool,
     ) -> Result<MemoryChargeReconciliation, String> {
-        let (target_state, head_state) = self.state_holding_census(retained)?;
+        let peer = if peer_owner { self.peer.as_ref() } else { None };
+        let device = peer.map(|peer| peer.memory.borrow().device().clone())
+            .unwrap_or_else(|| self.memory.borrow().device().clone());
+        let (target_state, head_state) = self.state_holding_census_on(retained, &device)?;
         let state = target_state
             .total()
             .checked_add(head_state.map_or(0, StateHoldingCensus::total))
             .ok_or("state charge sum overflows")?;
-        let graph_pools = self.resources.committed_bytes()?;
-        let owned_features = self
-            .domain
-            .owned_feature_bytes()
-            .map_err(|error| error.to_string())?;
-        let target_weights = self.family.target_weight_bytes()?;
+        let graph_pools = match peer {
+            Some(peer) => peer.resources.borrow().committed_bytes()?,
+            None => self.resources.committed_bytes()?,
+        };
+        let owned_features = if peer_owner { 0 } else {
+            self.domain.owned_feature_bytes().map_err(|error| error.to_string())?
+        };
+        let target_weights = if peer_owner { self.family.peer_weight_bytes()? }
+            else { self.family.target_weight_bytes()? };
         // The head loader inherits the target cache so tied weights are
         // represented by the same allocation. Vision has its own cache.
-        let head_weights = self
+        let head_weights = if peer_owner { 0 } else { self
             .head_loader
             .as_ref()
             .map(|loader| {
@@ -115,26 +170,35 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
                     .ok_or("head residency cache omits a target allocation")
             })
             .transpose()?
-            .unwrap_or(0);
-        let vision_weights = self
+            .unwrap_or(0) };
+        let vision_weights = if peer_owner { 0 } else { self
             .vision_loader
             .as_ref()
             .map(|loader| loader.resident_bytes())
             .transpose()?
-            .unwrap_or(0);
+            .unwrap_or(0) };
         let optional_weights = head_weights
             .checked_add(vision_weights)
             .ok_or("optional resident charge overflows")?;
-        let prepared_programs = self.family.prepared_program_bytes()?;
-        let bound_constants = self.family.bound_constant_bytes()?;
+        // ResidentWeight visits omit the bank's source/control allocations.
+        // Attribute them before the census moves shared model bytes to host
+        // RAM, rather than subtracting them from unrelated device weights.
+        let bank_sources = if peer_owner { self.family.peer_bank_source_bytes() }
+            else { self.family.target_bank_source_bytes() };
+        let target_weights = target_weights.checked_add(bank_sources)
+            .ok_or("target bank charge overflows")?;
+        let prepared_programs = if peer_owner { self.family.peer_program_bytes()? }
+            else { self.family.prepared_program_bytes()? };
+        let bound_constants = if peer_owner { self.family.peer_constant_bytes()? }
+            else { self.family.bound_constant_bytes()? };
         let external_pins = self
             .target_store
-            .external_pinned_bytes()
+            .external_pinned_bytes_on(&device)
             .map_err(|error| error.to_string())?
             .checked_add(
                 self.head_store
                     .as_ref()
-                    .map(|store| store.external_pinned_bytes())
+                    .map(|store| store.external_pinned_bytes_on(&device))
                     .transpose()
                     .map_err(|error| error.to_string())?
                     .unwrap_or(0),
@@ -149,7 +213,7 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
             .and_then(|bytes| bytes.checked_add(bound_constants))
             .and_then(|bytes| bytes.checked_add(external_pins))
             .ok_or("classified charge sum overflows")?;
-        let charged = self.domain.device().memory_usage().charged;
+        let charged = device.memory_usage().charged;
         let unattributed = charged
             .checked_sub(classified)
             .ok_or("classified holdings exceed Seismic's charge")?;
@@ -172,9 +236,10 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
     /// states, and the store's registered submitted transactions.
     /// Unregistered omissions remain an error rather than being mislabeled as
     /// surplus.
-    pub fn state_holding_census(
+    fn state_holding_census_on(
         &self,
         retained: &[&ResumeState],
+        device: &seismic::Device,
     ) -> Result<(StateHoldingCensus, Option<StateHoldingCensus>), String> {
         let target_live = self.target.values().map(Holder::State).collect::<Vec<_>>();
         let target_retained = retained
@@ -183,7 +248,7 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
             .collect::<Vec<_>>();
         let target = self
             .target_store
-            .holding_census(&target_live, &target_retained, &[])
+            .holding_census_on(&target_live, &target_retained, &[], device)
             .map_err(|error| error.to_string())?;
         let head = self
             .head_store
@@ -201,7 +266,7 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 store
-                    .holding_census(&live, &retained, &[])
+                    .holding_census_on(&live, &retained, &[], device)
                     .map_err(|error| error.to_string())
             })
             .transpose()?;
@@ -397,6 +462,23 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
     /// requests. The slot's charge is claimed from the heap like any state
     /// growth; a refusal is a demand deficit for the owner's release order.
     pub(super) fn provision_output(&mut self, lane: ReservationLane) -> Result<(), DomainError> {
+        if matches!(lane, ReservationLane::Target) {
+            if let Some(peer) = &self.peer {
+                let bytes = {
+                    let resources = peer.resources.borrow();
+                    let pool = resources.target_readout_graph();
+                    if pool.available_output() > 0 { return Ok(()); }
+                    pool.output_slot_bytes()
+                };
+                let claim = peer.memory.borrow_mut().claim(bytes, 0, HoldingClass::Live)?;
+                let grown = peer.resources.borrow_mut().retained_outputs_mut(lane)
+                    .expect("peer target readout pool exists").grow_output();
+                peer.memory.borrow_mut().release(claim);
+                grown.map_err(|error| growth_failure(error, bytes, "peer readout growth"))?;
+                self.refresh_memory()?;
+                return self.sync_static_holding().map_err(DomainError::Input);
+            }
+        }
         let Some(pool) = self.resources.retained_outputs_mut(lane) else {
             return Ok(());
         };
@@ -430,33 +512,41 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
     ) -> Result<(), DomainError> {
         // No backing changes when neither plan adds a slab. Reservation
         // observes memory again before launching the selected group.
-        let claim = bindings.store(head)?.growth_claim(demands, banks)?;
-        if claim.minimum_bytes == 0 && claim.preferred_bytes == 0 {
+        let store = bindings.store(head)?;
+        let initial = store.growth_claims_by_device(demands, banks)?;
+        if initial.iter().all(|owner| owner.claim.minimum_bytes == 0 && owner.claim.preferred_bytes == 0) {
             return Ok(());
         }
-        let store = bindings.store(head)?;
+        for owner in &initial { self.heap_for_device(&owner.device)?; }
         for choice in [GrowthChoice::Preferred, GrowthChoice::Minimum] {
-            let claim = store.growth_claim(demands, banks)?;
-            let required = match choice {
-                GrowthChoice::Preferred => claim.preferred_bytes,
-                GrowthChoice::Minimum => claim.minimum_bytes,
-            };
-            // Keep the peak claimed while the store performs its fallible
-            // physical operation. Seismic measures the resulting charge; the
-            // existing static holding is then resized from committed backing
-            // instead of creating another holding for the same bytes.
-            let claim = if required == 0 {
-                None
-            } else {
-                match self.claim_device_growth(required, 0, HoldingClass::Live) {
-                    Ok(claim) => Some(claim),
-                    Err(_) if choice == GrowthChoice::Preferred => continue,
-                    Err(error) => return Err(error),
+            let owners = store.growth_claims_by_device(demands, banks)?;
+            let mut granted: Vec<(Rc<seismic::Device>, ClaimId)> = Vec::new();
+            let mut refusal = None;
+            for owner in owners {
+                let required = match choice {
+                    GrowthChoice::Preferred => owner.claim.preferred_bytes,
+                    GrowthChoice::Minimum => owner.claim.minimum_bytes,
+                };
+                if required == 0 { continue; }
+                let result = self.heap_for_device(&owner.device)?
+                    .borrow_mut().claim(required, 0, HoldingClass::Live);
+                match result {
+                    Ok(claim) => granted.push((owner.device, claim)),
+                    Err(error) => { refusal = Some(DomainError::from(error)); break; }
                 }
-            };
+            }
+            if let Some(error) = refusal {
+                for (device, claim) in granted {
+                    self.heap_for_device(&device)?.borrow_mut().release(claim);
+                }
+                if choice == GrowthChoice::Preferred { continue; }
+                return Err(error);
+            }
+            // Every owner's peak is granted before the shared logical store
+            // changes backing. A failure rolls back backing across owners.
             let provisioned = store.provision_with_growth(demands, banks, choice);
-            if let Some(claim) = claim {
-                self.release_claim(claim);
+            for (device, claim) in granted {
+                self.heap_for_device(&device)?.borrow_mut().release(claim);
             }
             match provisioned {
                 Ok(()) => {
@@ -486,6 +576,7 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
     /// allocation ceiling: `Reclaim` while any domain's headroom is at or
     /// below its planning reserve, `Blind` when an observation fails.
     pub fn probe_memory(&mut self) -> Result<(), DomainError> {
+        if let Some(peer) = &self.peer { peer.memory.borrow_mut().check(0, 0)?; }
         self.decide_device_growth(0, 0)
     }
 
@@ -624,13 +715,17 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
     /// counts that no request or launch holds, crediting only Seismic's
     /// measured decrease.
     fn release_idle_graph_slots(&mut self) -> Result<u64, DomainError> {
-        let before = self.domain.device().memory_usage().charged;
-        if self.resources.release_idle_slots() == 0 {
-            return Ok(0);
-        }
+        let charged = |domain: &Self| {
+            domain.domain.device().memory_usage().charged
+                + domain.peer.as_ref().map_or(0, |peer| peer.memory.borrow().device().memory_usage().charged)
+        };
+        let before = charged(self);
+        let mut released = self.resources.release_idle_slots();
+        if let Some(peer) = &self.peer { released += peer.resources.borrow_mut().release_idle_slots(); }
+        if released == 0 { return Ok(0); }
+        self.refresh_memory()?;
         self.sync_static_holding().map_err(DomainError::Input)?;
-        before
-            .checked_sub(self.domain.device().memory_usage().charged)
+        before.checked_sub(charged(self))
             .ok_or_else(|| DomainError::invariant("graph slot release increased Seismic's charge"))
     }
 

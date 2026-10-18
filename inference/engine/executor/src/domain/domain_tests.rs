@@ -35,6 +35,7 @@ fn tiny_manifest(definition: &ModelDefinition) -> PackageManifest {
 type Fixture = (ExecutorDomain<TestFamily>, StateBindings<TestFamily>);
 
 thread_local! {
+    static STORED_READS_SKIP: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// The stored-table reads the next target submission's output carries:
     /// a test sets them to inject a step's table reads.
     static STORED_READS: std::cell::RefCell<Vec<crate::programs::StoredRead>> =
@@ -202,6 +203,7 @@ fn fixture_of(
         .unwrap();
     let resources_plan = ResourcePlanner::plan_with_state(
         device.backend(),
+        crate::platform::shared_role(device.info()).unwrap(),
         state,
         &target_graphs,
         &target_readout_graphs,
@@ -514,9 +516,15 @@ impl ProgramFamily for TestFamily {
                             last: now,
                         },
                         selected_rows: None,
-                        stored_reads: STORED_READS
-                            .with(|reads| std::mem::take(&mut *reads.borrow_mut())),
-                        bank_step: None,
+                        stored_reads: STORED_READS_SKIP.with(|skip| {
+                            if skip.get() > 0 {
+                                skip.set(skip.get() - 1);
+                                Vec::new()
+                            } else {
+                                STORED_READS.with(|reads| std::mem::take(&mut *reads.borrow_mut()))
+                            }
+                        }),
+                        bank_steps: Vec::new(),
                     },
                 )
             })
@@ -707,6 +715,35 @@ fn a_prompt_longer_than_a_group_runs_in_groups() {
     // Groups of chunks 0-1 and 2-3, then chunk 4 alone.
     assert_eq!(queued, [1, 0, 1, 0, 0]);
     assert_eq!(domain.resume_state(request).unwrap().target.position(), 5);
+}
+
+/// Discarded lookahead still retires the stored-table reads it performed.
+#[test]
+fn orphaned_lookahead_retires_stored_table_failures() {
+    let Some((mut domain, mut bindings)) = fixture_with(None, true, true) else {
+        return;
+    };
+    let request = RequestId(61);
+    open(&mut domain, &mut bindings, request);
+    let (path, read) = failed_table_read("orphan");
+    let now = std::time::Instant::now();
+    let probe = crate::TargetOutput {
+        boundary: None, readout: None,
+        commits: crate::CommitSpan { first: now, last: now },
+        selected_rows: None, stored_reads: vec![read.clone()], bank_steps: Vec::new(),
+    };
+    assert!(probe.table_read_failure(1).is_some());
+    STORED_READS_SKIP.with(|skip| skip.set(1));
+    STORED_READS.with(|reads| reads.borrow_mut().push(read));
+    let mut bindings = queue_lookahead(&mut domain, bindings, request);
+    assert!(probe.table_read_failure(1).is_some());
+    domain.orphan_queue(&mut bindings).unwrap();
+    assert!(bindings.queue.is_empty());
+    assert!(probe.table_read_failure(1).is_none());
+    assert_eq!(domain.resume_state(request).unwrap().target.position(), 1);
+    drop(probe);
+    drop(domain);
+    std::fs::remove_file(path).unwrap();
 }
 
 /// Growth changes bindings: every entry that can grow resolves a queued
@@ -920,10 +957,10 @@ fn pending_target_state_is_classified_as_in_flight() {
     };
     let request = RequestId(9);
     open(&mut domain, &mut bindings, request);
-    let before = domain.reconcile_memory_charge(&[]).unwrap();
+    let before = domain.reconcile_memory_charge(&[]).unwrap()[0].charge;
     assert_eq!(before.unattributed, 0, "{before:?}");
     let flight = submit_reserved_target(&mut domain, bindings, vec![forward(request, 0)]);
-    let pending = domain.reconcile_memory_charge(&[]).unwrap();
+    let pending = domain.reconcile_memory_charge(&[]).unwrap()[0].charge;
     assert!(pending.target_state.in_flight > before.target_state.in_flight);
     assert_eq!(pending.unattributed, 0);
     control.resolve(Ok(()));
@@ -2164,4 +2201,63 @@ fn selected_histories_follow_blocks_across_rollback() {
         bindings = returned;
     }
     assert_eq!(blocks(&domain, source), 4);
+}
+
+#[test]
+fn launch_segments_do_not_combine_different_domains_maxima() {
+    use magnitude_state::{
+        BankCapacity, CodecSpec, ComponentDescriptor, HistoryDomainLayout, HistoryDomainPlan,
+        LayerRef,
+    };
+    let device = Rc::new(
+        seismic::DeviceCatalog::discover()
+            .unwrap()
+            .open_backend(seismic::BackendName::Cpu)
+            .unwrap(),
+    );
+    let token = |block| HistoryDomainPlan {
+        layout: HistoryDomainLayout::Token {
+            components: vec![ComponentDescriptor::new(
+                LayerRef::Target(block),
+                CodecSpec::dense(seismic::DType::F32, 4, 4),
+                1,
+            )
+            .unwrap()],
+        },
+        logical_rows: 1024,
+    };
+    let (store, _bindings) = StateStore::new(
+        device,
+        1024,
+        128,
+        vec![
+            token(0),
+            token(1),
+            HistoryDomainPlan {
+                layout: HistoryDomainLayout::Shared {
+                    source: LayerRef::Target(1),
+                    layers: vec![LayerRef::Target(2)],
+                },
+                logical_rows: 0,
+            },
+        ],
+        vec![],
+        BankCapacity {
+            active: 1,
+            in_flight: 1,
+            retained: 0,
+        },
+    )
+    .unwrap();
+    // Domain 0's seven accepted spans are independent of domain 1's two
+    // accepted spans plus two possible appended spans. The bound is seven.
+    assert_eq!(
+        super::target::reserved_segments(&store, |domain| [7, 2][domain.0], 1),
+        7
+    );
+    // An actually wider shared-domain read is retained, never clamped away.
+    assert_eq!(
+        super::target::reserved_segments(&store, |domain| [7, 8][domain.0], 1),
+        10
+    );
 }

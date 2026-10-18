@@ -134,6 +134,12 @@ class Native(Adapter):
             *self.generation(),
             *self.tuning(),
         ]
+        if magnitude.decoder_ranges is not None:
+            arguments += ["--decoder-ranges", magnitude.decoder_ranges]
+        if magnitude.lookahead is not None:
+            arguments += ["--lookahead", "on" if magnitude.lookahead else "off"]
+        if magnitude.prefill_group is not None:
+            arguments += ["--prefill-group", str(magnitude.prefill_group)]
         if magnitude.alpha is not None:
             profile = self.store.path / "numerical-profile.json"
             profile.write_text(json.dumps({"alpha": magnitude.alpha}))

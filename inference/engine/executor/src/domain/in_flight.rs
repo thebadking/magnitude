@@ -65,7 +65,7 @@ pub(super) struct TargetWork<F: ProgramFamily> {
     /// The drafter entry of the step's prompt chunk, when it primes one.
     pub(super) priming: Option<PrimingFlight<F::HeadSubmission>>,
     /// Optional attribution for one prefill flight selected by diagnostics.
-    pub(super) launch_trace: Option<seismic::SubmissionTrace>,
+    pub(super) launch_trace: Option<super::target::TargetSubmissionTrace>,
     pub(super) started: Instant,
     /// When the device could begin this step: its submission, or for a step
     /// queued behind its predecessor (lookahead), the predecessor's
@@ -89,7 +89,7 @@ impl<F: ProgramFamily> TargetWork<F> {
         id: u64,
         requests: TargetRequests,
         submission: F::TargetSubmission,
-        launch_trace: Option<seismic::SubmissionTrace>,
+        launch_trace: Option<super::target::TargetSubmissionTrace>,
         started: Instant,
         previous_selection: Option<Instant>,
     ) -> Self {

@@ -93,15 +93,19 @@ __constant__ u32 iq3s_grid[512] = {
 };
 #endif
 
-// ---- Grid entry (IQ3XXS / IQ2XS) ----------------------------------------
+// ---- Grid entry (IQ3XXS / IQ2XS / IQ2XXS) --------------------------------
 #if defined(CONV_REPACK_GRID)
 __device__ __forceinline__ u32 CONV_H(grid_entry)(const u8 *in, u32 e) {
+#if defined(CONV_REPACK_GRID_AUX)
+    const u32 block = e / 4, group = e % 4, aux = CONV_REPACK_GRID_AUX(block);
+    const u32 signs = (u32)in[aux] | ((u32)in[aux + 1] << 8) |
+                      ((u32)in[aux + 2] << 16) | ((u32)in[aux + 3] << 24);
+#endif
 #if defined(CONV_REPACK_IQ3XXS)
-    const u32 block = e / 4, group = e % 4;
-    const u32 signs = (u32)in[66 + 4 * block] | ((u32)in[67 + 4 * block] << 8) |
-                      ((u32)in[68 + 4 * block] << 16) | ((u32)in[69 + 4 * block] << 24);
     return (u32)in[2 + 8 * block + 2 * group] | ((u32)in[3 + 8 * block + 2 * group] << 8) |
            (((signs >> (7 * group)) & 127u) << 16);
+#elif defined(CONV_REPACK_IQ2XXS)
+    return (u32)in[2 + 8 * block + group] | (((signs >> (7 * group)) & 127u) << 8);
 #else
     return (u32)in[2 + 2 * e] | ((u32)in[3 + 2 * e] << 8);
 #endif
@@ -201,9 +205,10 @@ __device__ __forceinline__ void CONV_H(write_scales)(const u8 *in, u8 *out) {
 #elif defined(CONV_REPACK_IQ3S)
     for (u32 j = 0; j < 16; ++j)
         out[j] = (u8)(1u + 2u * ((in[106 + j / 4] >> (4 * (j / 2 % 2))) & 15u));
-#elif defined(CONV_REPACK_IQ3XXS)
+#elif defined(CONV_REPACK_GRID_AUX)
     for (u32 j = 0; j < 4; ++j)
-        out[j] = (u8)((in[69 + 8*j] >> 4) | (in[73 + 8*j] & 0xf0u));
+        out[j] = (u8)((in[CONV_REPACK_GRID_AUX(2 * j) + 3] >> 4) |
+                      (in[CONV_REPACK_GRID_AUX(2 * j + 1) + 3] & 0xf0u));
 #elif defined(CONV_REPACK_GRID)
     for (u32 j = 0; j < 8; ++j) out[j] = in[66 + j];
 #endif
@@ -267,25 +272,41 @@ __device__ __forceinline__ void CONV_H(zero_bytes)(u8 *out, u64 count) {
 // ---- Source packet address (window-relative: src_b=0, stride0=0) ---------
 // The window copy placed packet `pkt` of row `n` at:
 //   window + n * CONV_SRC_STRIDE_1 * CONV_SRC_PACKET_SIZE + pkt * CONV_SRC_PACKET_SIZE
-__device__ __forceinline__ const u8 *CONV_H(src_pkt)(const u8 *window, u64 n, u64 pkt) {
-    return window + (n * CONV_SRC_STRIDE_1 + pkt) * CONV_SRC_PACKET_SIZE;
+__device__ __forceinline__ const u8 *CONV_H(src_pkt)(const u8 *window, u64 n, u64 pkt, u64 packet0) {
+    return window + (n * CONV_SRC_STRIDE_1 + pkt - packet0) * CONV_SRC_PACKET_SIZE;
 }
 
 // ---- Destination packet/row address (slot-relative) ----------------------
 #if defined(CONV_LAYOUT_PACKET)
-__device__ __forceinline__ u8 *CONV_H(dst_pkt)(u8 *dst, u64 slot, u64 n, u64 pkt) {
+__device__ __forceinline__ u8 *CONV_H(dst_pkt)(u8 *dst, u64 slot, u64 n, u64 pkt, const seismic_words_t &seismic_words_value) {
     return dst + (slot * CONV_DST_STRIDE_0 + n * CONV_DST_STRIDE_1 + pkt * CONV_DST_STRIDE_2) *
                  CONV_DST_PACKET_SIZE;
 }
 #else
-__device__ __forceinline__ u8 *CONV_H(dst_row)(u8 *dst, u64 slot, u64 n) {
+__device__ __forceinline__ u8 *CONV_H(dst_row)(u8 *dst, u64 slot, u64 n, const seismic_words_t &seismic_words_value) {
     return dst + (slot * CONV_DST_STRIDE_0 + n * CONV_DST_STRIDE_1) * CONV_DST_ROW_STRIDE_BYTES;
 }
 #if defined(CONV_LAYOUT_MMA16)
-__device__ __forceinline__ u8 *CONV_H(tile_plane_byte)(u8 *dst, u64 slot, u64 row0,
-                                                        u64 position, u64 row_bytes, u64 offset) {
-    u8 *row = CONV_H(dst_row)(dst, slot, row0 + position / row_bytes);
+__device__ __forceinline__ u8 *CONV_H(tile_plane_byte)(u8 *dst, const seismic_words_t &seismic_words_value,
+        u64 slot, u64 row0, u64 position, u64 row_bytes, u64 offset) {
+    u8 *row = CONV_H(dst_row)(dst, slot, row0 + position / row_bytes, seismic_words_value);
     return row + offset + position % row_bytes;
+}
+__device__ __forceinline__ u32 CONV_H(fragment_code)(const u8 *window, const seismic_words_t &seismic_words_value, u64 packet0,
+        u64 row0, u64 packets, u32 block, u32 step, u32 lane, u32 slot) {
+    const u64 n = row0 + lane / 4 + 8 * (slot % 2);
+    const u64 column = (u64)block * 64 + step * 16 + 2 * (lane % 4) + 8 * ((slot % 4) / 2) + slot / 4;
+    if (n >= CONV_N || column >= packets * CONV_SRC_PACKET_GROUP) return 0;
+    return CONV_H(source_code)(CONV_H(src_pkt)(window, n % 16, column / CONV_SRC_PACKET_GROUP, packet0),
+        (u32)(column % CONV_SRC_PACKET_GROUP));
+}
+__device__ __forceinline__ u32 CONV_H(fragment_slice)(const u8 *window, const seismic_words_t &seismic_words_value, u64 packet0,
+        u64 row0, u64 packets, u32 block, u32 step, u32 lane, u32 shift, u32 bits) {
+    u32 value = 0;
+    for (u32 slot = 0; slot < 8; ++slot)
+        value |= ((CONV_H(fragment_code)(window, seismic_words_value, packet0, row0, packets, block, step, lane, slot) >> shift) &
+            ((1u << bits) - 1u)) << (slot * bits);
+    return value;
 }
 #endif
 #endif
@@ -301,7 +322,9 @@ __device__ __forceinline__ u8 *CONV_H(tile_plane_byte)(u8 *dst, u64 slot, u64 ro
 // is_last_tile, stored_columns — for rows16 tail zeroing
 __device__ void CONV_FUNC(const u8 *window, u8 *dst,
                           u64 slot, u64 row0, u32 column0, u32 lane,
-                          bool is_last_tile, u64 stored_columns) {
+                          bool is_last_tile, u64 stored_columns, u64 packet0,
+                          const seismic_words_t &seismic_words_value) {
+    if (lane >= 32) return;
     const u32 GROUP     = (u32)CONV_SRC_PACKET_GROUP;
     const u32 TILE_ROWS = 16u;
     const u32 TILE_COLS = 32u;
@@ -315,10 +338,10 @@ __device__ void CONV_FUNC(const u8 *window, u8 *dst,
     for (u32 item = lane; item < TILE_ROWS * code_words; item += TILE_COLS) {
         u64 n = row0 + item / code_words;
         if (n >= (u64)CONV_N) continue;
-        const u8 *in = CONV_H(src_pkt)(window, n % TILE_ROWS, packet);
+        const u8 *in = CONV_H(src_pkt)(window, n % TILE_ROWS, packet, packet0);
         u32 word  = within / 32 * code_words + item % code_words;
         u32 value = CONV_H(code_word)(in, 0, word);
-        u8 *out   = CONV_H(dst_pkt)(dst, slot, n, packet);
+        u8 *out   = CONV_H(dst_pkt)(dst, slot, n, packet, seismic_words_value);
 #if CONV_DST_PACKET_SIZE % 4 == 0
         reinterpret_cast<u32 *>(out + CONV_DST_PLANE_0_OFFSET)[word] = value;
 #else
@@ -329,8 +352,8 @@ __device__ void CONV_FUNC(const u8 *window, u8 *dst,
     if (within != 0 || lane >= TILE_ROWS || row0 + lane >= (u64)CONV_N) return;
     {
         const u64 n  = row0 + lane;
-        const u8 *in = CONV_H(src_pkt)(window, n % TILE_ROWS, packet);
-        u8 *out      = CONV_H(dst_pkt)(dst, slot, n, packet);
+        const u8 *in = CONV_H(src_pkt)(window, n % TILE_ROWS, packet, packet0);
+        u8 *out      = CONV_H(dst_pkt)(dst, slot, n, packet, seismic_words_value);
 #if defined(CONV_REPACK_KQUANT) || defined(CONV_REPACK_Q6K) || defined(CONV_REPACK_Q3K) || \
     defined(CONV_REPACK_IQ3S)   || defined(CONV_REPACK_GRID)
         CONV_H(write_scales)(in, out + CONV_DST_PLANE_1_OFFSET);
@@ -359,12 +382,16 @@ __device__ void CONV_FUNC(const u8 *window, u8 *dst,
     if (column0 >= stored_columns) return;
     const bool occupied = column0 < packets * GROUP;
     const u32 within    = column0 % GROUP;
+#if defined(CONV_LAYOUT_MMA16)
+    const u64 rows = TILE_ROWS;
+#else
     const u64 rows = (u64)CONV_N - row0 < TILE_ROWS ? (u64)CONV_N - row0 : TILE_ROWS;
+#endif
 #if defined(CONV_LAYOUT_ROWS16)
     if (lane < rows) {
         const u64 n  = row0 + lane;
-        const u8 *in = CONV_H(src_pkt)(window, n % TILE_ROWS, column0 / GROUP);
-        u8 *row      = CONV_H(dst_row)(dst, slot, n);
+        const u8 *in = CONV_H(src_pkt)(window, n % TILE_ROWS, column0 / GROUP, packet0);
+        u8 *row      = CONV_H(dst_row)(dst, slot, n, seismic_words_value);
 #if defined(CONV_DST_PLANE_GRIDS)
         u32 *grids = reinterpret_cast<u32 *>(
             row + CONV_DST_PLANE_GRIDS_ROW_OFFSET + column0 / 32 * 4 * CONV_CODE_BITS);
@@ -393,23 +420,95 @@ __device__ void CONV_FUNC(const u8 *window, u8 *dst,
 #endif
 #endif
     }
+#else
+    {
+        const u32 block = column0 / 64;
+        const u32 step0 = (column0 % 64) / 16;
+#if defined(CONV_DST_PLANE_GRIDS)
+        // Grid entries stay whole: the tile sequence is [k-block][row][k-block
+        // bytes]; row `lane`'s 32 columns (steps `step0`, `step0 + 1`) are
+        // half of its k-block bytes.
+        if (lane < TILE_ROWS) {
+            const u64 n = row0 + lane;
+            const bool stored = n < CONV_N;
+            const u8 *in = CONV_H(src_pkt)(window, stored ? n % TILE_ROWS : 0, column0 / GROUP, packet0);
+            const u64 position =
+                ((u64)block * TILE_ROWS + lane) * 8 * CONV_CODE_BITS + step0 / 2 * 4 * CONV_CODE_BITS;
+            for (u32 word = 0; word < CONV_CODE_BITS; ++word)
+                *reinterpret_cast<u32 *>(CONV_H(tile_plane_byte)(dst, seismic_words_value, slot, row0, position + 4 * word,
+                                                         CONV_DST_PLANE_GRIDS_BYTES_PER_ROW,
+                                                         CONV_DST_PLANE_GRIDS_ROW_OFFSET)) =
+                    stored ? CONV_H(code_word)(in, within, word) : 0u;
+        }
+#elif defined(CONV_DST_PLANE_CODES)
+        {
+            u32 words[4];
+            for (u32 half_step = 0; half_step < 2; ++half_step) {
+                u32 low = 0, high = 0;
+                for (u32 slot = 0; slot < 4; ++slot) {
+                    low |= CONV_H(fragment_code)(window, seismic_words_value, packet0, row0, packets, block, step0 + half_step,
+                                         lane, slot) << (8 * slot);
+                    high |= CONV_H(fragment_code)(window, seismic_words_value, packet0, row0, packets, block, step0 + half_step,
+                                          lane, slot + 4) << (8 * slot);
+                }
+                words[2 * half_step] = low;
+                words[2 * half_step + 1] = high;
+            }
+            u64 position = ((u64)block * 32 + lane) * 32 + 8 * step0;
+            *reinterpret_cast<uint4 *>(CONV_H(tile_plane_byte)(dst, seismic_words_value, slot, row0, position,
+                                                       CONV_DST_PLANE_CODES_BYTES_PER_ROW,
+                                                       CONV_DST_PLANE_CODES_ROW_OFFSET)) =
+                make_uint4(words[0], words[1], words[2], words[3]);
+        }
+#else
+        {
+            u64 position = ((u64)block * 32 + lane) * 16 + 4 * step0;
+            *reinterpret_cast<uint2 *>(CONV_H(tile_plane_byte)(dst, seismic_words_value, slot, row0, position,
+                                                       CONV_DST_PLANE_CODES_LO_BYTES_PER_ROW,
+                                                       CONV_DST_PLANE_CODES_LO_ROW_OFFSET)) =
+                make_uint2(CONV_H(fragment_slice)(window, seismic_words_value, packet0, row0, packets, block, step0, lane, 0, 4),
+                           CONV_H(fragment_slice)(window, seismic_words_value, packet0, row0, packets, block, step0 + 1, lane, 0, 4));
+        }
+#if defined(CONV_DST_PLANE_CODES_HI) && CONV_DST_PLANE_CODES_HI_CODE_BITS == 1
+        {
+            u64 position = ((u64)block * 32 + lane) * 4 + step0;
+            *reinterpret_cast<unsigned short *>(CONV_H(tile_plane_byte)(dst, seismic_words_value, slot, row0, position,
+                                                                CONV_DST_PLANE_CODES_HI_BYTES_PER_ROW,
+                                                                CONV_DST_PLANE_CODES_HI_ROW_OFFSET)) =
+                (unsigned short)(CONV_H(fragment_slice)(window, seismic_words_value, packet0, row0, packets, block, step0, lane, 4,
+                                                1) |
+                                 (CONV_H(fragment_slice)(window, seismic_words_value, packet0, row0, packets, block, step0 + 1, lane,
+                                                 4, 1) << 8));
+        }
+#elif defined(CONV_DST_PLANE_CODES_HI)
+        {
+            u64 position = ((u64)block * 32 + lane) * 8 + 2 * step0;
+            *reinterpret_cast<u32 *>(CONV_H(tile_plane_byte)(dst, seismic_words_value, slot, row0, position,
+                                                     CONV_DST_PLANE_CODES_HI_BYTES_PER_ROW,
+                                                     CONV_DST_PLANE_CODES_HI_ROW_OFFSET)) =
+                CONV_H(fragment_slice)(window, seismic_words_value, packet0, row0, packets, block, step0, lane, 4, 2) |
+                (CONV_H(fragment_slice)(window, seismic_words_value, packet0, row0, packets, block, step0 + 1, lane, 4, 2) << 16);
+        }
+#endif
+#endif
+    }
 #endif
     if (within == 0 && lane < rows) {
         const u64 n   = row0 + lane;
         const u64 grp = column0 / GROUP;
         const bool real = n < (u64)CONV_N && occupied;
-        u8 *row = CONV_H(dst_row)(dst, slot, n);
+        u8 *row = CONV_H(dst_row)(dst, slot, n, seismic_words_value);
 #if defined(CONV_DST_PLANE_SCALES)
         u8 *scales = row + CONV_DST_PLANE_SCALES_ROW_OFFSET + grp * CONV_DST_PLANE_SCALES_BYTES_PER_GROUP;
-        if (real) CONV_H(write_scales)(CONV_H(src_pkt)(window, n % TILE_ROWS, grp), scales);
+        if (real) CONV_H(write_scales)(CONV_H(src_pkt)(window, n % TILE_ROWS, grp, packet0), scales);
         else CONV_H(zero_bytes)(scales, CONV_DST_PLANE_SCALES_BYTES_PER_GROUP);
 #endif
         u8 *supers = row + CONV_DST_PLANE_SUPERS_ROW_OFFSET + grp * CONV_DST_PLANE_SUPERS_BYTES_PER_GROUP;
-        if (real) CONV_H(write_supers)(CONV_H(src_pkt)(window, n % TILE_ROWS, grp), supers);
+        if (real) CONV_H(write_supers)(CONV_H(src_pkt)(window, n % TILE_ROWS, grp, packet0), supers);
         else CONV_H(zero_bytes)(supers, CONV_DST_PLANE_SUPERS_BYTES_PER_GROUP);
     }
     if (is_last_tile && lane < rows) {
-        u8 *row = CONV_H(dst_row)(dst, slot, row0 + lane);
+        u8 *row = CONV_H(dst_row)(dst, slot, row0 + lane, seismic_words_value);
 #if defined(CONV_DST_PLANE_CODES_HI)
 #if defined(CONV_DST_PLANE_SCALES)
         const u64 after_high = CONV_DST_PLANE_SCALES_ROW_OFFSET;
@@ -431,13 +530,25 @@ __device__ void CONV_FUNC(const u8 *window, u8 *dst,
 #endif
 }
 
+// One aligned volatile vector read. Reading a volatile uint4 through .x/.y/
+// .z/.w emits four scalar loads under NVRTC, so spell the PTX vector access
+// explicitly. Staging is immutable after its ticket is published.
+__device__ __forceinline__ uint4 CONV_H(load_volatile_16)(volatile const u8 *source) {
+    uint4 value;
+    asm volatile("ld.volatile.global.v4.u32 {%0,%1,%2,%3}, [%4];"
+                 : "=r"(value.x), "=r"(value.y), "=r"(value.z), "=r"(value.w)
+                 : "l"(source)
+                 : "memory");
+    return value;
+}
+
 // ---- Copy a window of staged rows to shared memory -----------------------
 // Reads staging memory with volatile loads (system-coherent after await_word).
 // Copies rows [row0, row0+16) x packets [packet0, packet0+n_packets) into window.
 // window layout: row i at window + i * CONV_SRC_STRIDE_1 * CONV_SRC_PACKET_SIZE
 __device__ void CONV_H(copy_window)(volatile const u8 *staging, u8 *window,
                                     u64 record, u64 row0, u64 packet0, u32 n_packets,
-                                    u32 lane, u32 threads) {
+                                    u32 lane, u32 threads, const seismic_words_t &seismic_words_value) {
     const u64 row_bytes = (u64)CONV_SRC_STRIDE_1 * CONV_SRC_PACKET_SIZE;
     for (u32 row = 0; row < 16u; ++row) {
         const u64 n = row0 + row;
@@ -447,12 +558,13 @@ __device__ void CONV_H(copy_window)(volatile const u8 *staging, u8 *window,
         volatile const u8 *src = staging + offset;
         u8 *dst = window + row * row_bytes;
         const u64 bytes = (u64)n_packets * CONV_SRC_PACKET_SIZE;
-        if (offset % 16 == 0) {
-            for (u32 i = lane; i < bytes / 16u; i += threads)
-                reinterpret_cast<uint4 *>(dst)[i] = reinterpret_cast<volatile const uint4 *>(src)[i];
+        if ((offset | (row * row_bytes)) % 16 == 0) {
+            for (u32 i = lane; i < bytes / 16u; i += threads) {
+                reinterpret_cast<uint4 *>(dst)[i] = CONV_H(load_volatile_16)(src + 16ull * i);
+            }
             for (u32 i = (u32)(bytes / 16u * 16u) + lane; i < bytes; i += threads)
                 dst[i] = src[i];
-        } else if (offset % 4 == 0) {
+        } else if ((offset | (row * row_bytes)) % 4 == 0) {
             for (u32 i = lane; i < bytes / 4u; i += threads)
                 reinterpret_cast<u32 *>(dst)[i] = reinterpret_cast<volatile const u32 *>(src)[i];
             for (u32 i = (u32)(bytes / 4u * 4u) + lane; i < bytes; i += threads)

@@ -27,6 +27,30 @@ Execution joins a validated batch with owned state advances, conditioning, works
 leases into one opaque launch. Its constructor checks only cross-domain facts: resource identity,
 slot-to-advance cardinality and row alignment, conditioning references, and planned lease class.
 Programs accept the launch as one value and retain it in their submission until completion.
+A layer-major prompt group derives every chunk's preceding-token window from
+a private history extended by the known earlier chunks. The first chunk has not
+yet been submitted while the group is constructed; its tokens cannot be obtained
+from the published fed-token history. Only successful submission and later
+claims publish those feeds. A refused or orphaned group cannot advance the
+accepted token history.
+In a layer-major target group, all entries execute before the decoder blocks.
+Kept token rows therefore have one disjoint region per admitted chain member;
+an entry cannot overwrite another member's n-gram inputs. Certification and
+binding charge the complete group storage, and both single-device and placed
+submission select the region by chain index. Later groups reuse the regions in
+the device queue's submission order.
+Every streamed layer publishes its own launch sequence before routing, including
+small prompt tails that use the decode graph. A layer-major group alternates
+launches at each layer; no layer may inherit another member's shared step word.
+A paired target can continue a device selection when its first owner has
+admitted kept-token storage and its entry supports selected tokens. Only the
+first chain member may consume a predecessor selection, produced by the final
+owner. Before its entry, token and status rows are copied into that member's
+first-owner region after producer completion. The launch retains the producer
+output lease. Embedding selected-row tracking and stored-table notices remain
+part of the ordinary claim checks; moving a selection does not imply that its
+embedding row was available. A model without this return storage cannot enable
+paired lookahead.
 A successor-dependent head's device entry can join one independently owned prior feature with
 the leading features of the current target chunk. The join uses planned head scratch and
 preserves activation storage exactly; it does not read the features through the host.

@@ -71,6 +71,7 @@ pub(crate) struct RoutedGraphEntries<'a, G: GraphDraft + 'a> {
 
 /// A streamed layer's decode entries (`StreamedRoutedKernels`).
 pub(crate) struct StreamedGraphEntries<'a, G: GraphDraft + 'a> {
+    pub choices: G::Binding<'a, routed_gate_up::Entry>,
     pub step: G::Binding<'a, routed_step::Entry>,
     pub route: G::Binding<'a, routed_route_streamed::Entry>,
     pub fill: G::Binding<'a, routed_bank_fill::Entry>,
@@ -86,6 +87,7 @@ impl<'a> From<&'a StreamedRoutedKernels> for StreamedGraphEntries<'a, NativeGrap
         let [copy_gate, copy_up, copy_down] = &kernels.copy;
         let [wide_gate, wide_up, wide_down] = &kernels.convert_wide;
         Self {
+            choices: &kernels.choices,
             step: &kernels.step,
             route: &kernels.route,
             fill: &kernels.fill,
@@ -144,6 +146,7 @@ pub(crate) struct CheckedRoutedEntries {
 }
 
 struct CheckedStreamedEntries {
+    choices: [(&'static str, Element); 3],
     route: [(&'static str, Element); 5],
     convert: [[(&'static str, Element); 2]; 3],
     copy: [[(&'static str, Element); 1]; 3],
@@ -211,6 +214,11 @@ impl CheckedRoutedEntries {
             streamed: binding.bank.map(|bank| {
                 let residents = [binding.expert_gate, binding.expert_up, binding.expert_down];
                 CheckedStreamedEntries {
+                    choices: [
+                        ("EGW", binding.expert_gate),
+                        ("EUW", binding.expert_up),
+                        ("A", binding.activation),
+                    ],
                     route: [
                         ("NW", binding.norm),
                         ("RW", binding.router),
@@ -253,6 +261,7 @@ impl CheckedRoutedEntries {
                 let [gate, up, down] = &streamed.convert;
                 let [copy_gate, copy_up, copy_down] = &streamed.copy;
                 StreamedGraphEntries {
+                    choices: &streamed.choices[..],
                     step: &[][..],
                     route: &streamed.route[..],
                     fill: &streamed.fill[..],
@@ -417,19 +426,17 @@ pub(crate) fn routed<'a, G: GraphDraft + 'a>(
                 .streamed
                 .as_ref()
                 .ok_or("a streamed layer without its bank-served entries")?;
-            let RoutedDecodeEntries::SharedRoute { choices, .. } = handle.decode else {
-                return Err("a streamed layer without the shared-route decode form".into());
-            };
             let inject = join.inject(graph, rows, constants)?;
             return streamed_decode(
                 graph,
                 streamed,
-                (choices, handle.output),
+                (streamed.choices, handle.output),
                 (&inject, &output_dims),
                 load,
                 bank,
                 scope,
                 weights,
+                input,
                 residual,
                 [&mut routes, &mut scores],
                 rows,
@@ -804,7 +811,7 @@ fn fill_scratch<'a, G: GraphDraft + 'a>(
             graph.enqueue(
                 entries.convert_wide[kind],
                 &[
-                    ("R", bank.staging_records),
+                    ("R", bank.graph_staging_records()),
                     ("C", bank.conveyor_records()),
                     ("L", bank.round_records()),
                     ("S", shape.count),
@@ -886,7 +893,7 @@ struct LayerWeights {
 ///          bank and the bound slots
 /// ```
 ///
-/// The first routed layer of the target sets the step sequence. The
+/// Each routed layer sets its launch's step sequence. The
 /// products and the combine are the resident entries themselves, so the
 /// value is the resident load's; a step that requested nothing adds one
 /// small launch to the resident form.
@@ -900,6 +907,7 @@ fn streamed_decode<'a, G: GraphDraft + 'a>(
     bank: &crate::ExpertBankPlan,
     scope: WeightScope,
     weights: &mut Vec<(WeightPort, NativePort)>,
+    input: SublayerInput<'_>,
     residual: &WorkflowTensor,
     [routes, scores]: [&mut NativePort; 2],
     rows: u64,
@@ -920,6 +928,7 @@ fn streamed_decode<'a, G: GraphDraft + 'a>(
         shared_up,
         shared_down,
     } = layer;
+    let form = input.form.dimensions(hidden);
     let position = bank
         .layers
         .iter()
@@ -939,33 +948,37 @@ fn streamed_decode<'a, G: GraphDraft + 'a>(
     let mut near_ring = part(graph, weights, BankPart::Ring { distance: 1 })?;
     let mut far_ring = part(graph, weights, BankPart::Ring { distance: 2 })?;
 
-    // A bank-served launch's layers run in order, so its first streamed
-    // layer sets the step for all of them.
-    let sequence = match position {
-        0 => {
-            let sequence = graph.input_for(entries.step, "sequence", &[])?;
-            graph.enqueue(
-                entries.step,
-                &[],
-                routed_step::WorkflowArgs {
-                    step: step.tensor_mut().into(),
-                    sequence: sequence.tensor().into(),
-                },
-            )?;
-            Some(sequence)
-        }
-        _ => None,
-    };
+    // A layer-major group can end in a small chunk using this decode form.
+    // The previous chunk's graph sets the shared word at every layer, so
+    // setting it only at the first layer would reuse that chunk's sequence.
+    let sequence = graph.input_for(entries.step, "sequence", &[])?;
+    graph.enqueue(
+        entries.step,
+        &[],
+        routed_step::WorkflowArgs {
+            step: step.tensor_mut().into(),
+            sequence: sequence.tensor().into(),
+        },
+    )?;
+    let sequence = Some(sequence);
 
-    // The layers ahead (spec 4.7), predicted from this layer's residual
-    // through their own norm and router into this layer's rings. Near the
-    // end of the target fewer layers lie ahead; the route reads none of a
+    // The layers ahead (spec 4.7), predicted from a single residual
+    // through their own norm and router into this layer's rings. Mixed
+    // partials already contain this site's learned stream mix and norm;
+    // applying a future router to them cannot predict that future mix.
+    // On Flash Next/3090 Ti only about 19% of those speculative source
+    // bytes were used, while their I/O dominated decode. Keep this predictor
+    // for its single-residual input form; mixed forms use demand reads.
+    // Near the end of the target fewer layers lie ahead; the route reads none of a
     // missing distance's tensors, which take this layer's.
     let WeightScope::TargetSublayer(SublayerIndex { block, .. }) = scope else {
         return Err("a streamed layer outside the target".into());
     };
     let mut ahead = Vec::with_capacity(crate::streaming::layout::DISTANCES.len());
     for distance in crate::streaming::layout::DISTANCES {
+        if input.form.parts != 1 || !input.form.normalized {
+            break;
+        }
         let Some(later_layer) = bank.layers.get(position + usize::from(distance)) else {
             break;
         };
@@ -988,8 +1001,10 @@ fn streamed_decode<'a, G: GraphDraft + 'a>(
                 weights,
             )
         };
+        let ahead_norm = ahead_port(graph, WeightKind::InputNorm, WeightPart::Values)?
+            .tensor().clone();
         ahead.push([
-            ahead_port(graph, WeightKind::InputNorm, WeightPart::Values)?.tensor().clone(),
+            ahead_norm,
             ahead_port(graph, WeightKind::Router, WeightPart::Values)?.tensor().clone(),
             ahead_port(graph, WeightKind::ExpertGate, WeightPart::Bank(BankPart::SlotMap))?
                 .tensor()
@@ -1005,10 +1020,8 @@ fn streamed_decode<'a, G: GraphDraft + 'a>(
         &[
             ("M", rows),
             ("H", hidden),
-            // A streamed layer's router input is one normalized stream
-            // (preparation refuses mixed inputs).
-            ("PT", 1),
-            ("NM", hidden),
+            form[0],
+            form[1],
             ("E", shape.count),
             ("K", shape.selected),
             ("S", shape.shared_intermediate),
@@ -1017,7 +1030,7 @@ fn streamed_decode<'a, G: GraphDraft + 'a>(
             ("RING", bank.ring_words()),
         ],
         routed_route_streamed::WorkflowArgs {
-            residual: residual.into(),
+            residual: input.rows.into(),
             norm: (&norm).into(),
             router: (&router).into(),
             shared_router: (&shared_router).into(),
@@ -1066,7 +1079,7 @@ fn streamed_decode<'a, G: GraphDraft + 'a>(
                 ("K", shape.selected),
                 ("F", shape.intermediate),
                 ("BANK", bank.records(scope)?),
-                ("T", bank.staging_records),
+                ("T", bank.graph_staging_records()),
                 ("X", bank.experts),
                 ("C", bank.control_words()),
                 ("P", bank.placement_choices()),

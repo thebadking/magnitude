@@ -138,15 +138,15 @@ extern "C" __global__ void routed_bank_fill(SEISMIC_KERNEL_PARAMS) {
         const u32 n_pkts   = (u32)min((u64)gate_win_pkts, gate_packets > packet0 ? gate_packets - packet0 : 0ull);
         __syncthreads();
         if (n_pkts > 0)
-            conv_gate_copy_window(staged_gate, window, gate_record, row0, packet0, n_pkts, lane, threads);
+            conv_gate_copy_window(staged_gate, window, gate_record, row0, packet0, n_pkts, lane, threads, seismic_words_value);
         __syncthreads();
         if (n_pkts > 0) {
             // Convert tiles in this window: each tile covers 32 columns = 1 column group.
             const u64 tiles_x = (gate_col_wins > 0) ? (u64)gate_win_pkts * gate_group / 32 : 0;
-            for (u64 tile = 0; tile < tiles_x; ++tile) {
-                const u32 col0    = (u32)(tile * 32);
+            for (u64 tile = lane / 32u; tile < tiles_x; tile += threads / 32u) {
+                const u32 col0    = (u32)(packet0 * gate_group + tile * 32);
                 const bool is_last = (win_idx + 1 == gate_col_wins) && (col0 + 32 == gate_stored_cols);
-                conv_gate(window, expert_gate, (u64)slot, row0, col0, lane, is_last, gate_stored_cols);
+                conv_gate(window, expert_gate, (u64)slot, row0, col0, lane % 32u, is_last, gate_stored_cols, packet0, seismic_words_value);
             }
         }
     }
@@ -175,14 +175,14 @@ extern "C" __global__ void routed_bank_fill(SEISMIC_KERNEL_PARAMS) {
         const u32 n_pkts   = (u32)min((u64)up_win_pkts, up_packets > packet0 ? up_packets - packet0 : 0ull);
         __syncthreads();
         if (n_pkts > 0)
-            conv_up_copy_window(staged_up, window, up_record, row0, packet0, n_pkts, lane, threads);
+            conv_up_copy_window(staged_up, window, up_record, row0, packet0, n_pkts, lane, threads, seismic_words_value);
         __syncthreads();
         if (n_pkts > 0) {
             const u64 tiles_x = (up_col_wins > 0) ? (u64)up_win_pkts * up_group / 32 : 0;
-            for (u64 tile = 0; tile < tiles_x; ++tile) {
-                const u32 col0    = (u32)(tile * 32);
+            for (u64 tile = lane / 32u; tile < tiles_x; tile += threads / 32u) {
+                const u32 col0    = (u32)(packet0 * up_group + tile * 32);
                 const bool is_last = (win_idx + 1 == up_col_wins) && (col0 + 32 == up_stored_cols);
-                conv_up(window, expert_up, (u64)slot, row0, col0, lane, is_last, up_stored_cols);
+                conv_up(window, expert_up, (u64)slot, row0, col0, lane % 32u, is_last, up_stored_cols, packet0, seismic_words_value);
             }
         }
     }
@@ -211,14 +211,14 @@ extern "C" __global__ void routed_bank_fill(SEISMIC_KERNEL_PARAMS) {
         const u32 n_pkts   = (u32)min((u64)dn_win_pkts, dn_packets > packet0 ? dn_packets - packet0 : 0ull);
         __syncthreads();
         if (n_pkts > 0)
-            conv_down_copy_window(staged_down, window, down_record, row0, packet0, n_pkts, lane, threads);
+            conv_down_copy_window(staged_down, window, down_record, row0, packet0, n_pkts, lane, threads, seismic_words_value);
         __syncthreads();
         if (n_pkts > 0) {
             const u64 tiles_x = (dn_col_wins > 0) ? (u64)dn_win_pkts * dn_group / 32 : 0;
-            for (u64 tile = 0; tile < tiles_x; ++tile) {
-                const u32 col0    = (u32)(tile * 32);
+            for (u64 tile = lane / 32u; tile < tiles_x; tile += threads / 32u) {
+                const u32 col0    = (u32)(packet0 * dn_group + tile * 32);
                 const bool is_last = (win_idx + 1 == dn_col_wins) && (col0 + 32 == dn_stored_cols);
-                conv_down(window, expert_down, (u64)slot, row0, col0, lane, is_last, dn_stored_cols);
+                conv_down(window, expert_down, (u64)slot, row0, col0, lane % 32u, is_last, dn_stored_cols, packet0, seismic_words_value);
             }
         }
     }

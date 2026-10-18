@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Literal
 
 from magnitude_fixtures.canonical import Record
-from pydantic import Field, model_validator
+from pydantic import Field, PositiveInt, model_validator
 
 from .policy import INFERENCE
 
@@ -34,12 +34,17 @@ class MagnitudeOptions(Record):
     build: SourceBuild | None = None
     harness: Path = INFERENCE / "target" / "release" / "magnitude-harness"
     device: str = "auto"
+    #: Exact serialized decoder placement, retained in run identity.
+    decoder_ranges: str | None = None
+    lookahead: bool | None = None
     #: The engine's kernel cache (compiled kernels and stored tuning) exactly as given.
     cache_dir: Path | None = None
     #: A persistent root under which each model and engine binary keeps its own kernel cache
     #: (``<root>/<model>/<binary sha256 prefix>``), as a user's installation keeps one.
     kernel_cache_root: Path | None = None
     prefill_tokens: int | None = Field(default=None, gt=0)
+    #: Layer-major prompt chunks admitted together; the engine's policy when unset.
+    prefill_group: PositiveInt | Literal["auto"] | None = None
     #: Proposals per draft for the catalog drafter; the engine's own when unset.
     mtp_proposals: int | None = Field(default=None, gt=0)
     #: Exact engine draft-budget JSON, or ``adaptive``, preserved in run identity.

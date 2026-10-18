@@ -31,6 +31,18 @@ impl fmt::Display for ResidencyError {
     }
 }
 
+impl From<&str> for ResidencyError {
+    fn from(message: &str) -> Self {
+        Self::Invalid(message.to_owned())
+    }
+}
+
+impl From<String> for ResidencyError {
+    fn from(message: String) -> Self {
+        Self::Invalid(message)
+    }
+}
+
 impl error::Error for ResidencyError {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
@@ -249,6 +261,7 @@ pub(crate) fn import_target(
     definition: &ModelDefinition,
     package: &Package,
     residency: &mut ResidencyStore,
+    owned_blocks: Option<&std::ops::Range<usize>>,
 ) -> Result<ResidentTarget, ResidencyError> {
     validate_definition_package(definition, package)?;
     let decoder = &definition.decoder;
@@ -269,6 +282,12 @@ pub(crate) fn import_target(
         operators::decoder_weights(decoder)
             .into_iter()
             .chain(exit_roles)
+            .filter(|(role, _)| owned_blocks.is_none_or(|blocks| match role.scope {
+                WeightScope::Target => true,
+                WeightScope::TargetSublayer(index)
+                | WeightScope::TargetBranch { sublayer: index, .. } => blocks.contains(&(index.block as usize)),
+                _ => false,
+            }))
             .collect(),
         residency,
         target,
@@ -328,12 +347,14 @@ pub(crate) fn import_target(
             // The conveyor borrows its lender's records (spec 4.9).
             let lender =
                 plan.conveyor.lender.map(|group| residency.bank_arenas(group)).transpose()?;
-            let device = residency.device();
-            crate::streaming::bank::ResidentBank::open(device, &plan, target, &sublayers, lender)
+            let device = residency.device().clone();
+            crate::streaming::bank::ResidentBank::open(
+                &device, &plan, target, &sublayers, lender,
+                &mut || residency.import_checkpoint(),
+            )
                 .map(std::sync::Arc::new)
         })
-        .transpose()
-        .map_err(invalid)?;
+        .transpose()?;
     Ok(ResidentTarget {
         embedding,
         blocks: decoder.blocks.len(),

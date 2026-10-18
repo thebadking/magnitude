@@ -92,14 +92,15 @@ extern "C" __global__ void routed_convert_wide(SEISMIC_KERNEL_PARAMS) {
                                       packets > packet0 ? packets - packet0 : 0ull);
         __syncthreads();
         if (n_pkts > 0)
-            conv_convert_copy_window(src, window, record, row0, packet0, n_pkts, lane, threads);
+            conv_convert_copy_window(src, window, record, row0, packet0, n_pkts, lane, threads, seismic_words_value);
         __syncthreads();
         if (n_pkts > 0) {
             const u64 tiles_x = (u64)win_pkts * group / 32;
-            for (u64 tile = 0; tile < tiles_x; ++tile) {
-                const u32 col0    = (u32)(tile * 32);
+            // Independent column tiles use every warp of the copied window.
+            for (u64 tile = lane / 32u; tile < tiles_x; tile += threads / 32u) {
+                const u32 col0    = (u32)(packet0 * group + tile * 32);
                 const bool is_last = (win_idx + 1 == col_wins) && (col0 + 32 == stored_cols);
-                conv_convert(window, destination, (u64)slot_idx, row0, col0, lane, is_last, stored_cols);
+                conv_convert(window, destination, (u64)slot_idx, row0, col0, lane % 32u, is_last, stored_cols, packet0, seismic_words_value);
             }
         }
     }

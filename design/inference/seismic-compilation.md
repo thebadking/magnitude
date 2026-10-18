@@ -389,8 +389,11 @@ are joined to checked ports while constructing an owned run, before submission. 
 does not discover an absent tensor, incompatible shape, representation, or alias.
 The checked entry is also the source of tensor-port and result-leaf extents for
 metadata-only planning; the representation registry supplies canonical storage
-bytes. Such tensor facts alone do not establish a graph storage bound or backend
-formation.
+bytes. A sealed native graph exposes those checked representations and extents
+for its own ports and results without allocating or executing; a tensor reference
+from another graph has no descriptor in it. Transfer planning uses these descriptors
+rather than reconstructing the producer's layout. Such tensor facts alone do not
+establish a graph storage bound or backend formation.
 For a graph whose nodes have complete checked storage facts, one parameterized
 program owns the topology used by both resource certification and executable
 preparation. Its backend-free resource projection takes a structural regime's
@@ -417,15 +420,26 @@ run supplies only its storage regions and the tensors bound to external ports, a
 checks those bindings alone. Per-run values live in storage, never in launch arguments: host-written
 inputs go to the run's upload region, which is host-visible memory (Metal shared storage, CUDA
 mapped pinned host memory), so writing it is a plain host write that never waits for queued
-device work. A slot takes its upload regions in rotation, so a fixed sequence of runs binds the
-same storage at the same position. Attached runs of different plans may be queued on a sequence
+device work. A family slot owns a fixed list of upload capacities and takes the
+smallest idle region fitting the plan's actual upload, breaking capacity ties in
+rotation order. A region remains unavailable while a view or device submission uses
+it; exhaustion neither allocates nor overwrites it. A graph with no upload consumes
+no region. A fixed sequence therefore binds the same storage at the same position.
+Attached runs of different plans may be queued on a sequence
 and submitted together as one unit (one Metal command buffer, one CUDA stream submission); the
 device runs them in queue order exactly as if submitted one by one, and a queued run holds its
 storage rather than its tensor handles, so output leases it reads can be recycled and rebound by
 later runs of the same sequence. On CUDA a submission's launches are fully determined by its
 plans and the addresses it binds: the device keeps the instantiated CUDA graph of each (plans,
 bound addresses) key (least recently used dropped beyond a bound) and a submission with a known
-key is one graph launch. Vulkan keeps recorded secondary command buffers under the same key, and
+key is one graph launch. Graph creation and cache eviction occur only while all
+streams of that opened CUDA context are idle. One context guard excludes new
+kernel, timeline and transfer submissions from that observation through graph
+creation and eviction. A busy cache miss leaves the cache unchanged and issues
+the same native launches individually, preserving timeline boundaries and
+completion. Instantiation cannot hold a driver lock while an earlier kernel
+waits for a host transfer that needs that lock.
+Vulkan keeps recorded secondary command buffers under the same key, and
 bounds the device time of each queue submission, since drivers reset a device whose submission
 outlives their watchdog (two seconds under Windows TDR and current amdgpu): a sealed submission is
 divided at launch boundaries, a launch of a kind (pipeline and group counts) not yet measured is
@@ -445,6 +459,13 @@ newest submitted device use (host writes) or write (host reads): a device's nati
 run on its one queue (one CUDA stream, one Metal command queue of serial compute passes) and
 complete in commit order, and each submission commits and records its fences under the device's
 order lock, so the newest fence of a kind completes after every earlier one.
+An explicit unsafe protocol transfer may write a canonical CUDA tensor range
+without the allocation's ordinary exclusion. Its caller must own that range,
+prove prior consumers complete, and keep all queued or running consumers behind
+a readiness gate until the copy succeeds. Seismic checks the storage, layout and
+bounds, and completes the copy on its independent non-blocking transfer stream
+before returning. Failure cannot authorize readiness. This does not weaken the
+exclusion used by ordinary tensor host access.
 Standalone native calls retain their own submission boundary. Tensor-result native calls from
 different prepared entries may also form one ordered native batch. Each call keeps its checked
 arguments, results and scratch alive until the batch completes; shared scratch is safe because
@@ -469,6 +490,10 @@ the fence then orders table writes after physical completion. A slab
 slot may be reused after release, but its old allocation
 remains charged until every view and submitted use releases it; removing a slot
 alone gives the owner no memory credit.
+Removing a common slot from a group of slab stores checks every binding first
+and retains all removed allocations until every address table is updated. A
+publication failure restores the slots and attempts to restore every table;
+an unrecoverable driver error is returned without releasing those allocations.
 Canonical upload tensors can be filled from a host reader in bounded chunks.
 An incomplete read leaves the tensor unpublished; the caller cannot bind it
 as a native input until the whole physical byte range has been written.
@@ -480,6 +505,10 @@ per-launch timestamps or changing the device work. At launch detail
 each launch is encoded in its own timestamped encoder (Metal) or between recorded stream events
 (CUDA), still within the same single submission; that attributes device time to entries but
 changes the device work, so launch-detail steps are never production timings.
+A placed target opens a scope on every physical owner before submission and
+attributes each result to that owner's selector. Partial scope acquisition is
+abandoned as a unit; a primary-device-only trace cannot describe the whole
+placed target. Device intervals remain separate when owners overlap.
 
 ## Principles
 
@@ -680,6 +709,12 @@ cannot assemble selection and descriptions separately. Tensor descriptors preser
 device identity through external arguments, outputs and views. Binding never substitutes the
 destination device for an input tensor's device. Ordinary calls and isolated candidate execution
 feed the same post-binding insertion operation.
+Transfers between opened devices explicitly copy into destination-owned tensors;
+they preserve representation bytes and never relabel an input's device identity.
+The synchronous host-staged transfer requires matching canonical shapes and
+representations, holds both allocations' access rights in a fixed order, and uses
+bounded host scratch. It works without peer access. Invalid geometry is rejected
+before writing; a failed transfer leaves its destination unpublished.
 Controlled observation compares its requested metadata with a read-only projection of the
 admitted execution's actual bound values before submission. It does not infer and validate the
 same arguments again through a separate observation path. A mismatch drops the unsubmitted

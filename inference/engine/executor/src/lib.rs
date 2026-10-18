@@ -44,7 +44,7 @@ pub use device_resources::{
 };
 pub use domain::{
     ClaimRefusal, DeviceHeap, DomainError, DomainRequirements, DomainReservation, ExecutorDomain,
-    HeadFlight, MemoryChargeReconciliation, NativeFamily, OpenRequirements,
+    DeviceMemoryCharge, HeadFlight, MemoryChargeReconciliation, NativeFamily, OpenRequirements,
     PendingOperationOutcome, PhysicalDecision, PrimingCompletionFlight, ProgramFamily,
     ReservedResources, ResumeState, StateBindings, SubmitFailure, TargetContinuation, TargetFlight,
     TargetHostTiming, VisionFlight, require_normal,
@@ -98,7 +98,7 @@ pub use planning::{
     ArtifactComponent, ArtifactComponentKind, AssessmentFit, AssessmentFitVerdict,
     AssessmentGraphResourceBounds, AssessmentHeaderBounds, AssessmentMemoryBounds,
     AssessmentMemoryCharge, AssessmentMemoryTerms, AttentionBinding, AttentionShape, BackendPlan,
-    CapabilityPlan, ComponentPlan, ComponentSelection, DenseBinding, DenseBranchBinding,
+    CapabilityPlan, ComponentPlan, ComponentSelection, DecoderPlacement, DecoderRange, DecoderRangeLoadPlan, PlacedStateLayout, DenseBinding, DenseBranchBinding,
     DenseScales, Dflash2Binding, DraftBlockBinding, DraftProgramPlan, EmbeddingBinding,
     ExecutionPlan, ExecutionPlanDraft, ExecutionPlanner, ExpertBankPlan, FeaturesBinding, FeedForwardProgramSlot,
     GraphSlots, HeadBinding, HeadProgramPlan, HostTablePlan, ImportProgramSlot,

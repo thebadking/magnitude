@@ -4,7 +4,7 @@
 //! its backend (`.h` Metal, `.cuh` CUDA, `.glsl` Vulkan): `#include "<path>"`,
 //! resolved relative to the file containing the directive, whose canonical
 //! target must lie inside one of the load's source roots. Capture inlines each
-//! included file once, at its first directive, so the captured asset (and with
+//! backend header once, and each `.inc` fragment at every directive, so the captured asset (and with
 //! it the checked bundle and every identity derived from it) contains exactly
 //! the text that is compiled. Vendor and system headers, absolute paths and
 //! files outside the source roots are rejected.
@@ -15,7 +15,7 @@
 //! because Seismic owns representation and storage binding semantics. Library
 //! files are embedded in this crate, inlined
 //! once like any include, and may include only other library files.
-use crate::checked::{CheckedModule, SourceError, SourceFile, SourceSet, check_source};
+use crate::checked::{check_source, CheckedModule, SourceError, SourceFile, SourceSet};
 use crate::ids::EntryId;
 use crate::registry::BackendName;
 use std::path::{Path, PathBuf};
@@ -115,6 +115,8 @@ pub enum NativeIncludeReason {
     Absolute,
     /// A path without the backend's library extension.
     Extension,
+    /// A repeatedly included fragment recursively includes itself.
+    Cycle,
     /// The resolved file lies outside every source root of the load.
     OutsideSourceRoots,
     /// The named file does not exist or is not readable.
@@ -134,8 +136,9 @@ impl std::fmt::Display for NativeIncludeError {
                 "only `#include \"<relative path>\"` directives are admitted"
             }
             NativeIncludeReason::Absolute => "include paths are relative to the including file",
+            NativeIncludeReason::Cycle => "recursive native include fragment",
             NativeIncludeReason::Extension => {
-                "only `.h` (Metal), `.cuh` (CUDA) or `.glsl` (Vulkan) files of the asset's backend may be included"
+                "only `.h` (Metal), `.cuh` (CUDA) or `.glsl` (Vulkan) headers, or `.inc` fragments, may be included"
             }
             NativeIncludeReason::OutsideSourceRoots => {
                 "the included file lies outside the build's source roots"
@@ -358,6 +361,7 @@ struct Expanded {
 
 /// Inlines every include of a Metal, CUDA or Vulkan asset, each file once at
 /// its first directive (later directives naming it expand to an empty line).
+/// `.inc` fragments expand at every directive, with recursive inclusion refused.
 /// `#line` markers keep toolchain diagnostics attributed to the authored
 /// files; their labels are paths relative to the asset's directory (library
 /// files: `seismic/<name>`), so the expansion is host-independent.
@@ -382,6 +386,7 @@ fn expand_includes(
         roots,
         includes: Vec::new(),
         library: Vec::new(),
+        active: Vec::new(),
     };
     let source = expansion.expand(&asset.path, &label, &asset.text, false)?;
     Ok(Expanded {
@@ -397,6 +402,7 @@ struct Expansion<'a> {
     roots: &'a [PathBuf],
     includes: Vec<NativeAssetFile>,
     library: Vec<&'static str>,
+    active: Vec<PathBuf>,
 }
 
 /// What an include directive names.
@@ -437,6 +443,7 @@ impl Expansion<'_> {
         text: &str,
         in_library: bool,
     ) -> Result<String, LoadError> {
+        self.active.push(path.to_path_buf());
         let mut out = String::with_capacity(text.len());
         for (index, line) in text.split_inclusive('\n').enumerate() {
             let Some(directive) = include_directive(line) else {
@@ -488,16 +495,28 @@ impl Expansion<'_> {
             if !self.roots.iter().any(|root| included.starts_with(root)) {
                 return Err(failure(NativeIncludeReason::OutsideSourceRoots));
             }
-            if self.includes.iter().any(|file| file.path == included) {
+            let repeated = included
+                .extension()
+                .is_some_and(|extension| extension == "inc");
+            let existing = self.includes.iter().find(|file| file.path == included);
+            if existing.is_some() && !repeated {
                 out.push('\n');
                 continue;
             }
-            let text = std::fs::read_to_string(&included)
-                .map_err(|_| failure(NativeIncludeReason::Missing))?;
-            self.includes.push(NativeAssetFile {
-                path: included.clone(),
-                text: text.clone(),
-            });
+            if repeated && self.active.contains(&included) {
+                return Err(failure(NativeIncludeReason::Cycle));
+            }
+            let text = if let Some(file) = existing {
+                file.text.clone()
+            } else {
+                let text = std::fs::read_to_string(&included)
+                    .map_err(|_| failure(NativeIncludeReason::Missing))?;
+                self.includes.push(NativeAssetFile {
+                    path: included.clone(),
+                    text: text.clone(),
+                });
+                text
+            };
             let included_label = relative_label(self.asset_directory, &included);
             out.push_str(&format!("#line 1 \"{included_label}\"\n"));
             out.push_str(&self.expand(&included, &included_label, &text, false)?);
@@ -506,6 +525,7 @@ impl Expansion<'_> {
             }
             out.push_str(&format!("#line {} \"{label}\"\n", index + 2));
         }
+        self.active.pop();
         Ok(out)
     }
 
@@ -560,7 +580,9 @@ impl Expansion<'_> {
         if Path::new(target).is_absolute() {
             return Err(NativeIncludeReason::Absolute);
         }
-        if !extension_matches(target) {
+        if !extension_matches(target)
+            && Path::new(target).extension().is_none_or(|ext| ext != "inc")
+        {
             return Err(NativeIncludeReason::Extension);
         }
         Ok(Include::Relative(target.to_owned()))
@@ -750,11 +772,9 @@ mod tests {
         );
         assert!(source.starts_with("#line 1 \"seismic/packets.h\"\n"));
         assert!(source.contains("#line 1 \"seismic/element.h\"\n"));
-        assert!(
-            !source
-                .lines()
-                .any(|line| line.trim_start().starts_with("#include"))
-        );
+        assert!(!source
+            .lines()
+            .any(|line| line.trim_start().starts_with("#include")));
         assert_eq!(source.matches("struct Rows16 {").count(), 1);
         assert_eq!(source.matches("#define ELEMENT_OF(prefix)").count(), 1);
         assert!(source.ends_with("\nBODY\n"));
@@ -853,6 +873,30 @@ mod tests {
         std::fs::write(&file, "").unwrap();
         let roots = source_roots(&[root.clone(), file, root.join("metal")]).unwrap();
         assert_eq!(roots, [root.clone(), root.join("metal")]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn repeated_fragments_expand_each_time_and_are_captured_once() {
+        let root = fixture("repeat-fragment");
+        std::fs::write(root.join("metal/common/body.inc"), "BODY_MACRO\n").unwrap();
+        let asset = asset(
+            &root,
+            "#include \"common/body.inc\"\n#include \"common/body.inc\"\n",
+        );
+        let expanded = expand_includes(&asset, "h", &[root.clone()]).unwrap();
+        assert_eq!(expanded.source.matches("BODY_MACRO").count(), 2);
+        assert_eq!(expanded.includes.len(), 1);
+        std::fs::write(
+            root.join("metal/common/body.inc"),
+            "#include \"body.inc\"\n",
+        )
+        .unwrap();
+        match expand_includes(&asset, "h", &[root.clone()]) {
+            Err(LoadError::NativeInclude(error)) => {
+                assert_eq!(error.reason, NativeIncludeReason::Cycle)
+            }
+            other => panic!("expected a recursive fragment failure: {other:?}"),
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -145,12 +145,12 @@ const TREE_EXCEPTIONS: &[(&str, &[BackendName], &str)] = &[
     (
         "lib/streaming/bind_convert",
         &[BackendName::Metal, BackendName::Cuda],
-        "`routed_convert_wide`'s conversion binding: Metal uses repack templates; CUDA uses convert_tile.cuh",
+        "`routed_convert_wide`'s conversion binding: Metal uses repack templates; CUDA uses convert_tile.inc",
     ),
     (
         "lib/streaming/bind_gate",
         &[BackendName::Metal, BackendName::Cuda],
-        "the gate conversion binding in `routed_bank_fill`: Metal repack templates; CUDA convert_tile.cuh",
+        "the gate conversion binding in `routed_bank_fill`: Metal repack templates; CUDA convert_tile.inc",
     ),
     (
         "lib/streaming/bind_up",
@@ -398,6 +398,7 @@ fn tree_parity(kernels: &Path) -> Vec<String> {
             let extension = path.extension().and_then(|value| value.to_str());
             if extension != Some(entry_extension(backend))
                 && extension != Some(library_extension(backend))
+                && extension != Some("inc")
             {
                 violations.push(format!(
                     "`{}` is neither a `.{}` entry asset nor a `.{}` library file",

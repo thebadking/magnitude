@@ -356,7 +356,7 @@ fn draft_state_copies_and_restores_reproduce_its_proposals() {
     domain.close(source).unwrap();
     drop(before_inject);
     drop(before_draft);
-    let charge = domain.reconcile_memory_charge(&[]).unwrap();
+    let charge = domain.reconcile_memory_charge(&[]).unwrap()[0].charge;
     assert_eq!(charge.unattributed, 0, "{charge:?}");
 }
 
@@ -441,7 +441,7 @@ fn header_only_assessment_charges_what_a_load_commits() {
     );
     let held = domain.resume_state(request).unwrap();
     domain.close(request).unwrap();
-    let charge = domain.reconcile_memory_charge(&[&held]).unwrap();
+    let charge = domain.reconcile_memory_charge(&[&held]).unwrap()[0].charge;
     eprintln!("assessed {terms:?} graphs {graphs:?}\nloaded {charge:?}");
     assert_eq!(charge.unattributed, 0);
     assert_eq!(

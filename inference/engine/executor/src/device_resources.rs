@@ -483,6 +483,7 @@ impl Ord for ImageRef {
 pub struct ResourceDomain {
     id: ResourceDomainId,
     device: Rc<Device>,
+    graph_output_device: Option<Rc<Device>>,
     owned_features: Rc<RefCell<Vec<seismic::TensorStorageObserver>>>,
 }
 
@@ -491,9 +492,22 @@ impl ResourceDomain {
         Self {
             id,
             device,
+            graph_output_device: None,
             owned_features: Rc::default(),
         }
     }
+    pub(crate) fn set_graph_output_device(&mut self, device: Rc<Device>) {
+        self.graph_output_device = Some(device);
+    }
+
+    fn validate_backing(&self, backing: &TensorBacking) -> Result<(), ResourceError> {
+        if matches!(backing, TensorBacking::Graph(_))
+            && self.graph_output_device.as_ref().is_some_and(|device| backing.tensor().belongs_to(device)) {
+            return Ok(());
+        }
+        self.validate(backing.tensor())
+    }
+
     pub fn id(&self) -> &ResourceDomainId {
         &self.id
     }
@@ -533,7 +547,7 @@ impl ResourceDomain {
         self.publish_feature_backing(TensorBacking::Graph(tensor))
     }
     fn publish_feature_backing(&self, tensor: TensorBacking) -> Result<FeatureRef, ResourceError> {
-        self.validate(tensor.tensor())?;
+        self.validate_backing(&tensor)?;
         let [rows, width] = tensor.tensor().extents() else {
             return Err(ResourceError::InvalidFeatureShape);
         };
@@ -598,7 +612,7 @@ impl ResourceDomain {
         self.publish_logits_backing(TensorBacking::Graph(tensor))
     }
     fn publish_logits_backing(&self, tensor: TensorBacking) -> Result<LogitsRef, ResourceError> {
-        self.validate(tensor.tensor())?;
+        self.validate_backing(&tensor)?;
         let [rows, vocabulary] = tensor.tensor().extents() else {
             return Err(ResourceError::InvalidLogitsShape);
         };

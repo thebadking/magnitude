@@ -8,6 +8,75 @@ use seismic::{BackendName, DeviceCatalog};
 const TOKEN: HistoryDomainId = HistoryDomainId(0);
 const WINDOW: HistoryDomainId = HistoryDomainId(1);
 
+#[test]
+#[ignore = "requires two CUDA devices"]
+fn distributed_history_growth_rolls_back_every_device() {
+    let catalog = DeviceCatalog::discover().unwrap();
+    let topology = catalog.topology();
+    let devices = topology.devices().iter()
+        .filter(|device| device.backend == BackendName::Cuda).take(2)
+        .map(|device| Rc::new(catalog.open(device.id).unwrap())).collect::<Vec<_>>();
+    assert_eq!(devices.len(), 2);
+    let baseline = devices.iter().map(|device| device.memory_usage().charged).collect::<Vec<_>>();
+    let plans = (0..2).map(|layer| HistoryDomainPlan {
+        layout: HistoryDomainLayout::Token { components: vec![component(layer, 4096)] },
+        logical_rows: 8192,
+    }).collect::<Vec<_>>();
+    assert!(StateStore::new_placed(vec![devices[0].clone()], vec![], 8192, 16,
+        plans.clone(), vec![], banks()).is_err());
+    assert_eq!(devices.iter().map(|device| device.memory_usage().charged).collect::<Vec<_>>(), baseline);
+
+    let (store, mut bindings) = StateStore::new_placed(devices.clone(), vec![], 8192, 16,
+        plans, vec![], banks()).unwrap();
+    for (domain, device) in devices.iter().enumerate() {
+        assert!(store.history_device(HistoryDomainId(domain)).unwrap().same_device(device));
+    }
+    let planes = store.history_planes().unwrap();
+    for plane in &planes {
+        assert!(plane.buffer.device().same_device(&devices[plane.domain.0]));
+    }
+    drop(planes);
+    let before = devices.iter().map(|device| device.memory_usage().charged).collect::<Vec<_>>();
+    let committed = store.committed_bytes();
+    assert_eq!(committed, before.iter().zip(&baseline).map(|(now, old)| now - old).sum());
+    let demands = (0..2).map(|domain| RowDemand {
+        domain: HistoryDomainId(domain),
+        rows: store.free_rows(HistoryDomainId(domain)) + 1,
+    }).collect::<Vec<_>>();
+    let claims = store.growth_claims_by_device(&demands, 0).unwrap();
+    assert_eq!(claims.len(), 2);
+    assert!(claims.iter().all(|claim| claim.claim.minimum_bytes > 0));
+    assert!(store.growth_claim(&demands, 0).is_err());
+    let limit = devices[1].memory_usage().limit;
+    devices[1].set_memory_limit(Some(before[1]));
+    let refused = bindings.provision_with_growth(&demands, 0, GrowthChoice::Minimum);
+    devices[1].set_memory_limit(limit);
+    assert!(refused.is_err());
+    assert_eq!(store.committed_bytes(), committed);
+    assert_eq!(devices.iter().map(|device| device.memory_usage().charged).collect::<Vec<_>>(), before);
+
+    bindings.provision_with_growth(&demands, 0, GrowthChoice::Minimum).unwrap();
+    for claim in claims {
+        let index = devices.iter().position(|device| device.same_device(&claim.device)).unwrap();
+        assert_eq!(claim.device.memory_usage().charged - before[index], claim.claim.minimum_bytes);
+    }
+    let state = commit(store.create().unwrap(), 3);
+    let checkpoint = state.checkpoint();
+    let advance = OwnedStateAdvance::begin(state, 2).ok().unwrap();
+    let state = advance.abort();
+    assert_eq!(state.position(), 3);
+    drop(checkpoint);
+    drop(state);
+    let charged_before_release: u64 = devices.iter().map(|device| device.memory_usage().charged).sum();
+    let released = bindings.release_idle().unwrap() as u64;
+    let charged_after_release: u64 = devices.iter().map(|device| device.memory_usage().charged).sum();
+    assert_eq!(released, charged_before_release - charged_after_release);
+    assert!(released > 0);
+    drop(bindings);
+    drop(store);
+    assert_eq!(devices.iter().map(|device| device.memory_usage().charged).collect::<Vec<_>>(), baseline);
+}
+
 fn cpu_device() -> Option<Rc<Device>> {
     DeviceCatalog::discover()
         .ok()
@@ -861,4 +930,38 @@ fn indexer_domains_follow_the_attended_ones() {
     ];
     assert!(StateStore::new(device, 64, 16, plans, vec![], banks()).is_err());
     assert!(ComponentDescriptor::indexer(LayerRef::Target(0), DType::F32, 4, true).is_err());
+}
+
+#[test]
+fn queued_successors_keep_block_tail_across_empty_appends() {
+    let Some(device) = cpu_device() else { return };
+    let store = indexed_store(device, 64, 16);
+    let state = commit(store.create().unwrap(), 4);
+    let first = OwnedStateAdvance::begin(state, 1).ok().unwrap();
+    let second = first.successor(1).unwrap();
+    let third = second.successor(2).unwrap();
+    assert!(first.bindings().destinations[BLOCKS.0].is_empty());
+    assert!(second.bindings().destinations[BLOCKS.0].is_empty());
+    assert_eq!(third.bindings().destinations[BLOCKS.0], [1]);
+    let OwnedAdvanceResolution::Committed(state) = first.commit_all().ok().unwrap() else {
+        panic!("commit")
+    };
+    let OwnedAdvanceResolution::Committed(state) = second
+        .attach(state)
+        .ok()
+        .unwrap()
+        .commit_all()
+        .ok()
+        .unwrap()
+    else {
+        panic!("commit")
+    };
+    let OwnedAdvanceResolution::Committed(state) =
+        third.attach(state).ok().unwrap().commit_all().ok().unwrap()
+    else {
+        panic!("commit")
+    };
+    assert_eq!(state.position(), 8);
+    assert_eq!(state.history_ranges(BLOCKS), [(0, 2)]);
+    assert!(state.domain_span_count(BLOCKS) <= store.span_limit(BLOCKS));
 }

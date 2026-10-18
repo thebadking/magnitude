@@ -20,7 +20,7 @@ use crate::{
     ValidatedTargetLaunch, completion::CompletionWaiter, native::AttestedState,
 };
 use magnitude_batching::{Demand, TargetBatchUpload};
-use magnitude_family_contracts::Decoder;
+use magnitude_family_contracts::{Decoder, WeightScope};
 use magnitude_kernels::{conditioning_overlay, feature_copy};
 use magnitude_state::LayerRef;
 use seismic::{
@@ -123,6 +123,7 @@ struct StepSubmitter {
     /// submission, then of the submitted runs.
     pending_reads: Vec<StoredRead>,
     reads: Vec<StoredRead>,
+    captured_reads: Option<Vec<StoredRead>>,
 }
 
 /// A run's read of a stored table: the table and the step it queued there.
@@ -149,11 +150,15 @@ impl StepSubmitter {
             completions: Vec::new(),
             pending_reads: Vec::new(),
             reads: Vec::new(),
+            captured_reads: None,
         }
     }
 
     /// The next run queued reads a stored table at its step `value`.
     fn reads(&mut self, table: Arc<StoredTable>, value: u64) {
+        if let Some(reads) = &mut self.captured_reads {
+            reads.push(StoredRead::new(table.clone(), value));
+        }
         self.pending_reads.push(StoredRead { table, value });
     }
 
@@ -249,6 +254,57 @@ pub struct CommitSpan {
     pub last: Instant,
 }
 
+/// One lifecycle interface for a target placed on one or two devices.
+/// The inner submission owns every workspace until physical completion.
+pub struct NativeTargetSubmission {
+    inner: NativeTargetSubmissionInner,
+}
+
+enum NativeTargetSubmissionInner {
+    Single(DeviceSubmission<TargetLaunchCore, TargetLaunchWorkspace, TargetOutput>),
+    Placed(PlacedTargetSubmission),
+}
+
+impl NativeTargetSubmission {
+    pub(crate) fn single(value: DeviceSubmission<TargetLaunchCore, TargetLaunchWorkspace, TargetOutput>) -> Self {
+        Self { inner: NativeTargetSubmissionInner::Single(value) }
+    }
+    pub(crate) fn placed(value: PlacedTargetSubmission) -> Self {
+        Self { inner: NativeTargetSubmissionInner::Placed(value) }
+    }
+}
+
+impl super::ProgramSubmission for NativeTargetSubmission {
+    type CompletedWork = super::CompletedTargetWork;
+    fn completion(&mut self) -> &mut dyn crate::Completion {
+        match &mut self.inner {
+            NativeTargetSubmissionInner::Single(value) => value.completion(),
+            NativeTargetSubmissionInner::Placed(value) => value.completion(),
+        }
+    }
+    fn finish(self) -> Result<Self::CompletedWork, DeviceError> {
+        match self.inner {
+            NativeTargetSubmissionInner::Single(value) => value.finish(),
+            NativeTargetSubmissionInner::Placed(value) => value.finish(),
+        }
+    }
+}
+
+impl super::SubmittedTarget for NativeTargetSubmission {
+    fn launch(&self) -> &TargetLaunchCore {
+        match &self.inner {
+            NativeTargetSubmissionInner::Single(value) => value.launch(),
+            NativeTargetSubmissionInner::Placed(value) => value.launch(),
+        }
+    }
+    fn output(&self) -> &TargetOutput {
+        match &self.inner {
+            NativeTargetSubmissionInner::Single(value) => value.output(),
+            NativeTargetSubmissionInner::Placed(value) => value.output(),
+        }
+    }
+}
+
 /// A target step's readout and the commit span of its device work.
 pub struct TargetOutput {
     pub boundary: Option<crate::FeatureRef>,
@@ -260,7 +316,7 @@ pub struct TargetOutput {
     /// The step's reads of stored tables (`StoredTable`).
     pub stored_reads: Vec<StoredRead>,
     /// A bank-served step of a streamed load (spec 4.5).
-    pub(crate) bank_step: Option<crate::streaming::bank::BankStep>,
+    pub(crate) bank_steps: Vec<crate::streaming::bank::BankStep>,
 }
 
 impl TargetOutput {
@@ -390,6 +446,48 @@ impl RowState<'_> {
 }
 
 impl NativeTargetProgram {
+    /// Register the actual scratch boundary before submitting any graph.
+    /// Stateless trailing blocks use only readout rows, so their boundary
+    /// can differ from the full-row blocks' boundary in the same chain.
+    fn begin_bank_group(
+        &self,
+        chain: &mut [ValidatedTargetLaunch],
+    ) -> Result<Vec<Option<crate::streaming::bank::BankStep>>, SubmitError> {
+        let Some(bank) = &self.graphs.bank else {
+            return Ok(chain.iter().map(|_| None).collect());
+        };
+        let tail = self.graphs.prepared.stateless_tail();
+        let decode_rows = crate::operators::routed::fused_graph::DECODE_ROWS;
+        let mut last_full = None;
+        let mut last_tail = None;
+        for (index, launch) in chain.iter_mut().enumerate() {
+            let (core, ..) = launch.submission_parts_mut();
+            let batch = core.batch().upload();
+            let rows = batch.class.rows() as u64;
+            if rows > decode_rows {
+                last_full = Some(index);
+            }
+            if tail < self.geometry.blocks.len()
+                && RowWindow::consumed(batch.out_rows, rows)?
+                    .is_some_and(|window| window.rows > decode_rows)
+            {
+                last_tail = Some(index);
+            }
+        }
+        Ok(bank
+            .begin_group(chain.len(), |scope| {
+                let block = match scope {
+                    WeightScope::TargetSublayer(index)
+                    | WeightScope::TargetBranch { sublayer: index, .. } => index.block as usize,
+                    _ => unreachable!("a streamed target layer belongs to a decoder block"),
+                };
+                if block < tail { last_full } else { last_tail }
+            })
+            .into_iter()
+            .map(Some)
+            .collect())
+    }
+
     pub(crate) fn constant_bytes(&self) -> Result<u64, &'static str> {
         self.graphs.constant_bytes()
     }
@@ -401,6 +499,25 @@ impl NativeTargetProgram {
         graphs: BoundTargetGraphs,
         readout_graphs: BoundTargetReadoutGraphs,
     ) -> Result<Self, SubmitError> {
+        if graphs.prepared.owned_blocks() != (0..geometry.blocks.len()) {
+            return Err(invalid("a decoder range requires coordinated multi-device submission"));
+        }
+        Self::new_range(device, state, geometry, graphs, readout_graphs)
+    }
+
+    /// Bind a range for a coordinated submitter. The ordinary TargetProgram
+    /// entry point refuses this value unless it owns the complete decoder.
+    pub(crate) fn new_range(
+        device: Device,
+        state: AttestedState,
+        geometry: Decoder,
+        graphs: BoundTargetGraphs,
+        readout_graphs: BoundTargetReadoutGraphs,
+    ) -> Result<Self, SubmitError> {
+        let owned = graphs.prepared.owned_blocks();
+        if owned.is_empty() || owned.end > geometry.blocks.len() {
+            return Err(invalid("target graph range is outside the decoder"));
+        }
         let waiter = CompletionWaiter::spawn()
             .map_err(|error| SubmitError::Device(DeviceError::Execution(error)))?;
         Ok(Self {
@@ -835,13 +952,8 @@ impl NativeTargetProgram {
 
     /// The leading `rows` of the token rows a model whose blocks read the
     /// step's token rows keeps (`BoundTargetGraphs::token_rows`).
-    fn kept_token_rows(&self, rows: u64) -> Result<Tensor, SubmitError> {
-        self.graphs
-            .token_rows
-            .as_ref()
-            .ok_or_else(|| invalid("the model keeps no token rows"))?
-            .slice_leading(0, rows)
-            .map_err(device)
+    fn kept_token_rows(&self, rows: u64, slot: usize) -> Result<Tensor, SubmitError> {
+        self.graphs.token_rows_for(slot, rows).map_err(invalid)
     }
 
     /// Conditioning rows that replace embedding rows, as (source, first
@@ -944,6 +1056,7 @@ impl NativeTargetProgram {
                 &batch,
                 &RowState(core),
                 sequence,
+                index,
                 graph_workspace,
                 graph_outputs,
                 submitter,
@@ -994,6 +1107,227 @@ impl NativeTargetProgram {
         Ok(steps)
     }
 
+    /// Submit a layer-major group across two adjacent physical owners. The
+    /// caller reserves both owners' graph leases and boundary storage first.
+    pub(crate) fn submit_pair(
+        &self,
+        next: &Self,
+        mut chain: Vec<ValidatedTargetLaunch>,
+        mut following: Vec<TargetRangeLaunchResources>,
+    ) -> Result<Vec<PlacedTargetSubmission>, (SubmitError, Vec<ValidatedTargetLaunch>)> {
+        if chain.is_empty() && following.is_empty() {
+            return Ok(Vec::new());
+        }
+        let first_range = self.graphs.prepared.owned_blocks();
+        let next_range = next.graphs.prepared.owned_blocks();
+        if first_range.start != 0
+            || first_range.end != next_range.start
+            || next_range.end != self.geometry.blocks.len()
+            || self.geometry != next.geometry
+            || self.device.same_device(&next.device)
+            || following.len() != chain.len()
+        {
+            return Err((
+                invalid("two-device target placement or reservations disagree"),
+                chain,
+            ));
+        }
+        // Only the first chain member may consume a predecessor's selection.
+        // Its source must be the final owner, and its return storage was admitted
+        // with the first owner's kept token rows.
+        for (index, (launch, resources)) in chain.iter_mut().zip(&following).enumerate() {
+            let (core, ..) = launch.submission_parts_mut();
+            if let TargetTokens::Selected(selected) = core.tokens() {
+                if index != 0 || !selected.tensor().belongs_to(&next.device)
+                    || !self.graphs.prepared.supports_selected_return() {
+                    return Err((invalid("distributed selection has no admitted return path"), chain));
+                }
+            }
+            if core.boundary().is_some()
+                || resources.boundary.is_none()
+                || resources.readout_output.is_none()
+                || resources
+                    .outputs
+                    .iter()
+                    .any(|output| output.domain() != resources.workspace.domain())
+                || resources.readout_workspace.domain() != resources.workspace.domain()
+                || resources
+                    .readout_output
+                    .as_ref()
+                    .is_some_and(|output| output.domain() != resources.workspace.domain())
+            {
+                return Err((
+                    invalid("distributed launch needs complete local reservations"),
+                    chain,
+                ));
+            }
+        }
+        let first_banks = match self.begin_bank_group(&mut chain) {
+            Ok(steps) => steps,
+            Err(error) => return Err((error, chain)),
+        };
+        let next_banks = match next.begin_bank_group(&mut chain) {
+            Ok(steps) => steps,
+            Err(error) => return Err((error, chain)),
+        };
+        let mut source = StepSubmitter::new(&self.device);
+        let mut destination = StepSubmitter::new(&next.device);
+        source.captured_reads = Some(Vec::new());
+        destination.captured_reads = Some(Vec::new());
+        let mut stored_reads = vec![Vec::new(); chain.len()];
+        let queued = (|| -> Result<Vec<QueuedStep>, SubmitError> {
+            let mut runs = Vec::with_capacity(chain.len());
+            let mut selected_rows = Vec::with_capacity(chain.len());
+            for (index, (launch, bank)) in chain.iter_mut().zip(&first_banks).enumerate() {
+                let (core, workspace, outputs, ..) = launch.submission_parts_mut();
+                selected_rows.push(matches!(core.tokens(), TargetTokens::Selected(_))
+                    .then(|| self.graphs.embedding.read_selected()));
+                runs.push(Some(
+                    self.begin_run(
+                        &core.batch().upload(),
+                        &RowState(core),
+                        bank.as_ref()
+                            .map(crate::streaming::bank::BankStep::sequence),
+                        index,
+                        workspace,
+                        outputs,
+                        &mut source,
+                    )?,
+                ));
+            }
+            for block in first_range.clone() {
+                for (index, launch) in chain.iter_mut().enumerate() {
+                    let (core, workspace, outputs, ..) = launch.submission_parts_mut();
+                    let run = runs[index]
+                        .take()
+                        .ok_or_else(|| invalid("source run is absent"))?;
+                    let outcome = self.run_block(
+                        run,
+                        block,
+                        &core.batch().upload(),
+                        &RowState(core),
+                        workspace,
+                        outputs,
+                        &mut source,
+                    );
+                    stored_reads[index].append(source.captured_reads.as_mut().unwrap());
+                    runs[index] = Some(outcome?);
+                }
+            }
+            for (index, launch) in chain.iter_mut().enumerate() {
+                let (_, _, outputs, ..) = launch.submission_parts_mut();
+                let run = runs[index]
+                    .take()
+                    .ok_or_else(|| invalid("handoff run is absent"))?;
+                let boundary = following[index]
+                    .boundary
+                    .take()
+                    .ok_or_else(|| invalid("handoff storage is absent"))?;
+                runs[index] = Some(
+                    self.handoff_run(
+                        run,
+                        next,
+                        boundary,
+                        next_banks[index]
+                            .as_ref()
+                            .map(crate::streaming::bank::BankStep::sequence),
+                        outputs,
+                        &mut source,
+                    )?,
+                );
+            }
+            for block in next_range.clone() {
+                for (index, launch) in chain.iter_mut().enumerate() {
+                    let (core, ..) = launch.submission_parts_mut();
+                    let resources = &mut following[index];
+                    let run = runs[index]
+                        .take()
+                        .ok_or_else(|| invalid("destination run is absent"))?;
+                    let outcome = next.run_block(
+                        run,
+                        block,
+                        &core.batch().upload(),
+                        &RowState(core),
+                        &mut resources.workspace,
+                        &mut resources.outputs,
+                        &mut destination,
+                    );
+                    stored_reads[index].append(destination.captured_reads.as_mut().unwrap());
+                    runs[index] = Some(outcome?);
+                }
+            }
+            let mut steps = Vec::with_capacity(chain.len());
+            for (index, launch) in chain.iter_mut().enumerate() {
+                let (core, ..) = launch.submission_parts_mut();
+                let resources = &mut following[index];
+                let output = resources
+                    .readout_output
+                    .take()
+                    .ok_or_else(|| invalid("destination readout output is absent"))?;
+                let run = runs[index]
+                    .take()
+                    .ok_or_else(|| invalid("final run is absent"))?;
+                let (readout, commits) = next.finish_run(
+                    run,
+                    &core.batch().upload(),
+                    &RowState(core),
+                    (&mut resources.readout_workspace, output),
+                    &mut resources.outputs,
+                    &mut destination,
+                )?;
+                destination.flush()?;
+                steps.push(QueuedStep {
+                    readout,
+                    commits,
+                    sequences: destination.completions.len(),
+                    selected_rows: selected_rows[index].take(),
+                    stored_reads: stored_reads[index].clone(),
+                });
+            }
+            Ok(steps)
+        })();
+        let steps = match queued {
+            Ok(steps) => steps,
+            Err(error) => {
+                let _ = wait_all(std::mem::take(&mut source.completions));
+                let _ = wait_all(std::mem::take(&mut destination.completions));
+                source.abandon_unsubmitted();
+                destination.abandon_unsubmitted();
+                for read in stored_reads.into_iter().flatten() {
+                    read.table.retire(read.value);
+                }
+                return Err((error, chain));
+            }
+        };
+        let mut completions = destination.completions.into_iter();
+        let mut taken = 0;
+        Ok(chain
+            .into_iter()
+            .zip(following)
+            .zip(first_banks)
+            .zip(next_banks)
+            .zip(steps)
+            .map(|((((launch, resources), first_bank), next_bank), step)| {
+                let runs = completions.by_ref().take(step.sequences - taken).collect();
+                taken = step.sequences;
+                let (core, workspace) = launch.into_submission_parts();
+                DeviceSubmission::new(
+                    next.waiter.completion(runs),
+                    core,
+                    (workspace, resources),
+                    TargetOutput {
+                        boundary: None,
+                        readout: step.readout,
+                        commits: step.commits,
+                        selected_rows: step.selected_rows,
+                        stored_reads: step.stored_reads,
+                        bank_steps: first_bank.into_iter().chain(next_bank).collect(),
+                    },
+                )
+            })
+            .collect())
+    }
+
     /// Queue a step's entry: its embedding, conditioning overlays and
     /// per-layer inputs. The returned run then takes its blocks in order
     /// (`run_block`) and its readout (`finish_run`).
@@ -1002,14 +1336,34 @@ impl NativeTargetProgram {
         batch: &TargetBatchUpload<'_>,
         state: &RowState<'_>,
         sequence: Option<i32>,
+        token_slot: usize,
         graph_workspace: &mut TargetGraphWorkspaceLease,
         graph_outputs: &mut [TargetGraphOutputLease; 2],
         submitter: &mut StepSubmitter,
     ) -> Result<TargetRun, SubmitError> {
+        if self.graphs.prepared.owned_blocks().start != 0 {
+            return Err(invalid("only the first decoder owner can run the entry"));
+        }
         let rows =
             u64::try_from(batch.class.rows()).map_err(|_| invalid("row class exceeds u64"))?;
         let mut pending: [Option<NativeGraphOutputs>; 2] = [None, None];
         let tokens = state.tokens();
+        // A paired readout selects on the final GPU. Copy its completed token
+        // and status rows into this chain member's preallocated first-owner
+        // region; the source graph-output lease remains held by the launch.
+        let selected_tokens = match tokens {
+            TargetTokens::Host => None,
+            TargetTokens::Selected(selected) => Some(if selected.tensor().belongs_to(&self.device) {
+                selected.tensor().clone()
+            } else {
+                if self.graphs.prepared.owned_blocks().end == self.geometry.blocks.len() {
+                    return Err(invalid("a whole-decoder entry cannot consume a foreign selection"));
+                }
+                let mut local = self.kept_token_rows(rows, token_slot)?;
+                local.copy_from_device(selected.tensor()).map_err(device)?;
+                local
+            }),
+        };
         let source = match tokens {
             TargetTokens::Host => EntryTokens::Uploaded,
             TargetTokens::Selected(_) => EntryTokens::Selected,
@@ -1041,12 +1395,12 @@ impl NativeTargetProgram {
                             .write_input(&kept.uploaded, &token_rows(batch.tokens))
                             .map_err(device)?;
                         bindings
-                            .set(&kept.rows, &self.kept_token_rows(batch.tokens.len() as u64)?)
+                            .set(&kept.rows, &self.kept_token_rows(batch.tokens.len() as u64, token_slot)?)
                             .map_err(device)?;
                     }
                 }
-                TargetTokens::Selected(selected) => bindings
-                    .set(&entry.tokens, selected.tensor())
+                TargetTokens::Selected(_) => bindings
+                    .set(&entry.tokens, selected_tokens.as_ref().expect("selected token rows"))
                     .map_err(device)?,
             }
             // Selected tokens are copied for the host, which learns from
@@ -1118,6 +1472,14 @@ impl NativeTargetProgram {
         )?;
         pending[0] = Some(entry_outputs);
         let recurrent_component = 0usize;
+        let token_rows = if self.graphs.token_rows.is_some() {
+            Some(match tokens {
+                TargetTokens::Host => self.kept_token_rows(rows, token_slot)?,
+                TargetTokens::Selected(_) => selected_tokens.as_ref().expect("selected token rows").clone(),
+            })
+        } else {
+            None
+        };
         if self.trace.batch {
             eprintln!(
                 "target batch actual_rows={} class_rows={} actual_slots={} outputs={} selections={}",
@@ -1152,6 +1514,8 @@ impl NativeTargetProgram {
         }
         Ok(TargetRun {
             pending,
+            next_block: 0,
+            token_rows,
             residual: None,
             hidden,
             per_layer_rows,
@@ -1180,10 +1544,16 @@ impl NativeTargetProgram {
         graph_outputs: &mut [TargetGraphOutputLease; 2],
         submitter: &mut StepSubmitter,
     ) -> Result<TargetRun, SubmitError> {
+        if index != run.next_block || !self.graphs.prepared.owned_blocks().contains(&index) {
+            return Err(invalid("target block is not the next block on this owner"));
+        }
+        let next_block = index + 1;
         if index >= run.executed {
-            return Ok(run);
+            return Ok(TargetRun { next_block, ..run });
         }
         let TargetRun {
+            token_rows,
+            next_block: _,
             mut pending,
             mut residual,
             mut hidden,
@@ -1208,6 +1578,8 @@ impl NativeTargetProgram {
                     executed = index;
                     return Ok(TargetRun {
                         pending,
+                        next_block,
+                        token_rows,
                         residual,
                         hidden,
                         per_layer_rows,
@@ -1303,14 +1675,9 @@ impl NativeTargetProgram {
         // An n-gram input reads the step's token rows: the host's, as
         // the entry kept them, or the previous step's selection.
         if let Some(ports) = &graph.ngram {
-            match state.tokens() {
-                TargetTokens::Host => bindings
-                    .set(&ports.tokens, &self.kept_token_rows(rows)?)
-                    .map_err(device)?,
-                TargetTokens::Selected(selected) => bindings
-                    .set(&ports.tokens, selected.tensor())
-                    .map_err(device)?,
-            }
+            let tokens = token_rows.as_ref()
+                .ok_or_else(|| invalid("an n-gram block has no local token rows"))?;
+            bindings.set(&ports.tokens, tokens).map_err(device)?;
             // Its table's rows: written by the host before the step's
             // gate opens, from the step's tokens and the ones before.
             let table = self
@@ -1507,13 +1874,11 @@ impl NativeTargetProgram {
             .exported(&graph.output)
             .ok_or_else(|| invalid("target block output was not exported"))?;
         let previous = index % 2;
-        graph_outputs[previous]
-            .recycle(
-                pending[previous]
-                    .take()
-                    .ok_or_else(|| invalid("prior target graph output is absent"))?,
-            )
-            .map_err(SubmitError::Invariant)?;
+        if let Some(previous) = pending[previous].take() {
+            graph_outputs[index % 2].recycle(previous).map_err(SubmitError::Invariant)?;
+        } else if index != self.graphs.prepared.owned_blocks().start || index == 0 {
+            return Err(invalid("prior target graph output is absent"));
+        }
         pending[parity] = Some(outputs);
         if let Some(started) = block_started {
             let kind = match &graph.state {
@@ -1528,6 +1893,8 @@ impl NativeTargetProgram {
         }
         Ok(TargetRun {
             pending,
+            next_block,
+            token_rows,
             residual,
             hidden,
             per_layer_rows,
@@ -1543,6 +1910,57 @@ impl NativeTargetProgram {
         })
     }
 
+    /// Complete this owner's producer work, then copy the boundary into
+    /// storage already reserved on the next owner. Host staging is required
+    /// on devices without peer access; no device allocation happens here.
+    fn handoff_run(
+        &self,
+        mut run: TargetRun,
+        next: &Self,
+        mut destination: TargetBoundaryStorage,
+        next_sequence: Option<i32>,
+        graph_outputs: &mut [TargetGraphOutputLease; 2],
+        submitter: &mut StepSubmitter,
+    ) -> Result<TargetRun, SubmitError> {
+        let end = self.graphs.prepared.owned_blocks().end;
+        if run.next_block != end
+            || next.graphs.prepared.owned_blocks().start != end
+            || self.geometry != next.geometry
+            || self.device.same_device(&next.device)
+        {
+            return Err(invalid("target handoff requires adjacent ranges on distinct devices"));
+        }
+        destination.fit(&run)?;
+        destination.validate(&run, &next.device)?;
+        // Flush first, and drain every submitted sequence even if one fails.
+        // Callers abort the whole state transaction on any handoff failure.
+        submitter.flush()?;
+        wait_all(std::mem::take(&mut submitter.completions))?;
+        destination.hidden.copy_from_device(&run.hidden).map_err(device)?;
+        for (target, source) in [
+            (&mut destination.residual, &run.residual),
+            (&mut destination.token_rows, &run.token_rows),
+            (&mut destination.per_layer_rows, &run.per_layer_rows),
+        ] {
+            if let (Some(target), Some(source)) = (target, source) {
+                target.copy_from_device(source).map_err(device)?;
+            }
+        }
+        // Drop source views before returning their graph outputs to the pool.
+        run.hidden = destination.hidden;
+        run.residual = destination.residual;
+        run.token_rows = destination.token_rows;
+        run.per_layer_rows = destination.per_layer_rows;
+        for (pending, lease) in run.pending.iter_mut().zip(graph_outputs) {
+            if let Some(outputs) = pending.take() {
+                lease.recycle(outputs).map_err(SubmitError::Invariant)?;
+            }
+        }
+        // Watchers on different devices have independent sequence counters.
+        run.sequence = next_sequence;
+        Ok(run)
+    }
+
     /// Queue a step's readout and boundary capture once every block is
     /// queued, and return its readout and commit span.
     fn finish_run(
@@ -1554,6 +1972,11 @@ impl NativeTargetProgram {
         graph_outputs: &mut [TargetGraphOutputLease; 2],
         submitter: &mut StepSubmitter,
     ) -> Result<(Option<TargetReadoutGraphResult>, CommitSpan), SubmitError> {
+        if run.next_block != self.geometry.blocks.len()
+            || self.graphs.prepared.owned_blocks().end != self.geometry.blocks.len()
+        {
+            return Err(invalid("readout requires the complete decoder"));
+        }
         let TargetRun {
             mut pending,
             residual,
@@ -1602,13 +2025,11 @@ impl NativeTargetProgram {
         drop(hidden);
         drop(residual);
         let last = executed % 2;
-        graph_outputs[last]
-            .recycle(
-                pending[last]
-                    .take()
-                    .ok_or_else(|| invalid("final target graph output is absent"))?,
-            )
-            .map_err(SubmitError::Invariant)?;
+        if let Some(outputs) = pending[last].take() {
+            graph_outputs[last].recycle(outputs).map_err(SubmitError::Invariant)?;
+        } else if executed > self.graphs.prepared.owned_blocks().start {
+            return Err(invalid("final target graph output is absent"));
+        }
         Ok((
             result,
             CommitSpan {
@@ -1619,9 +2040,87 @@ impl NativeTargetProgram {
     }
 }
 
+/// Destination tensors reserved by the coordinator before submitting any
+/// part of a launch. Extents include hyper-connection stream axes verbatim.
+#[derive(Clone)]
+pub(crate) struct TargetBoundaryStorage {
+    pub(crate) hidden: Tensor,
+    pub(crate) residual: Option<Tensor>,
+    pub(crate) token_rows: Option<Tensor>,
+    pub(crate) per_layer_rows: Option<Tensor>,
+}
+
+/// All second-owner resources are reserved before the first command is
+/// submitted. They remain owned by the logical submission through completion.
+pub(crate) struct TargetRangeLaunchResources {
+    pub(crate) workspace: TargetGraphWorkspaceLease,
+    pub(crate) outputs: [TargetGraphOutputLease; 2],
+    pub(crate) readout_workspace: NativeGraphWorkspaceLease,
+    pub(crate) readout_output: Option<NativeGraphOutputLease>,
+    pub(crate) boundary: Option<TargetBoundaryStorage>,
+    pub(crate) _boundary_lease: crate::resources::TargetBoundaryLease,
+}
+
+pub(crate) type PlacedTargetSubmission = DeviceSubmission<
+    TargetLaunchCore,
+    (TargetLaunchWorkspace, TargetRangeLaunchResources),
+    TargetOutput,
+>;
+
+impl TargetBoundaryStorage {
+    /// A slot holds the largest class; each run borrows its leading rows.
+    fn fit(&mut self, source: &TargetRun) -> Result<(), SubmitError> {
+        let fit = |target: &mut Tensor, source: &Tensor| -> Result<(), SubmitError> {
+            if target.extents().len() != source.extents().len()
+                || target.extents().get(1..) != source.extents().get(1..)
+                || target.extents().first() < source.extents().first() {
+                return Err(invalid("boundary slot is smaller than the carried tensor"));
+            }
+            let rows = *source.extents().first().ok_or_else(|| invalid("boundary tensor has no row axis"))?;
+            *target = target.slice_leading(0, rows).map_err(device)?;
+            Ok(())
+        };
+        fit(&mut self.hidden, &source.hidden)?;
+        for (target, source) in [(&mut self.residual, &source.residual),
+            (&mut self.token_rows, &source.token_rows), (&mut self.per_layer_rows, &source.per_layer_rows)] {
+            if let (Some(target), Some(source)) = (target, source) { fit(target, source)?; }
+        }
+        Ok(())
+    }
+    fn validate(&self, source: &TargetRun, destination: &Device) -> Result<(), SubmitError> {
+        let check = |target: &Tensor, source: &Tensor| {
+            if !target.belongs_to(destination)
+                || source.belongs_to(destination)
+                || target.element() != source.element()
+                || target.extents() != source.extents()
+            {
+                return Err(invalid("target boundary storage differs from the producer"));
+            }
+            Ok(())
+        };
+        check(&self.hidden, &source.hidden)?;
+        for (target, source) in [
+            (&self.residual, &source.residual),
+            (&self.token_rows, &source.token_rows),
+            (&self.per_layer_rows, &source.per_layer_rows),
+        ] {
+            match (target, source) {
+                (Some(target), Some(source)) => check(target, source)?,
+                (None, None) => {},
+                _ => return Err(invalid("target boundary is missing a carried tensor")),
+            }
+        }
+        Ok(())
+    }
+}
+
 /// One step's queued work between its blocks: what the next block reads
 /// and the outputs still in use (`begin_run`, `run_block`, `finish_run`).
 struct TargetRun {
+    /// The global cursor is carried across devices with the recurrent cursor.
+    next_block: usize,
+    /// Tokens live on the current owner, even when selection originated elsewhere.
+    token_rows: Option<Tensor>,
     /// The two output slots blocks alternate between, the last two blocks'.
     pending: [Option<NativeGraphOutputs>; 2],
     residual: Option<Tensor>,
@@ -1827,11 +2326,14 @@ impl TargetProgram for NativeTargetProgram {
         &mut self,
         mut chain: Vec<ValidatedTargetLaunch>,
     ) -> Result<Vec<Self::Submission>, (SubmitError, Vec<ValidatedTargetLaunch>)> {
+        if self.graphs.prepared.owned_blocks() != (0..self.geometry.blocks.len()) {
+            return Err((invalid("a decoder range requires coordinated submission"), chain));
+        }
         // Every step of a streamed load is bank-served or scratch-served
         // (spec 4.5); the watcher serves its requests by sequence.
-        let bank_steps = match &self.graphs.bank {
-            Some(bank) => bank.begin_group(chain.len()).into_iter().map(Some).collect(),
-            None => chain.iter().map(|_| None).collect::<Vec<_>>(),
+        let bank_steps = match self.begin_bank_group(&mut chain) {
+            Ok(steps) => steps,
+            Err(error) => return Err((error, chain)),
         };
         let sequences = bank_steps
             .iter()
@@ -1874,7 +2376,7 @@ impl TargetProgram for NativeTargetProgram {
                         commits: step.commits,
                         selected_rows: step.selected_rows,
                         stored_reads: step.stored_reads,
-                        bank_step,
+                        bank_steps: bank_step.into_iter().collect(),
                     },
                 )
             })

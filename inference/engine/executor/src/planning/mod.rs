@@ -8,6 +8,7 @@ mod capabilities;
 mod components;
 mod execution_plan;
 mod programs;
+mod placement;
 mod resources;
 mod weights;
 
@@ -20,6 +21,7 @@ pub use components::{ArtifactComponent, ArtifactComponentKind, ComponentPlan, Co
 pub use execution_plan::{
     BackendPlan, ExecutionPlan, ExecutionPlanDraft, ExecutionPlanner, PlannedDevice, ResolvedPolicy,
 };
+pub use placement::{DecoderPlacement, DecoderRange, DecoderRangeLoadPlan, PlacedStateLayout};
 pub use programs::{
     Dflash2Binding, DraftBlockBinding, DraftProgramPlan, FeedForwardProgramSlot, HeadProgramPlan,
     ImportProgramSlot, MarkovBinding, MixerProgramSlot, ProgramPlan, SelectorBinding,
@@ -609,6 +611,7 @@ pub(crate) mod tests {
         let copy = programs.state_graphs().unwrap();
         let plan = ResourcePlanner::plan_with_state(
             device.backend(),
+            crate::platform::shared_role(device.info()).unwrap(),
             state,
             &target,
             &readout,
@@ -1018,3 +1021,5 @@ pub(crate) mod tests {
 
 #[cfg(test)]
 pub(crate) use weights::{BankLayer, ScratchPlan, StagingPoolPlan};
+
+pub(crate) use resources::TargetBoundaryPlan;

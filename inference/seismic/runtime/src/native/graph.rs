@@ -1685,6 +1685,17 @@ const SHARED_PLAN_BYTES: usize =
     std::mem::size_of::<NativeGraphPlan>() + 2 * std::mem::size_of::<usize>();
 
 impl NativeGraphPlan {
+    /// The checked representation and extents of a tensor in this sealed graph.
+    pub fn tensor_metadata(&self, reference: WorkflowResultRef) -> Option<(RepresentationId, Vec<u64>)> {
+        if reference.workflow != self.identity { return None; }
+        if reference.node == INPUT_NODE {
+            let port = self.ports.get(reference.result as usize)?;
+            Some((port.representation, port.extents.clone()))
+        } else {
+            let result = self.results.get(reference.node as usize)?.get(reference.result as usize)?.as_ref()?;
+            Some((result.representation, result.extents.clone()))
+        }
+    }
     /// The host heap this plan holds: itself in its shared allocation and
     /// every vector it owns, at the vector's capacity. Its kernels and its
     /// device are shared with the prepared programs and are theirs; the
@@ -2035,21 +2046,21 @@ impl NativeGraphFamily {
         Ok(NativeGraphFamilySlot {
             family: self.clone(),
             scratch,
-            uploads: self.upload_regions(regions)?,
+            uploads: self.upload_regions(&vec![self.upload_bytes; regions])?,
             next_upload: 0,
             lent_locals: Vec::new(),
         })
     }
 
-    /// A slot whose workspace is the shared `arena`, with `regions` upload
-    /// regions of its own. The arena must hold this family's workspace, and
+    /// A slot whose workspace is the shared `arena`, with separately sized
+    /// upload regions of its own. The arena must hold this family's workspace, and
     /// no plan of the family may keep a value in workspace between runs: a
     /// prewritten port is refused, since another family's graph rewrites
     /// the arena before this family's next run.
     pub fn new_slot_in(
         self: &Arc<Self>,
         arena: &NativeExecutionArena,
-        regions: usize,
+        upload_bytes: &[u64],
     ) -> Result<NativeGraphFamilySlot, WorkflowError> {
         if !Arc::ptr_eq(&arena.device, &self.device) {
             return Err(WorkflowError::NativeGraphSlotMismatch);
@@ -2073,22 +2084,17 @@ impl NativeGraphFamily {
                 .then(|| arena.allocation.clone())
                 .flatten(),
             uploads: self
-                .upload_regions(regions)
+                .upload_regions(upload_bytes)
                 .map_err(WorkflowError::TensorView)?,
             next_upload: 0,
             lent_locals: Vec::new(),
         })
     }
 
-    fn upload_regions(&self, regions: usize) -> Result<Vec<Arc<Allocation>>, TensorError> {
-        if self.upload_bytes == 0 {
-            return Ok(Vec::new());
-        }
-        (0..regions)
-            .map(|_| {
-                Ok(self
-                    .device
-                    .allocate_upload(self.upload_bytes, BUFFER_ALIGNMENT)?)
+    fn upload_regions(&self, sizes: &[u64]) -> Result<Vec<(u64, Arc<Allocation>)>, TensorError> {
+        sizes.iter().copied().filter(|&bytes| bytes != 0)
+            .map(|bytes| {
+                Ok((bytes, self.device.allocate_upload(bytes, BUFFER_ALIGNMENT)?))
             })
             .collect()
     }
@@ -2155,7 +2161,7 @@ pub struct NativeGraphFamilySlot {
     scratch: Option<Arc<Allocation>>,
     /// Upload regions, fixed when the slot was created. Activation takes one
     /// no submission still reads and no tensor view still names.
-    uploads: Vec<Arc<Allocation>>,
+    uploads: Vec<(u64, Arc<Allocation>)>,
     /// The region the next activation tries first. Regions are taken in
     /// rotation, so a submission sequence of a fixed length binds the same
     /// region at the same position every time and replays its graphs.
@@ -2184,7 +2190,7 @@ impl NativeGraphFamilySlot {
         {
             return Err(WorkflowError::NativeGraphSlotMismatch);
         }
-        let upload = self.idle_upload()?;
+        let upload = self.idle_upload(plan.upload_bytes)?;
         let slot = NativeGraphSlot {
             plan: plan.clone(),
             workspace: self.scratch.clone(),
@@ -2193,21 +2199,22 @@ impl NativeGraphFamilySlot {
         Ok(NativeGraphFamilyActive { slot, _owner: self })
     }
 
-    /// The first idle region in rotation order from `next_upload`.
-    fn idle_upload(&mut self) -> Result<Option<Arc<Allocation>>, WorkflowError> {
-        if self.family.upload_bytes == 0 {
+    /// The smallest fitting idle region; rotation breaks capacity ties.
+    fn idle_upload(&mut self, bytes: u64) -> Result<Option<Arc<Allocation>>, WorkflowError> {
+        if bytes == 0 {
             return Ok(None);
         }
         let regions = self.uploads.len();
         let index = (0..regions)
             .map(|step| (self.next_upload + step) % regions)
-            .find(|index| {
-                let upload = &self.uploads[*index];
-                Arc::strong_count(upload) == 1 && upload.device_idle()
+            .filter(|index| {
+                let (capacity, upload) = &self.uploads[*index];
+                *capacity >= bytes && Arc::strong_count(upload) == 1 && upload.device_idle()
             })
+            .min_by_key(|index| self.uploads[*index].0)
             .ok_or(WorkflowError::UploadRegionsExhausted { regions })?;
         self.next_upload = (index + 1) % regions;
-        Ok(Some(self.uploads[index].clone()))
+        Ok(Some(self.uploads[index].1.clone()))
     }
 }
 
@@ -2280,7 +2287,11 @@ impl NativeGraphSlot {
                 "write_input requires an owned native graph input port".to_owned(),
             )));
         };
-        let upload = self.upload.as_ref().expect("planned upload region absent");
+        if bytes.is_empty() && self.plan.ports[ordinal].byte_len == 0 {
+            return Ok(());
+        }
+        let upload = self.upload.as_ref().ok_or_else(|| TensorError::Execution(
+            ExecutionError::SubmissionFailed("host input has no upload region".to_owned())))?;
         self.plan
             .port_view(ordinal, upload, offset)
             .write_from_host(bytes)

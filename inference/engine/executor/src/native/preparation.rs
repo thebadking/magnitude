@@ -54,7 +54,7 @@ use magnitude_kernels::{
     draft_convolve_residual, draft_gated_rows, draft_path_step, draft_top_k, feature_copy,
     feature_rows, import_dense, moe_tail, ngram_gate, ngram_inject, ngram_rows, packing_bound,
     per_layer_inputs, place_logits_rows, post_norm_residual, repack_weight, repeat_rows,
-    routed_bank_fill, routed_convert_wide, routed_copy, routed_route_streamed,
+    routed_bank_fill, routed_convert_wide, routed_copy, routed_gate_up, routed_route_streamed,
     routed_scratch_request, routed_scratch_wait, routed_seed_commit, routed_step, selection_notice,
     stored_rows, tap_rows, widen_rows,
 };
@@ -2594,9 +2594,29 @@ impl<'a> Preparation<'a> {
                 scopes: scopes.clone(),
             },
         )?;
-        // The streamed router forms its input as one normalized stream; a
-        // layer whose input mixes hyper-connection streams is not streamed.
-        let mixed_input = scopes.iter().any(|scope| self.stream_sites.contains(scope));
+        let streamed_choices = if b.bank.is_some() {
+            self.spec.tuned(
+                &mut self.tuning,
+                &RoutedChoicesTuning {
+                    expert_gate: b.expert_gate,
+                    expert_up: b.expert_up,
+                    activation: b.activation,
+                    shape,
+                    scopes: scopes.clone(),
+                },
+            )?
+        } else {
+            None
+        };
+        let input_form = self
+            .tuning
+            .model()
+            .input_form(&scopes, b.hidden)
+            .map_err(|outcome| CatalogFailure::Preparation {
+                entry: "routed_route_streamed",
+                bindings: format!("{b:?}"),
+                outcome,
+            })?;
         let combine = self.spec.tuned(
             &mut self.tuning,
             &RoutedCombineTuning {
@@ -2610,14 +2630,9 @@ impl<'a> Preparation<'a> {
         )?;
         let streamed = match b.bank {
             None => Some(None),
-            Some(_) if mixed_input => {
-                return Err(CatalogFailure::Preparation {
-                    entry: "routed_route_streamed",
-                    bindings: format!("{b:?}"),
-                    outcome: "a streamed layer's router input is one normalized stream".into(),
-                });
-            }
-            Some(bank) => self.streamed_routed(&b, bank, decode.as_ref())?.map(Some),
+            Some(bank) => self
+                .streamed_routed(&b, bank, decode.as_ref(), input_form, streamed_choices)?
+                .map(Some),
         };
         Ok(
             match (route, decode, output, group, experts, combine, streamed) {
@@ -2643,54 +2658,55 @@ impl<'a> Preparation<'a> {
         )
     }
 
-    /// A streamed layer's entries (spec 4.6–4.9). Its decode rows run the
-    /// resident shared-route form's `choices` and `output` over the bank, so
-    /// the route takes the resident shared route's parameters and the decode
-    /// form must be the shared-route one.
+    /// A streamed layer's entries (spec 4.6–4.9), including its own expert
+    /// expansion. Backends with a resident shared route pin its arithmetic;
+    /// other backends use the streamed route's fixed implementation.
     fn streamed_routed(
         &mut self,
         b: &RoutedBinding,
         bank: crate::RoutedBank,
         decode: Option<&RoutedDecodeKernels>,
+        (parts, norm): (u64, u64),
+        choices: Option<NativeKernel<routed_gate_up::Entry>>,
     ) -> Result<Option<StreamedRoutedKernels>, CatalogFailure> {
         let bindings = format!("{b:?}");
         let shared_route = match decode {
             Some(RoutedDecodeKernels::SharedRoute { route, .. }) => Some(route),
-            Some(RoutedDecodeKernels::Expand(_)) => {
-                return Err(CatalogFailure::Preparation {
-                    entry: "routed_route_streamed",
-                    bindings,
-                    outcome: "a streamed layer runs the shared-route decode form".into(),
-                });
-            }
+            Some(RoutedDecodeKernels::Expand(_)) => None,
             None => None,
         };
         let spec = &mut self.spec;
         let control = crate::streaming::layout::control_words(b.selected);
         let ring = crate::streaming::layout::ring_words(b.selected);
         let step = spec.fixed(&bindings, &[], routed_step::native_entry())?;
-        let route = spec.pinned(
-            &bindings,
-            &[
-                ("H", b.hidden),
-                ("PT", 1),
-                ("NM", b.hidden),
-                ("E", b.experts),
-                ("K", b.selected),
-                ("S", b.shared),
-                ("BANK", bank.slots),
-                ("C", control),
-                ("RING", ring),
-            ],
-            routed_route_streamed::native_entry_with(routed_route_streamed::Elements {
-                NW: b.norm,
-                RW: b.router,
-                SGW: b.shared_gate,
-                SUW: b.shared_up,
-                A: b.activation,
-            }),
-            shared_route.map(|kernel| kernel.specialization()),
-        )?;
+        let route_statics = [
+            ("H", b.hidden),
+            ("PT", parts),
+            ("NM", norm),
+            ("E", b.experts),
+            ("K", b.selected),
+            ("S", b.shared),
+            ("BANK", bank.slots),
+            ("C", control),
+            ("RING", ring),
+        ];
+        let entry = routed_route_streamed::native_entry_with(routed_route_streamed::Elements {
+            NW: b.norm,
+            RW: b.router,
+            SGW: b.shared_gate,
+            SUW: b.shared_up,
+            A: b.activation,
+        });
+        let route = if matches!(decode, Some(RoutedDecodeKernels::Expand(_))) {
+            spec.fixed(&bindings, &route_statics, entry)?
+        } else {
+            spec.pinned(
+                &bindings,
+                &route_statics,
+                entry,
+                shared_route.map(|kernel| kernel.specialization()),
+            )?
+        };
         let residents = [b.expert_gate, b.expert_up, b.expert_down];
         let fill = spec.fixed(
             &bindings,
@@ -2700,7 +2716,10 @@ impl<'a> Preparation<'a> {
                 ("F", b.features),
                 ("T", bank.staging_records),
                 ("C", control),
-                ("P", crate::operators::routed::fused_graph::DECODE_ROWS * b.selected),
+                (
+                    "P",
+                    crate::operators::routed::fused_graph::DECODE_ROWS * b.selected,
+                ),
             ],
             routed_bank_fill::native_entry_with(routed_bank_fill::Elements {
                 SG: bank.sources[0],
@@ -2751,7 +2770,7 @@ impl<'a> Preparation<'a> {
         let (copy, convert_wide) = (all_three(copy), all_three(convert_wide));
         Ok(
             match (
-                (step, route, fill),
+                (step, route, fill, choices),
                 (
                     scratch_request,
                     scratch_wait,
@@ -2761,7 +2780,7 @@ impl<'a> Preparation<'a> {
                 ),
             ) {
                 (
-                    (Some(step), Some(route), Some(fill)),
+                    (Some(step), Some(route), Some(fill), Some(choices)),
                     (
                         Some(scratch_request),
                         Some(scratch_wait),
@@ -2770,6 +2789,7 @@ impl<'a> Preparation<'a> {
                         Some(convert_wide),
                     ),
                 ) => Some(StreamedRoutedKernels {
+                    choices,
                     step,
                     route,
                     fill,

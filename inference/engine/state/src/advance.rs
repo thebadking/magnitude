@@ -183,7 +183,12 @@ impl OwnedCodecAdvance {
         destination: &SequenceState,
     ) -> Result<(KvCodec, KvCodec, Vec<Vec<usize>>), Error> {
         if Rc::ptr_eq(&source.store, &destination.store)
-            || !Rc::ptr_eq(&source.store.device, &destination.store.device)
+            || source.store.history_devices.len() != destination.store.history_devices.len()
+            || source.store.history_devices.iter().zip(&destination.store.history_devices)
+                .any(|(source, destination)| !source.same_device(destination))
+            || source.store.recurrent_devices.len() != destination.store.recurrent_devices.len()
+            || source.store.recurrent_devices.iter().zip(&destination.store.recurrent_devices)
+                .any(|(source, destination)| !source.same_device(destination))
             || destination.position != 0
             || destination.claims.iter().any(|claims| !claims.is_empty())
             || destination.history_start != 0
@@ -586,6 +591,9 @@ impl OwnedStateAdvance {
     pub fn visible_ranges(&self, domain: HistoryDomainId, from: usize) -> Vec<(usize, usize)> {
         self.state.visible_ranges(domain, from)
     }
+    pub fn domain_span_count(&self, domain: HistoryDomainId) -> usize {
+        self.state.domain_span_count(domain)
+    }
     pub fn span_count(&self) -> usize {
         self.state.span_count()
     }
@@ -687,7 +695,6 @@ impl OwnedStateAdvance {
                 end,
                 bank: self.following.index(),
                 tape: published_tape(&self.state.store, self.count, self.committed),
-                claims: &self.claims,
                 floor: self.state.history_start,
                 starts,
                 ranges,
@@ -732,7 +739,6 @@ struct Predecessor<'a> {
     /// The version the predecessor publishes when all its rows commit.
     bank: usize,
     tape: usize,
-    claims: &'a [Claims],
     /// The trim floor, and per domain the first position and the rows of
     /// the history once the predecessor commits.
     floor: usize,
@@ -775,7 +781,7 @@ impl OwnedSuccessorAdvance {
         if count == 0 || count > store.context_capacity.saturating_sub(predecessor.end) {
             return Err(Error::from("successor advance exceeds context capacity"));
         }
-        let claims = store.reserve(Some(predecessor.claims), predecessor.end, count)?;
+        let claims = store.reserve_following(&predecessor.ranges, predecessor.end, count)?;
         let following = store.successor_bank()?;
         let destinations = destinations(&claims);
         let mut transaction = store.begin_transaction();
@@ -815,7 +821,6 @@ impl OwnedSuccessorAdvance {
                 end,
                 bank: self.following.index(),
                 tape: 0,
-                claims: &self.claims,
                 floor: self.floor,
                 starts,
                 ranges,
@@ -851,6 +856,9 @@ impl OwnedSuccessorAdvance {
     }
     pub fn visible_ranges(&self, domain: HistoryDomainId, from: usize) -> Vec<(usize, usize)> {
         ranges_from(&self.ranges[domain.0], self.starts[domain.0], from)
+    }
+    pub fn domain_span_count(&self, domain: HistoryDomainId) -> usize {
+        self.ranges[domain.0].len()
     }
     pub fn span_count(&self) -> usize {
         self.ranges.iter().map(Vec::len).max().unwrap_or(0)
@@ -966,6 +974,12 @@ impl TentativeAdvance {
         }
     }
 
+    pub fn domain_span_count(&self, domain: HistoryDomainId) -> usize {
+        match self {
+            Self::Accepted(advance) => advance.domain_span_count(domain),
+            Self::Successor(advance) => advance.domain_span_count(domain),
+        }
+    }
     /// The most spans any domain's history has.
     pub fn span_count(&self) -> usize {
         match self {

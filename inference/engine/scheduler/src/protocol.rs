@@ -9,7 +9,7 @@ use crate::prefix_cache::PrefixRetention;
 use crate::publication::PublicationReceiver;
 use crate::owner::{AdmissionError, Status};
 use magnitude_executor::platform::DomainReading;
-use magnitude_executor::{MemoryChargeReconciliation, RequestId};
+use magnitude_executor::{DeviceMemoryCharge, RequestId};
 use magnitude_family_contracts::PreparedModelInput;
 use magnitude_generation::GenerationSeed;
 
@@ -51,7 +51,7 @@ pub enum WorkerReply {
     Status(Option<RequestSnapshot>),
     Observed {
         /// Seismic's charge classified by every holder the owner keeps.
-        reconciliation: MemoryChargeReconciliation,
+        reconciliation: Vec<DeviceMemoryCharge>,
         /// A fresh reading of every memory domain the device uses.
         readings: Vec<DomainReading>,
     },

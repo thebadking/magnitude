@@ -107,6 +107,17 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
         Ok(&before[before.len().saturating_sub(count)..])
     }
 
+    /// A private token history for planning continuations of an unsubmitted
+    /// host-token step. Publishing the real history still follows submission.
+    pub(super) fn tokens_after(&self, operation: &Operation) -> Result<TokenHistory, String> {
+        let Operation::Forward { request, position, tokens, .. } = operation else {
+            return Err("token projection requires a target forward".into());
+        };
+        let mut history = self.installed_input(*request)?.tokens.clone();
+        history.feed(*position, tokens)?;
+        Ok(history)
+    }
+
     /// Record that the target group `operations` feeds its tokens.
     pub(super) fn feed_tokens(&mut self, operations: &[Operation]) -> Result<(), String> {
         for operation in operations {

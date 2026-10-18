@@ -5,6 +5,9 @@ applies_to:
   - inference/engine/scheduler/**
   - inference/engine/src/execution.rs
   - inference/engine/src/options.rs
+  - inference/engine/src/census.rs
+  - inference/engine/src/worker/mod.rs
+  - inference/engine/src/worker/session.rs
   - inference/engine/src/worker/execution.rs
   - inference/seismic/runtime/src/**
   - inference/seismic/api/src/**
@@ -24,13 +27,28 @@ applies_to:
 
 # Engine memory
 
-One loaded engine owns one heap in the physical memory domain of its selected device. The
+One loaded engine owns one heap for each selected physical device. The
 domain is host RAM for a CPU or unified-memory device and device-local memory for a dedicated
 GPU. Seismic identifies the domain, measures its capacity and live availability, charges every
 allocation to it, and enforces the latest limit the heap grants. The heap owns the engine's
 holdings and memory decisions; the request owner chooses release victims and runs one release
 order. The hosting service supplies one threshold policy (the planning and emergency reserves);
 no caller supplies a memory budget or retention percentage.
+
+The allocation census reconciles each opened device against its own Seismic
+charge before reporting it. State banks, history, retired views, graph pools,
+weights and programs are attributed to their physical owner. Each owner carries
+its admitted inventory and allocation-pool identity into observation; a peer's
+charge or headroom must never be labeled with the primary device's selector.
+Host-resident tables and mapped staging are classified as host RAM for each
+owner and then summed into one host entry. Duplicate observations of that host
+pool report the least observed headroom, not a sum.
+Bank source and control storage is attributed to the model before shared bytes
+are moved to host RAM; it cannot remain in unattributed compute while being
+subtracted from device weights.
+Host-visible graph uploads remain compute bytes in host RAM. Only their
+workspace and result allocations belong to a dedicated GPU's local compute
+entry; the upload charge is neither omitted nor also reported as device memory.
 
 A dedicated device's capacity is its usable memory: the device's total less the driver and runtime
 overhead the process cannot use for its own allocations, namely the driver's reserve, what the
@@ -111,13 +129,19 @@ load, naming the domain that refused it (the allocation domain, or host RAM for 
 device's staging): with `InsufficientMemory` and the bytes required and available when the claim
 exceeds the domain's ceiling, or with `MemoryPressure` and no byte count when the domain is in
 Reclaim. A weight import runs under one claim for as long as its weights take to become resident,
-so it observes its domains every 100 ms as weights are published and fails the load with
+so it observes its domains every 100 ms as weights are published and at the boundary between
+host-shared bank allocation and device scratch allocation. Each observation refreshes the enforced
+ceiling from the current aggregate charge and physical device headroom, so mapped host buffers
+do not consume the following device allocation grant. It fails the load with
 `MemoryPressure` if one enters Reclaim. A claim is held until Seismic's
 charge reflects its physical operation (an import and binding, or an added state slab)
 and is then released; the charged bytes join a classified holding. A claim
 names its holding class, its minimum physical peak charge and any preferred charge for useful
 headroom. Seismic's
-charge ledger remains the byte authority: the sum of classified holdings equals its charge.
+charge ledger remains the byte authority: the sum of classified holdings equals its aggregate
+charge, which includes host-shared storage and may exceed a dedicated device pool capacity.
+The heap validates available headroom against that pool capacity; physical domain readings,
+not the aggregate charge, bound new allocations.
 
 Beside the charge, Seismic reports what each opened device holds of its memory domain (`held`): the
 charge plus the device memory its backend holds beyond its allocations, so nothing the engine's
@@ -158,9 +182,14 @@ heap (ReBAR/SAM); host RAM, the staging domain, of a dedicated CUDA device (mapp
 and of a Vulkan device without one. Assessment charges them there
 (`AssessmentMemoryCharge::assess_fit`), so a load that does not fit host RAM is refused although
 the device holds the rest; the target import's claim stages them through host RAM; and the census
-reports them in host RAM. Seismic charges every allocation of a device, these included, to its
+reports them in host RAM. Physical device holdings exclude mapped host allocations; the backend
+tracks their live storage independently of buffer aliases. Seismic charges every allocation of a device, these included, to its
 ledger, so its enforced limit, charges plus the device's ceiling, is unchanged by them.
 
+Launch span bounds pair accepted and appended ranges within each history domain before taking
+the maximum; ranges from different domains never add to one launch segment count.
+Queued successors append after each domain's complete projected history, including accepted
+Block rows when the preceding launch appends none; an empty new claim does not reset its tail.
 State is stored in fixed-size history and bank slabs on every backend: one history slab tensor per
 history domain of a store, and one bank slab tensor. The 64 MiB slab target is fixed for an engine
 build and contributes to its build identity. A growth claim covers one new slab per domain that
@@ -180,6 +209,19 @@ with what was asked for), so a consumer such as kernel tuning tells a refusal by
 other failure and learns what the refused work needed. A refused minimum leaves
 accepted request state unchanged and returns the required and available bytes as a demand
 deficit for the request owner to resolve.
+
+Expert streaming keeps its directories and staging in host-visible shared storage.
+On a dedicated device these bytes are charged to host RAM, and its conveyor owns
+shared storage rather than borrowing device-only expert banks. Scratch and resident
+expert banks stay in the device's allocation domain.
+CUDA source transfer windows also stay in that domain, charged once per tensor
+kind at their largest admitted encoding. Their views are model holdings, while
+the file workers' separate host staging remains charged to host RAM.
+Persistent graph upload regions follow that same shared-storage role during
+assessment, cache sizing and final admission. Their exact stage capacities and
+activation counts contribute to host RAM on host-mapped dedicated backends;
+they cannot also reduce the device-local weight budget. Unified storage keeps
+both charges in its one allocation domain.
 
 Every charged byte belongs to exactly one release class:
 
@@ -353,8 +395,34 @@ Each store has history slabs for each of its history domains and bank slabs. A h
 set of attention layers sharing one row numbering: Token (a row per token of the context),
 Window(n) (a history references its last `n` rows plus tentative rows) or Shared (no storage; its
 layers read a source layer's regions). A history slab contains fixed-offset regions for every
-component of its domain; a bank slab contains complete recurrent banks, whose bytes follow from
-their components (convolution windows, gated delta and F32 state-space states, and their tapes).
+component of its domain; a bank slab contains one device's components of each recurrent bank
+(convolution windows, gated delta and F32 state-space states, and their tapes).
+Device groups retain common bank indices and preserve the logical component order.
+Startup projections include alignment and address tables for each device's actual
+regions and are checked against that device's backing after allocation.
+Each stored history domain and recurrent bank allocation has an explicit device
+owner. A store spanning devices reports growth per owner; their free capacities
+are never interchangeable. Range admission retains each owner’s capacity and charges its
+physical weights, import peak, local state backing and sealed graph resources together.
+A range resource plan cannot allocate the complete logical state on one device;
+state allocation remains coordinated across the selected owners. Graph allocation
+checks the selected device and owned decoder range against that admission. Transfer slots
+are derived from sealed producer and consumer tensor descriptors, charged to the
+destination owner, and allocated before submission. Each logical launch reserves
+one complete slot with its graph leases; smaller row classes use views of that
+slot. The slot returns to its pool only after the launch's physical work finishes. The
+logical resource domain registers the final owner's device for graph-produced
+features and logits. Owned tensors and conditioning retain their original
+allocation-device checks; admitting a graph producer does not admit arbitrary
+foreign allocations.
+Allocation, growth rollback and reclamation retain
+one logical transaction across all owners. State growth obtains a separate peak
+claim from every owning heap before provisioning; refusal releases all earlier
+claims before retrying a smaller growth choice. Static holdings, retired-view
+pins and retained readout growth are charged to their actual opened owner.
+Release accounting includes every distinct opened owner once, including
+allocations still retained by views. Aggregate diagnostics sum the owners'
+physical charges without treating their available capacities as interchangeable.
 A load resolves the selected history preset into a validated `CodecSpec` per attention
 binding. That descriptor owns each vector's code bitdepth, grouping, coefficient type,
 width and packing; the binding's semantic activation element owns preparation rounding.

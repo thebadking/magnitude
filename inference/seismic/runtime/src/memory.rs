@@ -16,7 +16,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 pub struct MemoryUsage {
     /// Bytes charged by allocations made through this opened device.
     pub charged: u64,
-    /// Device memory this opened device holds: `charged` plus what its
+    /// Device memory this opened device holds: `charged` less allocations
+    /// physically in host RAM on a dedicated device, plus what its
     /// backend holds beyond its allocations (the free space of the blocks it
     /// sub-allocates from, and driver objects such as instantiated CUDA
     /// graphs). What the device's memory pool actually loses to Seismic.

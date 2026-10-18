@@ -3,6 +3,8 @@
 //! only after physical completion has been observed.
 mod advance;
 mod bank;
+mod bank_storage;
+use bank_storage::BankStorage;
 mod codec;
 mod domain;
 mod layout;
@@ -1109,7 +1111,7 @@ impl BankPool {
 /// rows and banks are handed out.
 struct StoreSlabs {
     history: Vec<HistorySlabs>,
-    recurrent: Option<SlabTensor>,
+    recurrent: Option<BankStorage>,
     banks: usize,
 }
 
@@ -1331,7 +1333,9 @@ struct ShrinkPlan {
 /// sealed into graphs. Backing slabs are added as demand grows and released
 /// when empty, only through the store's [`StoreBindings`].
 pub struct StateStore {
-    device: Rc<Device>,
+    devices: Vec<Rc<Device>>,
+    history_devices: Vec<Rc<Device>>,
+    recurrent_devices: Vec<Rc<Device>>,
     context_capacity: usize,
     domains: Vec<HistoryDomain>,
     /// Layers of Shared domains and the stored layers they read.
@@ -1445,6 +1449,13 @@ pub struct StateGrowthClaim {
     pub preferred_bytes: u64,
 }
 
+/// Growth charged to one opened device. A distributed store must admit every
+/// item before provisioning; spare capacity on another device is not credit.
+pub struct DeviceStateGrowth {
+    pub device: Rc<Device>,
+    pub claim: StateGrowthClaim,
+}
+
 /// A physical census of one state store. Shared rows and recurrent banks are
 /// assigned to the strongest holder class, without charging aliases twice.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1469,6 +1480,22 @@ pub enum GrowthChoice {
 }
 
 impl StateStore {
+    fn device_charge(&self) -> u64 {
+        self.devices
+            .iter()
+            .map(|device| device.memory_usage().charged)
+            .sum()
+    }
+
+    /// The owner of a stored domain, also the owner seen by its Shared readers.
+    pub fn history_device(&self, domain: HistoryDomainId) -> Option<&Rc<Device>> {
+        self.history_devices.get(domain.0)
+    }
+
+    pub fn recurrent_device(&self, component: usize) -> Option<&Rc<Device>> {
+        self.recurrent_devices.get(component)
+    }
+
     /// A store of the given history domains and recurrent bank components.
     /// Every domain's reserved rows cover its row limit: the context for
     /// Token, `n` plus one advance of at most `max_advance` rows for
@@ -1482,12 +1509,54 @@ impl StateStore {
         component_specs: Vec<ComponentSpec>,
         bank_capacity: BankCapacity,
     ) -> Result<(Rc<Self>, StoreBindings), Error> {
+        let history_devices = domains
+            .iter()
+            .filter(|domain| !matches!(domain.layout, HistoryDomainLayout::Shared { .. }))
+            .map(|_| device.clone())
+            .collect();
+        let recurrent_devices = component_specs.iter().map(|_| device.clone()).collect();
+        Self::new_placed(
+            history_devices,
+            recurrent_devices,
+            context_capacity,
+            max_advance,
+            domains,
+            component_specs,
+            bank_capacity,
+        )
+    }
+
+    /// Allocate each stored history domain on its assigned device. Shared
+    /// readers retain their source's ownership. Recurrent components are grouped
+    /// by owner while retaining common bank indices. Device assignments must
+    /// match the validated stored domains exactly, before any allocation occurs.
+    pub fn new_placed(
+        history_devices: Vec<Rc<Device>>,
+        recurrent_devices: Vec<Rc<Device>>,
+        context_capacity: usize,
+        max_advance: usize,
+        domains: Vec<HistoryDomainPlan>,
+        component_specs: Vec<ComponentSpec>,
+        bank_capacity: BankCapacity,
+    ) -> Result<(Rc<Self>, StoreBindings), Error> {
         if context_capacity == 0 {
             return Err(Error::Request(
                 "history capacity must fit a positive sequence context".into(),
             ));
         }
         let (stored, shared) = domain::validate_domains(domains, context_capacity, max_advance)?;
+        if history_devices.len() != stored.len() || recurrent_devices.len() != component_specs.len()
+        {
+            return Err(Error::Request(
+                "state device assignments differ from the stored domains and banks".into(),
+            ));
+        }
+        let mut devices: Vec<Rc<Device>> = Vec::new();
+        for device in history_devices.iter().chain(recurrent_devices.iter()) {
+            if !devices.iter().any(|held| held.same_device(device)) {
+                devices.push(device.clone());
+            }
+        }
         let recurrent_bank_bytes = recurrent_bank_bytes(&component_specs)?;
         let bank_slab_banks = if component_specs.is_empty() {
             0
@@ -1505,8 +1574,8 @@ impl StateStore {
         let mut recurrent = if component_specs.is_empty() {
             None
         } else {
-            Some(SlabTensor::new(
-                &device,
+            Some(BankStorage::new(
+                &recurrent_devices,
                 bank_slab_banks as u64,
                 reserved_banks as u64,
                 component_specs
@@ -1523,10 +1592,10 @@ impl StateStore {
         }
         let mut history = Vec::with_capacity(stored.len());
         let mut domains = Vec::with_capacity(stored.len());
-        for domain in stored {
+        for (domain, device) in stored.into_iter().zip(&history_devices) {
             let geometry = domain.geometry;
             let mut slabs = SlabTensor::new(
-                &device,
+                device,
                 geometry.slab_rows as u64,
                 domain.logical_rows as u64,
                 domain
@@ -1558,7 +1627,9 @@ impl StateStore {
             });
         }
         let store = Rc::new(Self {
-            device,
+            devices,
+            history_devices,
+            recurrent_devices,
             context_capacity,
             domains,
             shared,
@@ -1611,6 +1682,7 @@ impl StateStore {
         *self.recurrent_views.borrow_mut() = Some(views.clone());
         views
     }
+
     /// Banks reserved in each recurrent arena, including the zero seed.
     pub fn recurrent_bank_count(&self) -> Result<usize, Error> {
         self.bank_capacity.storage_total()
@@ -1636,7 +1708,24 @@ impl StateStore {
             + backing
                 .recurrent
                 .as_ref()
-                .map_or(0, SlabTensor::storage_bytes)
+                .map_or(0, BankStorage::storage_bytes)
+    }
+
+    /// Physical backing owned by one opened device, excluding other stores
+    /// and allocations that merely happen to use the same device.
+    pub fn committed_bytes_on(&self, device: &Device) -> u64 {
+        let backing = self.backing.borrow();
+        backing
+            .history
+            .iter()
+            .zip(&self.history_devices)
+            .filter(|(_, owner)| device.same_device(owner))
+            .map(|(history, _)| history.slabs.storage_bytes())
+            .sum::<u64>()
+            + backing
+                .recurrent
+                .as_ref()
+                .map_or(0, |banks| banks.storage_bytes_on(device))
     }
 
     /// Whether a released slab might still be charged through an outside view.
@@ -1648,6 +1737,14 @@ impl StateStore {
     /// The weak observers neither pin the allocations nor invent a charge:
     /// each live byte count comes from Seismic's physical allocation.
     pub fn external_pinned_bytes(&self) -> Result<u64, Error> {
+        self.external_pinned_bytes_for(None)
+    }
+
+    pub fn external_pinned_bytes_on(&self, device: &Device) -> Result<u64, Error> {
+        self.external_pinned_bytes_for(Some(device))
+    }
+
+    fn external_pinned_bytes_for(&self, device: Option<&Device>) -> Result<u64, Error> {
         if !self.has_retired_storage() {
             return Ok(0);
         }
@@ -1660,7 +1757,7 @@ impl StateStore {
                 backing
                     .recurrent
                     .iter()
-                    .flat_map(SlabTensor::slab_storage_observers),
+                    .flat_map(BankStorage::slab_storage_observers),
             )
             .map(|storage| storage.identity())
             .collect::<BTreeSet<_>>();
@@ -1669,6 +1766,7 @@ impl StateStore {
         retired.retain(|storage| storage.charged_bytes().is_some());
         retired
             .iter()
+            .filter(|storage| device.is_none_or(|device| storage.belongs_to(device)))
             .filter(|storage| !current.contains(&storage.identity()))
             .filter(|storage| seen.insert(storage.identity()))
             .filter_map(TensorStorageObserver::charged_bytes)
@@ -1692,6 +1790,30 @@ impl StateStore {
         live: &[Holder<'_>],
         retained: &[Holder<'_>],
         in_flight: &[Holder<'_>],
+    ) -> Result<StateHoldingCensus, Error> {
+        self.holding_census_for(live, retained, in_flight, None)
+    }
+
+    pub fn holding_census_on(
+        self: &Rc<Self>, live: &[Holder<'_>], retained: &[Holder<'_>],
+        in_flight: &[Holder<'_>], device: &Device,
+    ) -> Result<StateHoldingCensus, Error> {
+        self.holding_census_for(live, retained, in_flight, Some(device))
+    }
+
+    fn recurrent_bytes_on(&self, device: Option<&Device>) -> Result<u64, Error> {
+        self.component_specs.iter().zip(&self.recurrent_devices)
+            .filter(|(_, owner)| device.is_none_or(|device| device.same_device(owner)))
+            .try_fold(0u64, |sum, (spec, _)| {
+                let bytes = u64::try_from(spec.bytes().map_err(Error::Request)?)
+                    .map_err(|_| Error::Request("bank bytes exceed u64".into()))?;
+                sum.checked_add(bytes).ok_or_else(|| Error::Request("bank bytes overflow".into()))
+            })
+    }
+
+    fn holding_census_for(
+        self: &Rc<Self>, live: &[Holder<'_>], retained: &[Holder<'_>],
+        in_flight: &[Holder<'_>], device: Option<&Device>,
     ) -> Result<StateHoldingCensus, Error> {
         let holders = live
             .iter()
@@ -1749,6 +1871,7 @@ impl StateStore {
                     "state census does not reconcile to committed backing".into(),
                 ));
             }
+            if device.is_some_and(|device| !device.same_device(&self.history_devices[index])) { continue; }
             occupied_history = u64::try_from(arena.referenced)
                 .ok()
                 .and_then(|rows| rows.checked_mul(domain.row_bytes))
@@ -1771,22 +1894,23 @@ impl StateStore {
         }
         let used_banks = u64::try_from(claimed_banks.len())
             .map_err(|_| Error::Request("occupied bank count exceeds u64".into()))?;
+        let bank_bytes = self.recurrent_bytes_on(device)?;
         let occupied = used_banks
-            .checked_mul(self.recurrent_bank_bytes)
+            .checked_mul(bank_bytes)
             .and_then(|bank| occupied_history.checked_add(bank))
             .ok_or_else(|| Error::Request("state census byte count overflow".into()))?;
-        let model_seed = self.recurrent_bank_bytes;
-        let committed = self.committed_bytes();
+        let model_seed = bank_bytes;
+        let committed = device.map_or_else(|| self.committed_bytes(), |device| self.committed_bytes_on(device));
         let surplus = committed
             .checked_sub(occupied)
             .and_then(|bytes| bytes.checked_sub(model_seed))
             .ok_or_else(|| Error::Request("state census exceeds Seismic charged backing".into()))?;
         drop(placement);
         drop(tracked);
-        let retained_only = self.exclusive_bytes(retained)?;
+        let retained_only = self.exclusive_bytes_for(retained, device)?;
         let non_flight = live.iter().chain(retained).copied().collect::<Vec<_>>();
         let in_flight_bytes = occupied
-            .checked_sub(self.exclusive_bytes(&non_flight)?)
+            .checked_sub(self.exclusive_bytes_for(&non_flight, device)?)
             .ok_or_else(|| Error::Request("state census flight exceeds occupied bytes".into()))?;
         let live_bytes = occupied
             .checked_sub(retained_only)
@@ -1972,10 +2096,44 @@ impl StateStore {
         demands: &[RowDemand],
         banks: usize,
     ) -> Result<StateGrowthClaim, Error> {
+        if self.devices.len() > 1 {
+            return Err(Error::Request(
+                "distributed state requires per-device growth claims".into(),
+            ));
+        }
         Ok(StateGrowthClaim {
-            minimum_bytes: self.growth_bytes(demands, banks, GrowthChoice::Minimum)?,
-            preferred_bytes: self.growth_bytes(demands, banks, GrowthChoice::Preferred)?,
+            minimum_bytes: self.growth_bytes(demands, banks, GrowthChoice::Minimum, None)?,
+            preferred_bytes: self.growth_bytes(demands, banks, GrowthChoice::Preferred, None)?,
         })
+    }
+
+    pub fn growth_claims_by_device(
+        &self,
+        demands: &[RowDemand],
+        banks: usize,
+    ) -> Result<Vec<DeviceStateGrowth>, Error> {
+        self.devices
+            .iter()
+            .map(|device| {
+                Ok(DeviceStateGrowth {
+                    device: device.clone(),
+                    claim: StateGrowthClaim {
+                        minimum_bytes: self.growth_bytes(
+                            demands,
+                            banks,
+                            GrowthChoice::Minimum,
+                            Some(device),
+                        )?,
+                        preferred_bytes: self.growth_bytes(
+                            demands,
+                            banks,
+                            GrowthChoice::Preferred,
+                            Some(device),
+                        )?,
+                    },
+                })
+            })
+            .collect()
     }
 
     fn growth_bytes(
@@ -1983,6 +2141,7 @@ impl StateStore {
         demands: &[RowDemand],
         banks: usize,
         choice: GrowthChoice,
+        device: Option<&Device>,
     ) -> Result<u64, Error> {
         let plans = self.history_growth_plans(demands, choice)?;
         let backing = self.backing.borrow();
@@ -1990,6 +2149,9 @@ impl StateStore {
         let history_bytes = plans
             .iter()
             .zip(&backing.history)
+            .zip(&self.history_devices)
+            .filter(|(_, owner)| device.is_none_or(|device| device.same_device(owner)))
+            .map(|(history, _)| history)
             .try_fold(0u64, |total, (&slabs, history)| {
                 history
                     .slabs
@@ -2001,7 +2163,7 @@ impl StateStore {
         let bank_bytes = backing
             .recurrent
             .as_ref()
-            .map_or(0, SlabTensor::slab_bytes)
+            .map_or(0, |slabs| slabs.slab_bytes_on(device))
             .checked_mul(bank_slabs as u64)
             .ok_or_else(|| Error::Request("bank slab claim overflows".into()))?;
         history_bytes
@@ -2136,7 +2298,7 @@ impl StateStore {
         E: From<Error>,
         F: FnMut(&SlabTensor, StoreCopy) -> Result<(), E>,
     {
-        let before = self.device.memory_usage().charged;
+        let before = self.device_charge();
         let backing = self.backing.borrow();
         // Each stored domain plans against its own published arena.
         let history_plans = self
@@ -2254,10 +2416,9 @@ impl StateStore {
                 .recurrent
                 .as_ref()
                 .expect("recurrent layout has slabs");
-            copy(
-                slabs,
-                self.bank_copy_plan(slabs, &bank_moves).map_err(E::from)?,
-            )?;
+            for group in slabs.groups() {
+                copy(group, self.bank_copy_plan(group, &bank_moves).map_err(E::from)?)?;
+            }
         }
         drop(backing);
 
@@ -2310,7 +2471,7 @@ impl StateStore {
                     let start = index * self.bank_slab_banks;
                     let end = (start + self.bank_slab_banks).min(reserved);
                     self.banks.mark_slab_unavailable(start, end);
-                    self.record_retired_storage(observer);
+                    for storage in observer { self.record_retired_storage(storage); }
                 }
             }
             let extent = slabs
@@ -2332,7 +2493,7 @@ impl StateStore {
                 banks: stats.banks + bank_moves.len(),
             });
         }
-        Ok(before.saturating_sub(self.device.memory_usage().charged))
+        Ok(before.saturating_sub(self.device_charge()))
     }
 
     #[cfg(test)]
@@ -2519,6 +2680,10 @@ impl StateStore {
     /// in-flight advances outside the set pin what they reference, and the
     /// zero seed is never released. Repeated holders count once.
     pub fn exclusive_bytes(self: &Rc<Self>, holders: &[Holder<'_>]) -> Result<u64, Error> {
+        self.exclusive_bytes_for(holders, None)
+    }
+
+    fn exclusive_bytes_for(self: &Rc<Self>, holders: &[Holder<'_>], device: Option<&Device>) -> Result<u64, Error> {
         let mut distinct: Vec<&Holder<'_>> = Vec::with_capacity(holders.len());
         for holder in holders {
             if !Rc::ptr_eq(self, holder.store()) {
@@ -2532,6 +2697,7 @@ impl StateStore {
         }
         let mut history = 0u64;
         for (index, domain) in self.domains.iter().enumerate() {
+            if device.is_some_and(|device| !device.same_device(&self.history_devices[index])) { continue; }
             let ranges = distinct
                 .iter()
                 .flat_map(|holder| holder.claims()[index].ranges())
@@ -2559,7 +2725,7 @@ impl StateStore {
                 banks += 1;
             }
         }
-        self.recurrent_bank_bytes
+        self.recurrent_bytes_on(device)?
             .checked_mul(banks)
             .and_then(|recurrent| history.checked_add(recurrent))
             .ok_or_else(|| Error::Request("exclusive state byte count overflow".into()))
@@ -2583,7 +2749,7 @@ impl StateStore {
         if !self.idle() {
             return Ok(0);
         }
-        let before = self.device.memory_usage().charged;
+        let before = self.device_charge();
         let mut backing = self.backing.borrow_mut();
         for (domain, history) in self.domains.iter().zip(&mut backing.history) {
             self.history_views.borrow_mut().take();
@@ -2602,7 +2768,7 @@ impl StateStore {
             *domain.arena.borrow_mut() = Arena::new(0, domain.slab_rows, domain.page_rows);
         }
         drop(backing);
-        usize::try_from(before.saturating_sub(self.device.memory_usage().charged))
+        usize::try_from(before.saturating_sub(self.device_charge()))
             .map_err(|_| Error::Request("reclaimable history bytes exceed host range".into()))
     }
     pub fn create(self: &Rc<Self>) -> Result<SequenceState, Error> {
@@ -2670,10 +2836,39 @@ impl StateStore {
         let ends = (0..self.domains.len())
             .map(|index| histories.and_then(|histories| histories[index].end()))
             .collect::<Vec<_>>();
+        self.reserve_rows_after(&ends, counts)
+    }
+
+    /// Reserve a successor after every domain's complete projected history.
+    /// A predecessor may append no Block rows, but its accepted tail remains.
+    fn reserve_following(
+        &self,
+        ranges: &[Vec<(usize, usize)>],
+        position: usize,
+        count: usize,
+    ) -> Result<Vec<Claims>, Error> {
+        let ends = ranges
+            .iter()
+            .map(|ranges| ranges.last().map(|&(start, rows)| start + rows))
+            .collect::<Vec<_>>();
+        let counts = self
+            .domains
+            .iter()
+            .map(|domain| domain.kind.advance_rows(position, count))
+            .collect::<Vec<_>>();
+        self.reserve_rows_after(&ends, &counts)
+    }
+
+
+    fn reserve_rows_after(
+        &self,
+        ends: &[Option<usize>],
+        counts: &[usize],
+    ) -> Result<Vec<Claims>, Error> {
         if self
             .domains
             .iter()
-            .zip(&ends)
+            .zip(ends)
             .any(|(domain, &end)| domain.arena.borrow().tail_blocked(end))
         {
             return Err(Error::Request(
@@ -2682,7 +2877,7 @@ impl StateStore {
             ));
         }
         let mut reserved = Vec::with_capacity(self.domains.len());
-        for ((domain, &count), &after) in self.domains.iter().zip(counts).zip(&ends) {
+        for ((domain, &count), &after) in self.domains.iter().zip(counts).zip(ends) {
             let mut arena = domain.arena.borrow_mut();
             let claimable = arena.claimable(after);
             if claimable < count {
@@ -2853,6 +3048,10 @@ impl SequenceState {
     /// visible rows of a query whose window begins at `from`.
     pub fn visible_ranges(&self, domain: HistoryDomainId, from: usize) -> Vec<(usize, usize)> {
         ranges_from(&self.history_ranges(domain), self.starts[domain.0], from)
+    }
+    /// Accepted spans in one stored history domain.
+    pub fn domain_span_count(&self, domain: HistoryDomainId) -> usize {
+        self.claims[domain.0].entry(|entry| entry.ranges.len())
     }
     /// The most spans any domain's history has.
     pub fn span_count(&self) -> usize {

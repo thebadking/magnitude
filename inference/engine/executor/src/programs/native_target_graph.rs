@@ -312,6 +312,7 @@ struct BlockGraphEnumeration {
 /// scales it read) and of the planner (`certify_target_family`, with the
 /// planned ones), so the planned sealed graphs are the sealed ones.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn enumerate_block_graphs(
     backend: BackendName,
     state: &StateResourcePlan,
@@ -323,9 +324,39 @@ fn enumerate_block_graphs(
     max_slots: u64,
     max_segments: u64,
 ) -> Result<BlockGraphEnumeration, String> {
+    enumerate_block_graphs_in_range(
+        backend,
+        state,
+        plan,
+        mixers,
+        shapes,
+        scales,
+        row_classes,
+        max_slots,
+        max_segments,
+        0..plan.blocks().len(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn enumerate_block_graphs_in_range(
+    backend: BackendName,
+    state: &StateResourcePlan,
+    plan: &TargetProgramPlan,
+    mixers: &[MixerKind],
+    shapes: &[BlockGraphShape],
+    scales: BlockOutputScales<'_>,
+    row_classes: &[u64],
+    max_slots: u64,
+    max_segments: u64,
+    owned: std::ops::Range<usize>,
+) -> Result<BlockGraphEnumeration, String> {
     let blocks = plan.blocks();
     if blocks.len() != shapes.len() || blocks.len() != mixers.len() {
         return Err("planned target block count disagrees with geometry".into());
+    }
+    if owned.is_empty() || owned.end > blocks.len() {
+        return Err("graph range is outside the decoder".into());
     }
     let unit = |index: usize| {
         !crate::native::output_tails(blocks[index])
@@ -340,13 +371,15 @@ fn enumerate_block_graphs(
     };
     let shared = (0..blocks.len())
         .map(|index| {
-            (0..index).find(|&first| shapes[first] == shapes[index] && equal_scales(first, index))
+            (owned.start..index)
+                .find(|&first| shapes[first] == shapes[index] && equal_scales(first, index))
         })
         .collect::<Vec<_>>();
     let exact = match scales {
         BlockOutputScales::Read(_) => true,
-        BlockOutputScales::Planned(_) => (0..blocks.len()).all(|index| {
-            (0..index).all(|first| shapes[first] != shapes[index] || (unit(first) && unit(index)))
+        BlockOutputScales::Planned(_) => owned.clone().all(|index| {
+            (owned.start..index)
+                .all(|first| shapes[first] != shapes[index] || (unit(first) && unit(index)))
         }),
     };
     let mut enumeration = BlockGraphEnumeration {
@@ -358,6 +391,9 @@ fn enumerate_block_graphs(
     };
     for &rows in row_classes {
         for (index, &slot) in blocks.iter().enumerate() {
+            if !owned.contains(&index) {
+                continue;
+            }
             let listings = block_listings(state, backend, slot, index, rows)?;
             if !listings.tiles.is_empty() {
                 enumeration.listings[index] = listings.clone();
@@ -650,8 +686,8 @@ pub struct PreparedTargetGraphs {
     classes: usize,
     family: NativeGraphFamily,
     max_output_bytes: u64,
-    /// Decoder blocks, each one graph run per step.
-    blocks: usize,
+    /// Global blocks owned by this graph family, each one run per step.
+    owned_blocks: std::ops::Range<usize>,
     /// The element and `[rows, taps · hidden]` extents of the draft input
     /// rows, when a separate draft taps the target.
     tap_buffer: Option<(Element, [u64; 2])>,
@@ -667,6 +703,7 @@ pub struct PreparedTargetGraphs {
     /// The `[rows, 2]` I32 extents of the token rows a model whose blocks
     /// read them keeps, over the largest row class (`keeps_token_rows`).
     token_rows: Option<[u64; 2]>,
+    token_row_slots: usize,
     seal: SealReport,
 }
 
@@ -946,7 +983,7 @@ impl PreparedTargetGraphs {
             })
             .map_err(|error| error.to_string())?;
         let per_layer_rows = per_layer_rows_bytes(self.per_layer_rows)?;
-        let token_rows = token_rows_bytes(self.token_rows)?;
+        let token_rows = token_rows_bytes(self.token_rows, self.token_row_slots)?;
         distinct_storage_bytes(
             self.blocks_by_class
                 .iter()
@@ -968,6 +1005,21 @@ impl PreparedTargetGraphs {
         limits: ResourceLimits,
         workers: &seismic::Workers,
     ) -> Result<Self, String> {
+        Self::prepare_range(device, handles, load, geometry, state, plan, limits, workers,
+            0..geometry.blocks.len())
+    }
+
+    pub(crate) fn prepare_range(
+        device: &Device,
+        handles: &AttestedTarget,
+        load: &ModelLoadPlan,
+        geometry: &Decoder,
+        state: &StateResourcePlan,
+        plan: &TargetProgramPlan,
+        limits: ResourceLimits,
+        workers: &seismic::Workers,
+        owned: std::ops::Range<usize>,
+    ) -> Result<Self, String> {
         let mixers = block_mixers(geometry)?;
         // The plan was assessed for a device that forms tensor operations or
         // not; the opened device's own probe must say the same, or its
@@ -988,7 +1040,7 @@ impl PreparedTargetGraphs {
             ));
         }
         let certificate =
-            certify_target_family(device.backend(), load, geometry, state, plan, limits)
+            certify_target_family_in_range(device.backend(), load, geometry, state, plan, limits, owned.clone())
                 .map_err(|error| error.to_string())?;
         let row_classes = magnitude_batching::row_classes(limits.max_launch_rows);
         if row_classes.is_empty() {
@@ -1032,7 +1084,7 @@ impl PreparedTargetGraphs {
             listings,
             launch_classes,
             exact: _,
-        } = enumerate_block_graphs(
+        } = enumerate_block_graphs_in_range(
             device.backend(),
             state,
             plan,
@@ -1042,6 +1094,7 @@ impl PreparedTargetGraphs {
             &row_classes,
             max_slots,
             max_segments,
+            owned.clone(),
         )?;
         let mut held = SealedHeap::default();
         let mut entries = BTreeMap::new();
@@ -1277,13 +1330,14 @@ impl PreparedTargetGraphs {
             classes: launch_classes.len(),
             family,
             max_output_bytes,
-            blocks: handles.blocks.len(),
+            owned_blocks: owned,
             tap_buffer: tap_width.map(|width| (activation(geometry), [largest_rows, width])),
             taps: tapped,
             stateless_tail,
             per_layer_entries,
             per_layer_rows: per_layer_rows(plan, largest_rows),
             token_rows: token_rows_extents(load, largest_rows),
+            token_row_slots: limits.startup_slots().target.activations,
             seal,
         })
     }
@@ -1334,11 +1388,29 @@ impl PreparedTargetGraphs {
         self.max_output_bytes
     }
 
-    /// Graph runs one step queues on a workspace slot before any completes:
-    /// the embedding entry, the per-layer entry of a per-layer model, and
-    /// every block.
+    /// Global block indices whose graphs this device owns.
+    pub fn owned_blocks(&self) -> std::ops::Range<usize> {
+        self.owned_blocks.clone()
+    }
+
+    /// Runs reserved on this family's workspace: its entry graphs and owned blocks.
     pub fn runs_per_step(&self) -> usize {
-        1 + usize::from(self.per_layer_rows.is_some()) + self.blocks
+        1 + usize::from(self.per_layer_rows.is_some()) + self.owned_blocks.len()
+    }
+
+    /// One capacity for each entry and owned block. Large gathered entry
+    /// rows must not determine every block's upload allocation.
+    pub(crate) fn upload_regions(&self) -> Vec<u64> {
+        let mut regions = vec![self.entries.values()
+            .map(|entry| entry.plan.upload_bytes()).max().unwrap_or(0)];
+        if self.per_layer_rows.is_some() {
+            regions.push(self.per_layer_entries.values()
+                .map(|entry| entry.plan.upload_bytes()).max().unwrap_or(0));
+        }
+        regions.extend(self.owned_blocks.clone().map(|index|
+            self.blocks_by_class[index].iter()
+                .map(|(_, graph)| graph.plan.upload_bytes()).max().unwrap_or(0)));
+        regions
     }
 }
 
@@ -1350,6 +1422,41 @@ pub(crate) fn target_runs_per_step(decoder: &Decoder) -> usize {
 }
 
 impl PreparedTargetGraphs {
+    /// A remote selection can return through the admitted kept-token regions.
+    /// Per-layer entries still require host tokens for their table gathers.
+    pub fn supports_selected_return(&self) -> bool {
+        self.token_rows.is_some() && self.per_layer_rows.is_none()
+    }
+
+    /// Largest carried tensors at the end of this owner's range, obtained
+    /// from its sealed producer, plus its explicitly planned persistent rows.
+    pub(crate) fn outgoing_boundary(&self) -> Result<[Option<seismic::NativeTensorMetadata>; 4], String> {
+        let classes = &self.blocks_by_class[self.owned_blocks.end - 1];
+        let graph = classes.iter().map(|(_, graph)| graph)
+            .max_by_key(|graph| graph.plan.tensor_metadata(&graph.output)
+                .and_then(|meta| meta.extents.first().copied()).unwrap_or(0))
+            .ok_or("source range has no sealed boundary producer")?;
+        let hidden = graph.plan.tensor_metadata(&graph.output)
+            .ok_or("source graph has no hidden descriptor")?;
+        let residual = graph.residual.as_ref().map(|tensor| graph.plan.tensor_metadata(tensor)
+            .ok_or("source graph has no residual descriptor")).transpose()?;
+        let rows = |element: Element, extents: [u64; 2]| -> Result<seismic::NativeTensorMetadata, String> {
+            Ok(seismic::NativeTensorMetadata { element,
+                canonical_bytes: element.canonical_byte_len(&extents).map_err(|error| error.to_string())?,
+                extents: extents.to_vec() })
+        };
+        Ok([Some(hidden), residual,
+            self.token_rows.map(|extents| rows(Element::i32(), extents)).transpose()?,
+            self.per_layer_rows.map(|extents| rows(Element::f32(), extents)).transpose()?])
+    }
+
+    pub(crate) fn incoming_hidden(&self) -> Result<seismic::NativeTensorMetadata, String> {
+        self.blocks_by_class[self.owned_blocks.start].iter()
+            .filter_map(|(_, graph)| graph.plan.tensor_metadata(graph.hidden.tensor()))
+            .max_by_key(|meta| meta.extents.first().copied().unwrap_or(0))
+            .ok_or_else(|| "destination range has no sealed boundary consumer".into())
+    }
+
     pub fn class_count(&self) -> usize {
         self.classes
     }
@@ -1453,7 +1560,9 @@ impl PreparedTargetGraphs {
             .transpose()?;
         let token_rows = self
             .token_rows
-            .map(|extents| {
+            .map(|mut extents| {
+                extents[0] = extents[0].checked_mul(self.token_row_slots as u64)
+                    .ok_or("group token row extent overflows")?;
                 seismic::Tensor::zeros(
                     &resident.embedding.tensor().device(),
                     Element::i32(),
@@ -1765,7 +1874,14 @@ impl TokenRows {
 
 #[cfg(test)]
 mod token_rows_tests {
-    use super::{TokenRow, TokenRows};
+    use super::{TokenRow, TokenRows, token_rows_bytes};
+
+    #[test]
+    fn kept_token_charge_covers_every_group_member() {
+        assert_eq!(token_rows_bytes(Some([128, 2]), 8).unwrap(), 128 * 2 * 4 * 8);
+        assert_eq!(token_rows_bytes(None, 8).unwrap(), 0);
+        assert!(token_rows_bytes(Some([u64::MAX, 2]), 8).is_err());
+    }
 
     #[test]
     fn a_token_row_is_held_from_the_step_that_writes_it_until_overwritten() {
@@ -1801,6 +1917,20 @@ mod token_rows_tests {
 }
 
 impl BoundTargetGraphs {
+    /// Group entries run before their blocks, so each chain member needs a
+    /// distinct token region. Later groups reuse regions in submission order.
+    pub(crate) fn token_rows_for(&self, slot: usize, rows: u64) -> Result<seismic::Tensor, String> {
+        let [capacity, _] = self.prepared.token_rows
+            .ok_or("the model keeps no token rows")?;
+        if slot >= self.prepared.token_row_slots || rows > capacity {
+            return Err("token rows exceed the admitted group or row capacity".into());
+        }
+        let start = capacity.checked_mul(slot as u64).ok_or("token row offset overflows")?;
+        let end = start.checked_add(rows).ok_or("token row extent overflows")?;
+        self.token_rows.as_ref().ok_or("token row storage is absent")?
+            .slice_leading(start, end).map_err(|error| error.to_string())
+    }
+
     pub(crate) fn constant_bytes(&self) -> Result<u64, &'static str> {
         self.constants
             .iter()
@@ -1987,8 +2117,10 @@ fn token_rows_extents(load: &ModelLoadPlan, rows: u64) -> Option<[u64; 2]> {
     keeps_token_rows(load).then_some([rows, 2])
 }
 
-fn token_rows_bytes(extents: Option<[u64; 2]>) -> Result<u64, String> {
-    extents.map_or(Ok(0), |extents| {
+fn token_rows_bytes(extents: Option<[u64; 2]>, slots: usize) -> Result<u64, String> {
+    extents.map_or(Ok(0), |mut extents| {
+        extents[0] = extents[0].checked_mul(slots as u64)
+            .ok_or("group token row extent overflows")?;
         Element::i32()
             .canonical_byte_len(&extents)
             .map_err(|error| error.to_string())
@@ -3196,13 +3328,30 @@ pub(crate) fn checked_target_family(
     state: &StateResourcePlan,
     plan: &TargetProgramPlan,
     limits: ResourceLimits,
-) -> Result<(CheckedGraphResources, PlannedSealedGraphs), GraphError> {
-    certify_target_family(backend, load, geometry, state, plan, limits)
-        .map(|certificate| (certificate.resources, certificate.sealed))
+) -> Result<(CheckedGraphResources, PlannedSealedGraphs, Vec<u64>), GraphError> {
+    checked_target_family_in_range(backend, load, geometry, state, plan, limits,
+        0..geometry.blocks.len())
+}
+
+/// Resource projection for the same global block range that `prepare_range`
+/// seals. Entry resources are currently retained on each range and charged in
+/// full, including token rows needed by n-gram blocks at device boundaries.
+pub(crate) fn checked_target_family_in_range(
+    backend: BackendName,
+    load: &ModelLoadPlan,
+    geometry: &Decoder,
+    state: &StateResourcePlan,
+    plan: &TargetProgramPlan,
+    limits: ResourceLimits,
+    owned: std::ops::Range<usize>,
+) -> Result<(CheckedGraphResources, PlannedSealedGraphs, Vec<u64>), GraphError> {
+    certify_target_family_in_range(backend, load, geometry, state, plan, limits, owned)
+        .map(|certificate| (certificate.resources, certificate.sealed, certificate.upload_regions))
 }
 
 struct TargetFamilyCertificate {
     resources: CheckedGraphResources,
+    upload_regions: Vec<u64>,
     /// The graphs a load seals into these layouts, and their host heap.
     sealed: PlannedSealedGraphs,
     entries: BTreeMap<EntryTokens, NativeGraphLayout>,
@@ -3226,6 +3375,7 @@ struct CertifiedBlockGraph {
     owned: HostHeap,
 }
 
+#[cfg(test)]
 fn certify_target_family(
     backend: BackendName,
     load: &ModelLoadPlan,
@@ -3234,8 +3384,43 @@ fn certify_target_family(
     plan: &TargetProgramPlan,
     limits: ResourceLimits,
 ) -> Result<TargetFamilyCertificate, GraphError> {
+    certify_target_family_in_range(
+        backend,
+        load,
+        geometry,
+        state,
+        plan,
+        limits,
+        0..geometry.blocks.len(),
+    )
+}
+
+fn certify_target_family_in_range(
+    backend: BackendName,
+    load: &ModelLoadPlan,
+    geometry: &Decoder,
+    state: &StateResourcePlan,
+    plan: &TargetProgramPlan,
+    limits: ResourceLimits,
+    owned: std::ops::Range<usize>,
+) -> Result<TargetFamilyCertificate, GraphError> {
     if plan.blocks().len() != geometry.blocks.len() {
         return Err("planned target block count disagrees with geometry".into());
+    }
+    if owned.is_empty() || owned.end > geometry.blocks.len() {
+        return Err("graph range is outside the decoder".into());
+    }
+    if let Some(bank) = load.expert_bank() {
+        for layer in &bank.layers {
+            let block = match layer.scope {
+                WeightScope::TargetSublayer(index)
+                | WeightScope::TargetBranch { sublayer: index, .. } => index.block as usize,
+                _ => return Err("target expert bank has a non-decoder scope".into()),
+            };
+            if !owned.contains(&block) {
+                return Err("target range requires its own device-local expert bank".into());
+            }
+        }
     }
     let max_slots = u64::try_from(limits.max_launch_slots)
         .map_err(|_| "target request slot bound exceeds u64")?;
@@ -3249,8 +3434,9 @@ fn certify_target_family(
     .map_err(|_| "target segment class exceeds u64")?;
     let (tap_width, tapped) = block_taps(plan, geometry)?;
     let shapes = block_graph_shapes(load, geometry, state, &tapped)?;
-    let distinct_blocks = (0..shapes.len())
-        .filter(|&index| !(0..index).any(|earlier| shapes[earlier] == shapes[index]))
+    let distinct_blocks = owned
+        .clone()
+        .filter(|&index| !(owned.start..index).any(|earlier| shapes[earlier] == shapes[index]))
         .collect::<Vec<_>>();
     let row_classes = magnitude_batching::row_classes(limits.max_launch_rows)
         .into_iter()
@@ -3375,7 +3561,10 @@ fn certify_target_family(
                     .and_then(|template| template.certify(&slices))
                     .map_err(|error| format!("target block {index}: {error}"))?;
                 family.include(layout.storage_bytes(), constants);
-                blocks[index].insert((form, listed, scored), CertifiedBlockGraph { layout, owned });
+                blocks[index].insert(
+                    (form, listed, scored),
+                    CertifiedBlockGraph { layout, owned },
+                );
             }
         }
         // Row-class constants (`block::class_constants_of`).
@@ -3403,8 +3592,8 @@ fn certify_target_family(
             );
         }
     }
-    for index in 0..blocks.len() {
-        if let Some(first) = (0..index).find(|&first| shapes[first] == shapes[index]) {
+    for index in owned.clone() {
+        if let Some(first) = (owned.start..index).find(|&first| shapes[first] == shapes[index]) {
             blocks[index] = blocks[first].clone();
         }
     }
@@ -3414,7 +3603,7 @@ fn certify_target_family(
     // bounds the sealed block plans from both sides.
     let mixers = block_mixers(geometry)?;
     let enumerate = |unread| {
-        enumerate_block_graphs(
+        enumerate_block_graphs_in_range(
             backend,
             state,
             plan,
@@ -3424,6 +3613,7 @@ fn certify_target_family(
             &row_classes,
             max_slots,
             max_segments,
+            owned.clone(),
         )
     };
     let enumeration = enumerate(UnreadScales::Distinct)?;
@@ -3505,9 +3695,17 @@ fn certify_target_family(
     };
     // The draft input rows, the per-layer rows and the kept token rows the
     // family binds with its constants.
+    let mut upload_regions = vec![entries.values()
+        .map(|layout| layout.storage_bytes().upload).max().unwrap_or(0)];
+    if let Some(layout) = &per_layer {
+        upload_regions.push(layout.storage_bytes().upload);
+    }
+    upload_regions.extend(owned.clone().map(|index|
+        blocks[index].values().map(|graph| graph.layout.storage_bytes().upload)
+            .max().unwrap_or(0)));
     let mut resources = family.finish()?;
     let per_layer_rows = per_layer_rows_bytes(per_layer_rows(plan, largest_rows))?;
-    let token_rows = token_rows_bytes(token_rows_extents(load, largest_rows))?;
+    let token_rows = token_rows_bytes(token_rows_extents(load, largest_rows), limits.startup_slots().target.activations)?;
     resources.binding_constant_bytes = resources
         .binding_constant_bytes
         .checked_add(tap_buffer_bytes(tap_width, largest_rows, geometry)?)
@@ -3516,6 +3714,7 @@ fn certify_target_family(
         .ok_or("target binding charge overflows")?;
     Ok(TargetFamilyCertificate {
         resources,
+        upload_regions,
         sealed,
         entries,
         per_layer,
@@ -3631,6 +3830,27 @@ mod resource_template_tests {
                 .iter()
                 .all(|&(index, _, first)| index == 2 && first == 1)
         );
+        // Block 2 used block 1's graph in the unsplit decoder. On the second
+        // device it must seal its own graph, preserving its global index and
+        // the final block's hyper-connection exit.
+        let local = enumerate_block_graphs_in_range(
+            backend, &state, plan.target(), &block_mixers(geometry).unwrap(),
+            &shapes, BlockOutputScales::Planned(UnreadScales::Equal), &[1, 64],
+            limits.max_launch_slots as u64,
+            state.target_state().span_limit().next_power_of_two() as u64, 2..4,
+        ).unwrap();
+        assert!(local.sharing.is_empty());
+        assert!(local.sealing.iter().all(|&(index, _)| (2..4).contains(&index)));
+        assert!(local.sealing.iter().any(|&(index, _)| index == 2));
+        assert!(local.sealing.iter().any(|&(index, _)| index == 3));
+        let whole = certify_target_family(backend, &load, geometry, &state, plan.target(), limits).unwrap();
+        let local = certify_target_family_in_range(backend, &load, geometry, &state,
+            plan.target(), limits, 2..4).unwrap();
+        assert!(local.blocks[..2].iter().all(BTreeMap::is_empty));
+        assert!(local.blocks[2..].iter().all(|classes| !classes.is_empty()));
+        assert!(local.sealed.at_most.graphs < whole.sealed.at_most.graphs);
+        assert!(certify_target_family_in_range(backend, &load, geometry, &state,
+            plan.target(), limits, 4..5).is_err());
         for boundary in [0, 3] {
             assert!(
                 enumeration

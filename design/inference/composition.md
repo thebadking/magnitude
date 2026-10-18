@@ -25,7 +25,7 @@ Worker: one loaded model
   Execution owner          device, weights, numerical state and release policy
   Scheduler                admission, batching, time-shared prefill and decode, retention
   Generation               plain or proposal / verify / accept, sampling, constraint masks
-    Executor               family program over state storage on one Seismic device
+    Executor               family program over explicitly owned Seismic devices
 ```
 
 ## Construction
@@ -44,7 +44,11 @@ EngineConfiguration -> resolve -> ResolvedEngineConfiguration { host, manifest }
   worker has no vision graph for. Nothing opens a device or imports a tensor.
 - **Host artifacts** own chat semantics: tokenizer, templates and their inspection, input adapter
   and media placeholder policy. They stay on the host.
-- **The execution manifest** is owned and serializable; it is the only value a worker needs.
+- **The execution manifest** is owned and serializable; it is the only value a worker needs. An
+  optional decoder placement names complete contiguous ranges and exact device
+  selectors. The worker validates that partition before preparing each owner's
+  projected programs; every range imports only its physical inventory. State is
+  allocated once across owners after each heap grants its own startup claim.
 - **Preview** plans against current devices without opening or allocating anything.
 - **Load** runs the same worker either in-process over a channel transport (engine CLI, tests) or
   in a worker process over framed standard streams (the service). The worker protocol and the

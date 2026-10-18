@@ -1,5 +1,5 @@
 // Maps the gate element macros (SG source, EGW dest) to the CONV_* namespace
-// expected by convert_tile.cuh, emits `conv_down()`, then cleans up.
+// expected by convert_tile.inc, emits `conv_down()`, then cleans up.
 // No include guard — designed to be included once per compilation unit.
 
 // ---- Format detection (SG source + EGW dest) ----------------------------
@@ -65,13 +65,20 @@
 #  define CONV_REPACK_IQ3XXS 1
 #  define CONV_REPACK_GRID_FACTOR 0.25f
 #  define CONV_CODE_BITS 3u
+#  define CONV_REPACK_GRID_AUX(b) (66u + 4u * (b))
+#elif defined(SEISMIC_ELEMENT_SD_REPRESENTATION_GGUF_IQ2_XXS) && defined(SEISMIC_ELEMENT_EDW_REPRESENTATION_IQ2XXS)
+#  define CONV_REPACK_GRID 1
+#  define CONV_REPACK_IQ2XXS 1
+#  define CONV_REPACK_GRID_FACTOR 0.125f
+#  define CONV_CODE_BITS 2u
+#  define CONV_REPACK_GRID_AUX(b) (6u + 8u * (b))
 #else
 #  error "bind_down.cuh: no known SD->EDW conversion pair"
 #endif
 
 // ---- Geometry and strides -----------------------------------------------
-#define CONV_N                SEISMIC_DIM_F
-#define CONV_K                SEISMIC_DIM_H
+#define CONV_N                SEISMIC_DIM_H
+#define CONV_K                SEISMIC_DIM_F
 #define CONV_SRC_PACKET_SIZE  SEISMIC_ELEMENT_SD_PACKET_SIZE
 #define CONV_SRC_PACKET_GROUP SEISMIC_ELEMENT_SD_LOGICAL_GROUP
 // Staging strides (used by copy_window to read from the staging buffer).
@@ -181,7 +188,7 @@
 
 // ---- Emit the tile function named conv_down ------------------------------
 #define CONV_FUNC conv_down
-#include "convert_tile.cuh"
+#include "convert_tile.inc"
 #undef CONV_FUNC
 
 // ---- Cleanup CONV_* macros -----------------------------------------------
@@ -196,6 +203,8 @@
 #undef CONV_REPACK_NVFP4
 #undef CONV_REPACK_GRID
 #undef CONV_REPACK_IQ3XXS
+#undef CONV_REPACK_IQ2XXS
+#undef CONV_REPACK_GRID_AUX
 #undef CONV_REPACK_E2M1
 #undef CONV_REPACK_HIGH_BIT
 #undef CONV_REPACK_SCALE_BYTES

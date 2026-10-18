@@ -404,8 +404,9 @@ pub struct MappedImportReport {
 }
 
 /// Observes a component import in resident bytes: completed, then total. A
-/// refusal halts the import before its next weight.
-pub type ImportObserver = Box<dyn FnMut(u64, u64) -> Result<(), ClaimRefusal>>;
+/// refusal halts the import before its next weight. The final flag requests an
+/// immediate domain observation at an allocation phase boundary.
+pub type ImportObserver = Box<dyn FnMut(u64, u64, bool) -> Result<(), ClaimRefusal>>;
 
 /// The resident bytes of the component import in progress and where they are
 /// reported.
@@ -421,7 +422,10 @@ pub struct ResidencyStore {
     shared_bank: Option<crate::streaming::shared_bank::SharedBankStore>,
     device: Rc<Device>,
     programs: Rc<crate::native::AttestedPrograms>,
-    execution: ExecutionPlan,
+    load: crate::ModelLoadPlan,
+    path: crate::ExecutionPath,
+    import_peak_bytes: u64,
+    owned_blocks: Option<(std::ops::Range<usize>, usize)>,
     domain: ResourceDomainId,
     resident: HashMap<ResidencyKey, ResidentWeight>,
     mapped_import: MappedImportReport,
@@ -440,21 +444,46 @@ impl ResidencyStore {
         if !programs.belongs_to(&device)
             || execution.device().backend() != device.backend()
             || execution.device().name() != device.info().name
+            || execution.device().selector() != device.info().selector
         {
             return Err(invalid(
                 "attested programs, selected plan, and residency device differ",
             ));
         }
-        let shared_bank = execution.load().expert_bank()
+        Self::with_import_plan(device, programs, execution.load().clone(), execution.policy().path(),
+            execution.resources().qualification_peak_bytes(), None, domain)
+    }
+
+    /// Materialize one device's projected physical inventory. The caller must
+    /// admit its weight charge and import peak beside local graph/state charges.
+    pub fn new_range(
+        device: Rc<Device>,
+        programs: Rc<crate::native::AttestedPrograms>,
+        plan: &crate::DecoderRangeLoadPlan,
+        domain: ResourceDomainId,
+    ) -> Result<Self, WeightImportError> {
+        if !programs.belongs_to(&device) || plan.range().device != device.info().selector {
+            return Err(invalid("decoder range, attested kernels and opened residency device differ"));
+        }
+        Self::with_import_plan(device, programs, plan.physical_load().clone(), crate::ExecutionPath::Native,
+            plan.import_peak_bytes(), Some((plan.range().blocks.clone(), plan.decoder_blocks())), domain)
+    }
+
+    fn with_import_plan(
+        device: Rc<Device>,
+        programs: Rc<crate::native::AttestedPrograms>,
+        load: crate::ModelLoadPlan,
+        path: crate::ExecutionPath,
+        import_peak_bytes: u64,
+        owned_blocks: Option<(std::ops::Range<usize>, usize)>,
+        domain: ResourceDomainId,
+    ) -> Result<Self, WeightImportError> {
+        let shared_bank = load.expert_bank()
             .filter(|bank| bank.shared.is_some())
             .map(crate::streaming::shared_bank::SharedBankStore::new)
             .transpose().map_err(invalid)?;
         Ok(Self {
-            shared_bank,
-            device,
-            programs,
-            execution,
-            domain,
+            shared_bank, device, programs, load, path, import_peak_bytes, owned_blocks, domain,
             resident: HashMap::new(),
             mapped_import: MappedImportReport::default(),
             import_progress: None,
@@ -479,7 +508,16 @@ impl ResidencyStore {
                 .completed
                 .saturating_add(storage_bytes)
                 .min(progress.total);
-            (progress.observer)(progress.completed, progress.total)
+            (progress.observer)(progress.completed, progress.total, false)
+                .map_err(WeightImportError::Refused)?;
+        }
+        Ok(())
+    }
+
+    /// Refresh admission between host storage and device storage allocation phases.
+    pub(crate) fn import_checkpoint(&mut self) -> Result<(), crate::ResidencyError> {
+        if let Some(progress) = &mut self.import_progress {
+            (progress.observer)(progress.completed, progress.total, true)
                 .map_err(WeightImportError::Refused)?;
         }
         Ok(())
@@ -497,7 +535,7 @@ impl ResidencyStore {
             .arenas(&self.device, group)
     }
     pub fn belongs_to(&self, device: &Device) -> bool {
-        self.device.info().id == device.info().id
+        self.device.same_device(device)
     }
     pub fn len(&self) -> usize {
         self.resident.len()
@@ -533,7 +571,7 @@ impl ResidencyStore {
         descriptor: &WeightDescriptor,
     ) -> Result<Option<ResidentWeight>, WeightImportError> {
         let Some(plan) = self
-            .execution
+            .load
             .weights()
             .find(|weight| {
                 weight.component.identity == artifact.identity()
@@ -678,14 +716,12 @@ impl ResidencyStore {
 
     /// The load plan this store imports.
     pub(crate) fn load_plan(&self) -> &crate::ModelLoadPlan {
-        self.execution.load()
+        &self.load
     }
 
     /// The imported physical view selected for an explicit semantic weight role.
     pub(crate) fn planned(&self, role: WeightRole) -> Option<&WeightPlan> {
-        self.execution
-            .load()
-            .weights()
+        self.load.weights()
             .find(|weight| weight.role == role)
     }
 
@@ -698,7 +734,7 @@ impl ResidencyStore {
         descriptor: &WeightDescriptor,
     ) -> Result<ResidentWeight, WeightImportError> {
         let planned = self
-            .execution
+            .load
             .weights()
             .find(|weight| {
                 weight.component.identity == artifact.identity() && weight.descriptor == *descriptor
@@ -758,7 +794,7 @@ impl ResidencyStore {
         descriptor: &WeightDescriptor,
     ) -> Result<ResidentWeight, WeightImportError> {
         let target = self
-            .execution
+            .load
             .weights()
             .find(|weight| {
                 weight.component.identity == artifact.identity() && weight.descriptor == *descriptor
@@ -822,12 +858,12 @@ impl ResidencyStore {
         descriptor: &WeightDescriptor,
     ) -> Result<Option<ResidentWeight>, WeightImportError> {
         let Some(planned) = self
-            .execution
+            .load
             .weights()
             .find(|weight| {
                 weight.component.identity == artifact.identity() && weight.descriptor == *descriptor
             })
-            .filter(|weight| self.execution.load().banked(weight.role))
+            .filter(|weight| self.load_plan().banked(weight.role))
             .cloned()
         else {
             return Ok(None);
@@ -871,7 +907,7 @@ impl ResidencyStore {
         window: Option<&ImportWindow>,
     ) -> Result<ImportPreparation, WeightImportError> {
         let planned = self
-            .execution
+            .load
             .weights()
             .find(|weight| {
                 weight.component.identity == artifact.identity() && weight.descriptor == *descriptor
@@ -900,8 +936,8 @@ impl ResidencyStore {
             .source_element()
             .ok_or_else(|| invalid("unsupported source representation"))?;
         let layout = crate::resident_layout(
-            self.execution.policy().path(),
-            self.execution.device().backend(),
+            self.path,
+            self.device.backend(),
         );
         // The plan dequantizes a packed weight on the host when its kernels
         // read dense weights only: it uploads F32 and becomes dense.
@@ -963,7 +999,8 @@ impl ResidencyStore {
         let destination = ResidentWeightSlot::new(&planned, &self.device, tensor)
             .map_err(WeightImportError::Invariant)?;
         let workspace = ResourceAllocator::import_workspace(
-            &self.execution,
+            &self.load,
+            self.import_peak_bytes,
             &planned,
             stored,
             window,
@@ -1079,7 +1116,7 @@ impl ResidencyStore {
         for plan in weights.iter().filter(|plan| {
             !plan.placed_on_host()
                 && plan.streamed.is_none()
-                && !self.execution.load().banked(plan.role)
+                && !self.load_plan().banked(plan.role)
         }) {
             if !seen.insert(plan.storage_identity()) {
                 continue;
@@ -1139,7 +1176,7 @@ impl ResidencyStore {
                 last += 1;
             }
             let mapping = Instant::now();
-            let window = ImportWindow::new(&self.execution, &self.device, source, start, end)
+            let window = ImportWindow::new(self.import_peak_bytes, &self.device, source, start, end)
                 .map_err(WeightImportError::Allocation)?;
             report.mapping += mapping.elapsed();
             report.windows += 1;
@@ -1243,7 +1280,10 @@ impl ResidencyStore {
         mut observer: ImportObserver,
     ) -> Result<crate::ResidentTarget, crate::ResidencyError> {
         crate::resident_weights::validate_definition_package(definition, package)?;
-        let weights = self.execution.load().target().to_vec();
+        if self.owned_blocks.as_ref().is_some_and(|(_, blocks)| *blocks != definition.decoder.blocks.len()) {
+            return Err(crate::ResidencyError::Invalid("range import differs from the planned decoder extent".into()));
+        }
+        let weights = self.load_plan().target().to_vec();
         let mut storage = HashSet::new();
         let total = weights
             .iter()
@@ -1251,12 +1291,13 @@ impl ResidencyStore {
             .map(WeightPlan::storage_bytes)
             .sum::<Result<u64, String>>()
             .map_err(crate::ResidencyError::Invalid)?;
-        observer(0, total).map_err(WeightImportError::Refused)?;
+        observer(0, total, true).map_err(WeightImportError::Refused)?;
         self.import_progress = Some(ImportProgress {
             completed: 0,
             total,
             observer,
         });
+        let owned_blocks = self.owned_blocks.as_ref().map(|(blocks, _)| blocks.clone());
         let target = self
             .preload_components(
                 package,
@@ -1264,13 +1305,13 @@ impl ResidencyStore {
                 crate::resident_weights::activation_dtype(definition.decoder.activation_dtype),
             )
             .map_err(crate::ResidencyError::from)
-            .and_then(|()| crate::resident_weights::import_target(definition, package, self));
+            .and_then(|()| crate::resident_weights::import_target(definition, package, self, owned_blocks.as_ref()));
         let mut progress = self
             .import_progress
             .take()
             .expect("the target import owns its progress");
         if target.is_ok() && progress.completed < progress.total {
-            (progress.observer)(progress.total, progress.total)
+            (progress.observer)(progress.total, progress.total, true)
                 .map_err(WeightImportError::Refused)?;
         }
         target
@@ -1282,7 +1323,7 @@ impl ResidencyStore {
         package: &magnitude_artifacts::Package,
     ) -> Result<Option<crate::ResidentHead>, crate::ResidencyError> {
         crate::resident_weights::validate_definition_package(definition, package)?;
-        if let Some(weights) = self.execution.load().head().map(|weights| weights.to_vec()) {
+        if let Some(weights) = self.load_plan().head().map(|weights| weights.to_vec()) {
             // A draft head's weights are the target's; a separate draft's
             // are its own component's, beside the target's tied ones.
             self.preload_components(
@@ -1301,8 +1342,7 @@ impl ResidencyStore {
     ) -> Result<Option<crate::ResidentVision>, crate::ResidencyError> {
         crate::resident_weights::validate_definition_package(definition, package)?;
         if let (Some(weights), Some(projector)) = (
-            self.execution
-                .load()
+            self.load
                 .vision()
                 .map(|weights| weights.to_vec()),
             package.projector(),
@@ -1428,8 +1468,7 @@ impl ComponentLoader<crate::ResidentHead> {
         }
         let mut store = self.store.borrow_mut();
         let target = store
-            .execution
-            .load()
+            .load
             .target()
             .iter()
             .map(|weight| ResidencyKey {

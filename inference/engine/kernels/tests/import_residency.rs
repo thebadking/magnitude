@@ -723,7 +723,16 @@ fn repack_matches_the_registered_conversion(device: &seismic::Device, layouts: &
 /// layout; unlisted slots are untouched.
 #[test]
 fn metal_convert_places_what_the_import_places() {
-    let Some(device) = device(seismic::BackendName::Metal) else {
+    convert_places_what_the_import_places(seismic::BackendName::Metal);
+}
+
+#[test]
+fn cuda_convert_places_what_the_import_places() {
+    convert_places_what_the_import_places(seismic::BackendName::Cuda);
+}
+
+fn convert_places_what_the_import_places(backend: seismic::BackendName) {
+    let Some(device) = device(backend) else {
         return;
     };
     let words = |values: &[i32]| values.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
@@ -733,9 +742,12 @@ fn metal_convert_places_what_the_import_places() {
     };
     let step = i32s(&[7]);
     for (source_name, resident) in FORMATS {
+        if backend == seismic::BackendName::Cuda && !["gguf_q4_k", "gguf_q6_k"].contains(&source_name) {
+            continue;
+        }
         let source_element = seismic::Element::named(source_name).unwrap();
         let group = source_element.logical_group().unwrap();
-        let (records, slots, n, k) = (3u64, 4u64, 17u64, 3 * group);
+        let (records, slots, n, k) = (3u64, 4u64, 17u64, if backend == seismic::BackendName::Cuda { 10 * group } else { 3 * group });
         let shape = [records, n, k];
         let length = source_element.canonical_byte_len(&shape).unwrap();
         let bytes = source_bytes(length, n as u32 + 7);
@@ -750,6 +762,9 @@ fn metal_convert_places_what_the_import_places() {
             seismic::Layout::Rows32,
             seismic::Layout::Mma16,
         ] {
+            if backend == seismic::BackendName::Cuda && layout == seismic::Layout::Rows32 {
+                continue;
+            }
             let Some(destination) = seismic::Element::stored(resident, layout) else {
                 continue;
             };

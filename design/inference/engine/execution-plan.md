@@ -352,8 +352,12 @@ its checked size over the admitted classes, evaluating each size expression only
 combinations of the class dimensions it reads, never across whole graphs. It places those
 capacities once and certifies fixed offsets that production reuses for every exact class of the
 regime. A class whose topology or checked size exceeds its certified layout fails preparation.
-The family charge takes independent workspace, output, and upload maxima across the certified
-layouts and counts each distinct bound constant once. Zero bases remain symbolic while assessing
+The family charge takes independent workspace and output maxima across the certified
+layouts and counts each distinct bound constant once. Target upload regions are sized
+separately for the entry, optional per-layer entry and each owned block, across that
+stage's admitted classes. Assessment and allocation use the same capacity list and
+charge its sum per activation; a large entry cannot multiply every block's upload cost.
+Zero bases remain symbolic while assessing
 and sealing classes; neither stage materializes a host matrix per class. Binding allocates one
 zero-filled device tensor per distinct element and shape, with the same byte charge and storage
 identity as an explicit all-zero constant. A checked contract that cannot be evaluated fails
@@ -414,7 +418,10 @@ weights), and adds the routed sum to a base row that already holds the residual 
 expert's output. A zero base serves a routed sum that is normalized alone or projected out of a
 latent width. Its grouped capacity counts at most min(E, M·K) receiving experts. Seismic prepares an
 exact workflow for the selected physical batch class, so a small decode batch does not execute the
-maximum class width. Draft head blocks use their declared dense or routed feed-forward geometry
+maximum class width. Expert streaming consumes the same declared input form as resident routing:
+one RMS-normalized residual row, or a mix site's partial rows summed without another norm.
+Its hints use that same form, and graph sharing includes whether the hinted norm exists.
+Draft head blocks use their declared dense or routed feed-forward geometry
 and the same routed numerical composition as target blocks. Header assessment includes the head's
 routed weights, program entries, and class-dependent workspace before residency begins. A causal
 head's residual form determines its mix/scatter entries and its conditioning width and
@@ -796,3 +803,138 @@ both a dense sublayer and a dense branch beside routing; tuning uses the same
 function that serving calls. The tuning identity includes the function for
 paired and up-only expansion, so numerical evidence for SiLU cannot be reused
 for GELU-tanh or another consumer.
+
+## Decoder device placement
+
+A decoder placement is an ordered, complete partition of global decoder block
+indices into nonempty contiguous ranges. Each range names a distinct stable
+device selector. Placement never renumbers semantic layers, weight roles, or
+recurrent components. The entry belongs to the first range and the readout to
+the last. Device-specific kernel selection continues to use each opened device's
+attestation and tuning identity.
+
+History is partitioned by range before slab geometry and graph contracts are
+projected. Attention and indexer components preserve their semantic identities;
+recurrent components carry their block owner explicitly, including n-gram state.
+A Shared history reader must reside with its source unless a separate history
+transport is implemented. A residual transfer does not authorize remote history
+bindings.
+
+Expert cache projection retains only the routed layers of one range. Its staging
+pools and scratch forms are compacted and remapped, compatible cache groups are
+formed locally, and conveyor loans are recomputed from local capacities. A
+held parent conveyor remains held: range projection cannot reintroduce a loan
+from dedicated device memory into staging that the host must address.
+Owners may derive different source cache capacities from independent device
+assessments. Shared state validation compares their complete original model
+inventories, restoring expert weights before cache placement; it does not require
+identical source cache sizes or staging policies. Draft projection still requires
+its exact assessed source plan, and artifact identity, tensor representation,
+shape and all non-cache holdings must agree.
+A parent cache's capacities or lender cannot implicitly become another GPU's
+allocation authority. Physical admission must account for each resulting cache,
+including any additional staging or scratch allocation introduced by the split.
+Each physical cache needs its own directory, watcher and completion clock.
+Expert file reads follow the host platform's I/O policy. macOS uncached reads
+use a block-aligned cover buffer before copying the exact record into staging.
+The current Linux buffered path uses random-access advice and reads the exact
+record directly into its ticket-owned staging region; it does not need an
+alignment buffer or an extra host copy. Neither path publishes a record before
+all of its reads complete successfully. A fetch timeout does not cancel an
+in-progress file write: failed scratch rounds retain their staging through ticket
+completion before reuse, and shutdown joins source workers before releasing
+staging. Fetch failures preserve the layer and source error or outstanding read
+state so an idle expiry can be distinguished from a completed failed read.
+Scratch failures identify the round and distinguish source liveness, staging
+exhaustion and a missing device arrival. Invalid CUDA routes fail the step
+before indexing the expert directory; their bounded scratch results cannot commit.
+On CUDA, ready compressed source records pass through three bounded device
+arenas before conversion. Encodings of one tensor kind share an arena because
+only one layer consumes it at a time. Capacity covers two scratch rounds and
+the maximum decode union; the complete device charge participates in cache
+admission. Scratch rounds alternate disjoint windows and reuse one only after
+the following arrival proves its previous conversion complete. Decode assigns
+distinct source slots per absent expert, copying only after the file ticket
+completes and publishing readiness only after the transfer completes. A failed
+transfer publishes failure and keeps its source lifetime through completion.
+No device source arena is a host-addressable conveyor loan.
+CUDA conversion, copy and seed lists have device-local mirrors published in
+full before the corresponding readiness gate. Their step counter is also
+device-local. Bulk consumers do not repeatedly fetch immutable list metadata
+from mapped host memory. Mirrors are charged model holdings; host control and
+publication storage retain their separate host RAM charge. Reuse requires the
+same prior-consumer completion proof as source-window reuse.
+Source liveness is measured from range starts and completions, not from the
+whole batch's submission: a progressing batch may outlast one idle interval.
+Waiting for the device to release a scratch round keeps its separate handshake
+bound. Neither a priority promotion nor polling counts as source progress.
+Decode placements address the decode staging shelf. A pending conveyor read
+needed by decode completes before its bytes move into that shelf; its original
+destination stays owned until the read ends. A conveyor record index must never
+be interpreted relative to a decode-only buffer.
+The two live scratch rounds leave the admitted hint window available in each
+staging pool. Small members of a layer-major prompt group can publish decode
+hints while the other members use scratch; the two uses cannot each claim the
+same staging capacity.
+Host-staged dedicated devices hold a conveyor window of two scratch rounds,
+capped by the expert count. Rounds replenish that window as conversion releases
+records, so pinning one full layer per source encoding cannot displace the host
+model cache. Borrowed unified-memory conveyors retain their whole-layer window.
+The planned window count governs allocation, admission, graph bindings and the
+watcher's record inventory; range projection preserves it with the shelf policy.
+Each local layer seeds its cache at the group's last scratch-served member,
+before any decode tail. Submission derives this boundary from the actual graph
+row classes, including a stateless tail's reduced readout window. Optional
+seeding respects the layer's share after protecting both current hits and kept
+resident experts; pinned hits cannot authorize taking another layer's share.
+Seed boundaries expire with the group's progress, independently of the last
+member that keeps its conveyor records alive.
+Startup sizes each local shared cache against that owner's assessed device
+weight budget. It enumerates exact local inventories from full local expert
+capacity downward, excluding host-shared staging from dedicated
+device charge. The source assessment preserves graph/state headroom; the final
+range admission independently checks graphs, state, boundary buffers and import
+peak before any allocation. Splitting decoder blocks does not divide the device's
+weight budget between owners.
+
+Graph enumeration and resource certification accept the same global block range.
+A graph may be shared only with an equivalent earlier block inside that range;
+its shape, output scales, history layout and boundary operations remain part of
+that decision. Every certified block outside the range has no graph classes.
+Host binding vectors retain global block indexing and their actual allocation
+is charged, including empty entries. A range's prepared family reports its own
+run count and ownership; a whole-decoder submission cannot accept a partial
+family. Expert prefetch predictors may name later layers only inside the same
+physical cache range. Their norm, router and directory ports must all belong to
+the executing device. Range-local cache metadata determines the predictor
+topology in both certification and sealing.
+The residual predictor applies only to a single residual row under the future
+layer's input norm. Already normalized mixed partials contain their own site's
+learned stream mix; they do not authorize forecasting a later site's router
+from that input. Such forms use demand streaming and the prompt conveyor.
+
+State resource planning consumes decoder placement before deriving history
+geometry. The resulting plan carries stored-domain and recurrent-component
+owners through allocation. Logical history, request and retention ceilings are
+bounded by each device's capacity divided by its own state cost, taking the
+most constrained owner; capacity on a peer never pays a local allocation.
+Startup charge projections group recurrent components by owner and include each
+group's alignment and address table. Allocation verifies the opened selectors
+against placement and compares physical backing with those projections.
+Aggregate state fit and single-device admission reject distributed state plans.
+
+A range's graph load metadata retains outside layers in their resident form for
+global topology derivation, while only local layers have streamed cache metadata.
+Physical admission and import must select the owned graph roles from that
+metadata; the full metadata slice is not a per-device resident weight inventory.
+
+A decoder range load plan exposes its graph metadata and physical inventory
+separately. Its physical weight charge includes local expert groups and their
+staging/scratch holdings, and its import peak covers local source staging and
+qualification. Range residency consumes the physical inventory; retaining
+outside roles for graph derivation never authorizes importing those roles. Draft projection
+checks the original inventory, model extent and selected device before deriving
+local program bindings. Final range admission stores physical holdings in the
+execution plan while retaining those global-indexed program bindings, and a
+noninitial owner requires admitted boundary storage. Ordinary whole-decoder
+admission cannot accept range resources.

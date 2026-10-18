@@ -5,6 +5,9 @@ use super::*;
 use crate::programs::SubmittedTarget;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// Every physical owner participating in one target diagnostic scope.
+pub(super) type TargetSubmissionTrace = Vec<(seismic::DeviceSelector, seismic::SubmissionTrace)>;
+
 static TARGET_PREFILL_LAUNCH_TRACED: AtomicBool = AtomicBool::new(false);
 static TARGET_VERIFY_LAUNCH_TRACED: AtomicBool = AtomicBool::new(false);
 
@@ -27,7 +30,7 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
     pub(super) fn trace_target_submission(
         &self,
         operations: &[Operation],
-    ) -> Option<seismic::SubmissionTrace> {
+    ) -> Option<TargetSubmissionTrace> {
         let trace_position = std::env::var("MAGNITUDE_TRACE_TARGET_PREFILL_MIN_POSITION")
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
@@ -58,14 +61,23 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
             None
         };
         if let Some(traced) = traced {
-            match self.domain.device().trace_submissions(
-                if std::env::var("MAGNITUDE_TRACE_TARGET_DETAIL").as_deref() == Ok("submissions") {
-                    seismic::TraceDetail::Submissions
-                } else {
-                    seismic::TraceDetail::Launches
-                },
-            ) {
-                Ok(trace) => Some(trace),
+            let detail = if std::env::var("MAGNITUDE_TRACE_TARGET_DETAIL").as_deref() == Ok("submissions") {
+                seismic::TraceDetail::Submissions
+            } else {
+                seismic::TraceDetail::Launches
+            };
+            let mut devices = vec![self.domain.device().clone()];
+            if let Some(peer) = &self.peer {
+                devices.push(peer.memory.borrow().device().as_ref().clone());
+            }
+            // Create every scope before submitting either range. If a peer
+            // refuses tracing, dropping the partial collection releases all
+            // scopes so this flight cannot be misreported as a whole trace.
+            let traces = devices.into_iter().map(|device| {
+                device.trace_submissions(detail).map(|trace| (device.info().selector, trace))
+            }).collect::<Result<TargetSubmissionTrace, _>>();
+            match traces {
+                Ok(traces) => Some(traces),
                 Err(error) => {
                     traced.store(false, Ordering::Relaxed);
                     eprintln!("target launch attribution unavailable: {error}");
@@ -134,7 +146,7 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
             }
         };
         let group = match self.behind(operations) {
-            Behind::Group(chunks) => self.build_group(&first, priming.as_ref(), chunks),
+            Behind::Group(chunks) => self.build_group(&first, operations, priming.as_ref(), chunks),
             Behind::Nothing | Behind::Successor { .. } => Ok((Vec::new(), Vec::new())),
         };
         let (launches, pending) = match group {
@@ -378,7 +390,7 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
             demand |= *next;
             segments = segments.max(reserved_segments(
                 &self.target_store,
-                advance.span_count(),
+                |domain| advance.domain_span_count(domain),
                 tokens.len(),
             ));
         }
@@ -531,55 +543,57 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
             .map(|priming| self.finish_priming_work(priming))
             .transpose()?
             .flatten();
-        if let Some(trace) = &flight.launch_trace {
-            let submissions = trace
-                .collect()
-                .map_err(|error| DomainError::Input(error.to_string()))?;
-            let mut entries = BTreeMap::<String, (usize, f64)>::new();
-            let mut geometry =
-                BTreeMap::<(String, usize, [u64; 3], [u64; 3], u64), (usize, usize, f64)>::new();
-            eprintln!("target trace scope: {} submissions", submissions.len());
-            for submission in submissions {
-                for launch in submission.launches {
-                    if let Some(physical) = launch.geometry {
-                        let entry = geometry
-                            .entry((
-                                launch.entry.clone(),
-                                launch.launch,
-                                physical.workgroups,
-                                physical.threads_per_workgroup,
-                                physical.shared_bytes,
-                            ))
-                            .or_default();
-                        entry.0 += 1;
-                        entry.1 = entry.1.max(launch.occurrence + 1);
+        if let Some(traces) = &flight.launch_trace {
+            for (device, trace) in traces {
+                let submissions = trace
+                    .collect()
+                    .map_err(|error| DomainError::Input(error.to_string()))?;
+                let mut entries = BTreeMap::<String, (usize, f64)>::new();
+                let mut geometry =
+                    BTreeMap::<(String, usize, [u64; 3], [u64; 3], u64), (usize, usize, f64)>::new();
+                eprintln!("target trace scope: device={device:?} {} submissions", submissions.len());
+                for submission in submissions {
+                    for launch in submission.launches {
+                        if let Some(physical) = launch.geometry {
+                            let entry = geometry
+                                .entry((
+                                    launch.entry.clone(),
+                                    launch.launch,
+                                    physical.workgroups,
+                                    physical.threads_per_workgroup,
+                                    physical.shared_bytes,
+                                ))
+                                .or_default();
+                            entry.0 += 1;
+                            entry.1 = entry.1.max(launch.occurrence + 1);
+                            if let Some((start, end)) = launch.device {
+                                entry.2 += (end - start) * 1_000.0;
+                            }
+                        }
                         if let Some((start, end)) = launch.device {
-                            entry.2 += (end - start) * 1_000.0;
+                            let label = if launch.launch == 0 {
+                                launch.entry
+                            } else {
+                                format!("{}#{}", launch.entry, launch.launch)
+                            };
+                            let entry = entries.entry(label).or_default();
+                            entry.0 += 1;
+                            entry.1 += (end - start) * 1_000.0;
                         }
                     }
-                    if let Some((start, end)) = launch.device {
-                        let label = if launch.launch == 0 {
-                            launch.entry
-                        } else {
-                            format!("{}#{}", launch.entry, launch.launch)
-                        };
-                        let entry = entries.entry(label).or_default();
-                        entry.0 += 1;
-                        entry.1 += (end - start) * 1_000.0;
-                    }
                 }
-            }
-            let mut entries = entries.into_iter().collect::<Vec<_>>();
-            entries.sort_by(|a, b| b.1.1.total_cmp(&a.1.1));
-            for ((entry, launch, groups, threads, shared), (count, occurrences, gpu_ms)) in geometry
-            {
-                eprintln!(
-                    "target geometry entry={entry} launch={launch} groups={groups:?} threads={threads:?} shared_bytes={shared} count={count} max_occurrences={occurrences} gpu_ms={gpu_ms:.3}"
-                );
-            }
-            eprintln!("target timed launch attribution (trace scope):");
-            for (entry, (launches, ms)) in entries {
-                eprintln!("  {entry}: {ms:.3} ms across {launches} launches");
+                let mut entries = entries.into_iter().collect::<Vec<_>>();
+                entries.sort_by(|a, b| b.1.1.total_cmp(&a.1.1));
+                for ((entry, launch, groups, threads, shared), (count, occurrences, gpu_ms)) in geometry
+                {
+                    eprintln!(
+                        "target geometry entry={entry} launch={launch} groups={groups:?} threads={threads:?} shared_bytes={shared} count={count} max_occurrences={occurrences} gpu_ms={gpu_ms:.3}"
+                    );
+                }
+                eprintln!("target timed launch attribution (trace scope, device={device:?}):");
+                for (entry, (launches, ms)) in entries {
+                    eprintln!("  {entry}: {ms:.3} ms across {launches} launches");
+                }
             }
         }
         let finish_started = Instant::now();
@@ -611,11 +625,11 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
             boundary,
             selected_rows: _,
             stored_reads: _,
-            bank_step,
+            bank_steps,
         } = output;
-        if let Some(step) = bank_step {
-            step.complete().map_err(DomainError::Streaming)?;
-        }
+        bank_steps.into_iter()
+            .fold(Ok(()), |outcome, step| outcome.and(step.complete()))
+            .map_err(DomainError::Streaming)?;
         let batch = core.batch();
         if batch.actual_slots() != flight.requests.len() {
             return Err("completed target slot count differs from submitted requests".into());
@@ -1419,24 +1433,30 @@ impl SlotAppends {
     }
 }
 
-/// The history ranges a launch reserves per row for an advance of `rows`
-/// rows over a state of `spans` accepted ranges: those ranges, and for a
-/// store with Shared reads (`shared_read_history`) the ranges of the rows
-/// the advance appends, at most one per slab they touch.
-pub(super) fn reserved_segments(store: &StateStore, spans: usize, rows: usize) -> usize {
-    // A Shared reader also sees the rows its source appends in the advance:
-    // the rest of the source's last page, then whole pages (see
-    // `magnitude_state::history_geometry`).
-    spans
-        + store
-            .shared_source_domains()
-            .into_iter()
-            .chain(store.history_domains().filter(|&domain| {
-                rows > 1 && (cached_causal_domain(store, domain) || indexer_domain(store, domain))
-            }))
-            .map(|domain| rows.div_ceil(store.history_page_rows(domain)) + 1)
-            .max()
-            .unwrap_or(0)
+/// The largest per-domain history a launch reads. Accepted ranges and
+/// appended ranges must belong to the same domain: summing their independent
+/// maxima can exceed the sealed class despite every physical domain fitting.
+pub(super) fn reserved_segments(
+    store: &StateStore,
+    spans: impl Fn(magnitude_state::HistoryDomainId) -> usize,
+    rows: usize,
+) -> usize {
+    let shared = store.shared_source_domains();
+    store
+        .history_domains()
+        .map(|domain| {
+            let appended = shared.contains(&domain)
+                || (rows > 1
+                    && (cached_causal_domain(store, domain) || indexer_domain(store, domain)));
+            spans(domain)
+                + if appended {
+                    rows.div_ceil(store.history_page_rows(domain)) + 1
+                } else {
+                    0
+                }
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 /// The accepted-history ranges row `index` of `advance` reads in stored

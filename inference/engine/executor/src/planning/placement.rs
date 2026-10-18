@@ -1,0 +1,354 @@
+//! Decoder ownership independent of device allocation and graph preparation.
+use magnitude_state::{HistoryDomainLayout, LayerRef, ModelStateLayout};
+use seismic::DeviceSelector;
+use std::ops::Range;
+
+/// One contiguous range of global decoder blocks on one physical device.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DecoderRange {
+    pub device: DeviceSelector,
+    pub blocks: Range<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DecoderPlacement {
+    ranges: Vec<DecoderRange>,
+}
+
+/// Domain owners index the placement's ranges. Recurrent owners retain the
+/// original component order, including n-gram banks following their mixer.
+pub struct PlacedStateLayout {
+    pub layout: ModelStateLayout,
+    pub history_owners: Vec<usize>,
+    pub recurrent_owners: Vec<usize>,
+}
+
+/// Graph metadata and physical holdings of one device. Outside block metadata
+/// is retained only for deriving global topology, never for physical import.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DecoderRangeLoadPlan {
+    range: DecoderRange,
+    decoder_blocks: usize,
+    source_load: super::ModelLoadPlan,
+    graph_load: super::ModelLoadPlan,
+    physical_load: super::ModelLoadPlan,
+    weight_bytes: u64,
+    import_peak_bytes: u64,
+}
+
+impl DecoderRangeLoadPlan {
+    pub fn source_load(&self) -> &super::ModelLoadPlan { &self.source_load }
+
+    pub(super) fn derives_from(&self, load: &super::ModelLoadPlan) -> bool {
+        &self.source_load == load
+    }
+
+    /// Distributed state is common to the model, while each owner's cache
+    /// capacity and host staging were admitted against that owner's device.
+    pub(super) fn shares_model_inventory(&self, load: &super::ModelLoadPlan) -> bool {
+        self.derives_from(load)
+            || self.source_load.resident_inventory() == load.resident_inventory()
+    }
+
+    pub fn range(&self) -> &DecoderRange {
+        &self.range
+    }
+    pub fn decoder_blocks(&self) -> usize {
+        self.decoder_blocks
+    }
+    pub fn graph_load(&self) -> &super::ModelLoadPlan {
+        &self.graph_load
+    }
+    pub fn physical_load(&self) -> &super::ModelLoadPlan {
+        &self.physical_load
+    }
+    pub fn weight_bytes(&self) -> u64 {
+        self.weight_bytes
+    }
+    pub fn import_peak_bytes(&self) -> u64 {
+        self.import_peak_bytes
+    }
+}
+
+impl DecoderPlacement {
+    /// Spend this owner's already assessed weight budget on its local cache.
+    /// The source plan reserves graph/state headroom independently; final range
+    /// admission still checks the complete physical allocation and import peak.
+    pub fn load_range_with_cache_budget(
+        &self,
+        owner: usize,
+        load: &super::ModelLoadPlan,
+        shared_in_host: bool,
+    ) -> Result<DecoderRangeLoadPlan, String> {
+        let initial = self.load_range(owner, load, None)?;
+        let Some(bank) = initial.physical_load.expert_bank() else {
+            return Ok(initial);
+        };
+        let Some(shared) = bank.shared.as_ref() else {
+            return Ok(initial);
+        };
+        let device_weights = |load: &super::ModelLoadPlan| -> Result<u64, String> {
+            let bytes = super::weight_bytes_by_component(load)?[0];
+            let host = if shared_in_host { load.shared_weight_bytes()? } else { 0 };
+            bytes.checked_sub(host).ok_or_else(|| "host weights exceed weight charge".into())
+        };
+        let budget = device_weights(load)?;
+        let minimum = crate::operators::routed::fused_graph::DECODE_ROWS
+            .checked_mul(bank.selected).ok_or("route union overflow")?.min(bank.experts);
+        // Evaluate exact inventories, including directory and staging changes.
+        // Do not extrapolate physical charge from a per-record payload slope.
+        for slots in (bank.slots..=bank.experts).rev() {
+            let records = shared.groups.iter().map(|group| {
+                slots.checked_mul(group.layers.len() as u64)
+                    .map(|records| records.max(minimum))
+                    .ok_or("local expert record count overflow")
+            }).collect::<Result<Vec<_>, _>>()?;
+            let candidate = self.load_range(owner, load, Some(&records))?;
+            if device_weights(candidate.physical_load())? <= budget {
+                eprintln!("magnitude-engine: decoder range {:?}: {slots} cache records per layer, {} local weight bytes (device weight budget {budget})",
+                    candidate.range.blocks, candidate.weight_bytes);
+                return Ok(candidate);
+            }
+        }
+        Ok(initial)
+    }
+
+    pub fn new(blocks: usize, ranges: Vec<DecoderRange>) -> Result<Self, String> {
+        if blocks == 0 || ranges.is_empty() {
+            return Err("decoder placement needs blocks and devices".into());
+        }
+        let mut end = 0;
+        for (index, range) in ranges.iter().enumerate() {
+            if range.blocks.start != end || range.blocks.end <= end || range.blocks.end > blocks {
+                return Err("decoder ranges must cover every block once, in order".into());
+            }
+            if ranges[..index]
+                .iter()
+                .any(|other| other.device == range.device)
+            {
+                return Err("a device must own one contiguous decoder range".into());
+            }
+            end = range.blocks.end;
+        }
+        if end != blocks {
+            return Err("decoder placement does not cover the final block".into());
+        }
+        Ok(Self { ranges })
+    }
+
+    /// Exact weight/cache inventory for one owner. Entry and readout weights
+    /// are currently duplicated and charged on each device, matching the range
+    /// graph binder's entry/readout contract. All block weights stay local.
+    pub fn load_range(
+        &self,
+        owner: usize,
+        load: &super::ModelLoadPlan,
+        records: Option<&[u64]>,
+    ) -> Result<DecoderRangeLoadPlan, String> {
+        use magnitude_family_contracts::WeightScope;
+        let range = self
+            .ranges
+            .get(owner)
+            .ok_or("unknown decoder range owner")?
+            .clone();
+        if load.head.is_some() || load.vision.is_some() || load.residual_conditioning.is_some() {
+            return Err(
+                "decoder range import currently requires plain text target execution".into(),
+            );
+        }
+        let graph_load = load.for_decoder_graph_range(range.blocks.clone(), records)?;
+        let mut physical_load = graph_load.clone();
+        let owns = |scope| match scope {
+            WeightScope::Target => true,
+            WeightScope::TargetSublayer(index)
+            | WeightScope::TargetBranch {
+                sublayer: index, ..
+            } => range.blocks.contains(&(index.block as usize)),
+            _ => false,
+        };
+        physical_load
+            .target
+            .retain(|weight| owns(weight.role.scope));
+        physical_load
+            .host_tables
+            .retain(|table| owns(table.role.scope));
+        physical_load
+            .readout_candidates
+            .retain(|weight| owns(weight.role.scope));
+        physical_load
+            .readout_choices
+            .retain(|choice| owns(choice.scope));
+        physical_load
+            .unplaced_output
+            .retain(|weight| owns(weight.role.scope));
+        let weight_bytes = super::weight_bytes_by_component(&physical_load)?[0];
+        let source_peak = super::source_import_peak_bytes(
+            physical_load
+                .target
+                .iter()
+                .map(|weight| weight.source_bytes)
+                .max()
+                .unwrap_or(0),
+        )?;
+        let import_peak_bytes = source_peak.max(crate::AttestedPrograms::qualification_peak_bytes(
+            &physical_load,
+        )?);
+        Ok(DecoderRangeLoadPlan {
+            range,
+            decoder_blocks: self.ranges.last().unwrap().blocks.end,
+            source_load: load.clone(),
+            graph_load,
+            physical_load,
+            weight_bytes,
+            import_peak_bytes,
+        })
+    }
+
+    pub fn ranges(&self) -> &[DecoderRange] {
+        &self.ranges
+    }
+
+    pub fn block_owner(&self, block: usize) -> Result<usize, String> {
+        self.ranges
+            .iter()
+            .position(|range| range.blocks.contains(&block))
+            .ok_or_else(|| format!("decoder block {block} is outside the placement"))
+    }
+
+    pub fn layer_owner(&self, layer: LayerRef) -> Result<usize, String> {
+        match layer {
+            LayerRef::Target(block) | LayerRef::Indexer(block) => self.block_owner(block as usize),
+            LayerRef::Head(_) => Err("draft history needs its own device placement".into()),
+        }
+    }
+
+    /// Split physical history domains before deriving slab geometry and graph
+    /// contracts. Shared readers must execute on their source's owner: copying
+    /// a residual alone cannot make remote history pointers valid.
+    pub fn place_state(&self, layout: &ModelStateLayout) -> Result<PlacedStateLayout, String> {
+        let mut placed = layout.clone();
+        placed.target_history.clear();
+        let mut history_owners = Vec::new();
+        for domain in &layout.target_history {
+            if let HistoryDomainLayout::Shared { source, layers } = domain {
+                let owner = self.layer_owner(*source)?;
+                for &reader in layers {
+                    if self.layer_owner(reader)? != owner {
+                        return Err("shared history crosses a decoder device boundary".into());
+                    }
+                }
+                placed.target_history.push(domain.clone());
+                continue;
+            }
+            let mut groups = vec![Vec::new(); self.ranges.len()];
+            for component in domain.components() {
+                groups[self.layer_owner(component.layer)?].push(component.clone());
+            }
+            for (owner, components) in groups.into_iter().enumerate() {
+                if components.is_empty() {
+                    continue;
+                }
+                let domain = match domain {
+                    HistoryDomainLayout::Token { .. } => HistoryDomainLayout::Token { components },
+                    HistoryDomainLayout::Window { rows, .. } => HistoryDomainLayout::Window {
+                        rows: *rows,
+                        components,
+                    },
+                    HistoryDomainLayout::Block { rate, .. } => HistoryDomainLayout::Block {
+                        rate: *rate,
+                        components,
+                    },
+                    HistoryDomainLayout::Shared { .. } => unreachable!(),
+                };
+                placed.target_history.push(domain);
+                history_owners.push(owner);
+            }
+        }
+        if layout.target_bank_layers.len() != layout.target_recurrent.len()
+            || layout.target_banks.len() != layout.target_recurrent.len()
+        {
+            return Err("recurrent components differ from their semantic layer owners".into());
+        }
+        let recurrent_owners = layout
+            .target_bank_layers
+            .iter()
+            .map(|&layer| self.layer_owner(layer))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(PlacedStateLayout {
+            layout: placed,
+            history_owners,
+            recurrent_owners,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use magnitude_state::{BankComponent, CodecSpec, ComponentDescriptor};
+    use seismic::DType;
+
+    fn range(device: u8, blocks: Range<usize>) -> DecoderRange {
+        DecoderRange {
+            device: DeviceSelector::Cuda { uuid: [device; 16] },
+            blocks,
+        }
+    }
+
+    #[test]
+    fn placement_rejects_gaps_overlaps_and_reused_devices() {
+        for ranges in [
+            vec![range(0, 0..2), range(1, 3..4)],
+            vec![range(0, 0..3), range(1, 2..4)],
+            vec![range(0, 0..2), range(0, 2..4)],
+            vec![range(0, 0..2)],
+        ] {
+            assert!(DecoderPlacement::new(4, ranges).is_err());
+        }
+    }
+
+    #[test]
+    fn placement_preserves_global_history_and_recurrent_order() {
+        let placement = DecoderPlacement::new(4, vec![range(0, 0..2), range(1, 2..4)]).unwrap();
+        let components = [0, 2]
+            .into_iter()
+            .map(|block| {
+                ComponentDescriptor::new(
+                    LayerRef::Target(block),
+                    CodecSpec::dense(DType::F32, 4, 4),
+                    1,
+                )
+                .unwrap()
+            })
+            .collect();
+        let bank = BankComponent::ConvWindow {
+            width: 2,
+            channels: 4,
+            dtype: DType::F32,
+        };
+        let layout = ModelStateLayout {
+            target_history: vec![HistoryDomainLayout::Token { components }],
+            target_banks: vec![bank; 3],
+            target_bank_layers: vec![
+                LayerRef::Target(1),
+                LayerRef::Target(3),
+                LayerRef::Target(3),
+            ],
+            target_recurrent: vec![bank.spec(0).unwrap(); 3],
+            head_history: vec![],
+        };
+        let placed = placement.place_state(&layout).unwrap();
+        assert_eq!(placed.history_owners, [0, 1]);
+        assert_eq!(placed.recurrent_owners, [0, 1, 1]);
+        assert_eq!(placed.layout.target_recurrent, layout.target_recurrent);
+        for (domain, block) in placed.layout.target_history.iter().zip([0, 2]) {
+            assert_eq!(domain.components()[0].layer, LayerRef::Target(block));
+        }
+        let mut shared = layout;
+        shared.target_history.push(HistoryDomainLayout::Shared {
+            source: LayerRef::Target(0),
+            layers: vec![LayerRef::Target(3)],
+        });
+        assert!(placement.place_state(&shared).is_err());
+    }
+}

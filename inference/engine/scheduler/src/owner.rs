@@ -29,7 +29,7 @@ use super::{
     worker::Wakes,
 };
 use magnitude_executor::{
-    DomainError, InvariantError, MemoryChargeReconciliation,
+    DomainError, InvariantError, DeviceMemoryCharge,
     NativeFamily,
     OpenRequirements, Operation, Outcome, PendingOperationOutcome, PhysicalDecision,
     ProgramFamily, RequestId, ResourceKind, ResourcePlan, StateBindings, SubmitError,
@@ -795,7 +795,7 @@ impl<F: ProgramFamily> Owner<F> {
     /// Seismic's charge reconciled against every state holder the owner
     /// keeps: resident requests and cached prefixes; submitted work is
     /// counted through its stores' claims.
-    pub fn reconcile_memory_charge(&self) -> Result<MemoryChargeReconciliation, String> {
+    pub fn reconcile_memory_charge(&self) -> Result<Vec<DeviceMemoryCharge>, String> {
         let cached = self.service.prefix_cache.states().collect::<Vec<_>>();
         self.service.domain.reconcile_memory_charge(&cached)
     }

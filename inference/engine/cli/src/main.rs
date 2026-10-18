@@ -53,6 +53,7 @@ struct Options {
     prefill_group: magnitude_executor::PrefillGroup,
     telemetry_endpoint: String,
     device: DeviceRequest,
+    decoder_ranges: Vec<magnitude_executor::DecoderRange>,
     kernel_cache: Option<PathBuf>,
     tuning: TuningSettings,
     tuning_trace: Option<PathBuf>,
@@ -62,7 +63,7 @@ const USAGE: &str = "magnitude-engine --model TARGET.gguf [--projector PROJECTOR
 [--draft DRAFT.gguf] [--host ADDR] [--port N] [--served-model NAME] [--context-tokens N] \
 [--output-capacity N] [--prefill-tokens N] [--method auto|plain|mtp|dflash|dspark|dflash2] [--mtp-proposals N] [--draft-budget JSON|adaptive] \
 [--kv-codec dense|affine-k8v4] [--numerical-profile JSON_FILE] [--weight-cap BYTES] [--lookahead on|off] [--prefill-group auto|CHUNKS] [--telemetry URL] \
-[--device auto|metal|cuda|vulkan|cpu|SELECTOR] [--cache-dir DIR] \
+[--device auto|metal|cuda|vulkan|cpu|SELECTOR] [--decoder-ranges JSON] [--cache-dir DIR] \
 [--tuning-budget SECONDS] [--fresh-tuning] [--tuning-trace FILE]";
 
 /// `on` or `off`.
@@ -112,6 +113,7 @@ fn parse() -> Result<Options, String> {
     let mut prefill_group = defaults.prefill_group;
     let mut telemetry_endpoint = DEFAULT_TRACES_ENDPOINT.to_owned();
     let mut device = DeviceRequest::Automatic;
+    let mut decoder_ranges = Vec::new();
     let mut kernel_cache = None;
     let mut tuning = TuningSettings::STANDARD;
     let mut tuning_trace = None;
@@ -167,6 +169,10 @@ fn parse() -> Result<Options, String> {
             "--lookahead" => lookahead = switch(&flag, &value(&flag, &mut args)?)?,
             "--prefill-group" => prefill_group = value(&flag, &mut args)?.parse()?,
             "--telemetry" => telemetry_endpoint = value(&flag, &mut args)?,
+            "--decoder-ranges" => {
+                decoder_ranges = serde_json::from_str(&value(&flag, &mut args)?)
+                    .map_err(|error| format!("--decoder-ranges: {error}"))?;
+            }
             "--device" => {
                 device = value(&flag, &mut args)?
                     .parse()
@@ -220,6 +226,7 @@ fn parse() -> Result<Options, String> {
         prefill_group,
         telemetry_endpoint,
         device,
+        decoder_ranges,
         kernel_cache,
         tuning,
         tuning_trace,
@@ -361,6 +368,15 @@ fn run() -> Result<(), String> {
     }
     .resolve()
     .map_err(|error| error.to_string())?;
+    if !options.decoder_ranges.is_empty() {
+        let placement = magnitude_executor::DecoderPlacement::new(
+            resolved.manifest.definition.decoder.blocks.len(), options.decoder_ranges)
+            .map_err(|error| format!("--decoder-ranges: {error}"))?;
+        if placement.ranges().len() != 2 {
+            return Err("--decoder-ranges currently requires two owners".into());
+        }
+        resolved.manifest.decoder_ranges = placement.ranges().to_vec();
+    }
     resolved.manifest.tuning = options.tuning;
     resolved.manifest.tuning_trace = options.tuning_trace;
     eprintln!(

@@ -38,9 +38,9 @@ pub struct AssessmentMemoryTerms {
     /// Host-resident gathered tables (model-family plan §3.7): claims in the
     /// system-RAM domain, never device weights.
     pub host_table_bytes: u64,
-    /// The target's stored tables' host-shared slots and directories
-    /// (`ModelLoadPlan::shared_table_bytes`), part of `target_weights`.
-    pub shared_table_bytes: u64,
+    /// Host-shared stored tables and expert-streaming control/staging
+    /// (`ModelLoadPlan::shared_weight_bytes`), part of `target_weights`.
+    pub shared_weight_bytes: u64,
 }
 
 /// Upper bounds for every nonresident charge of a clean load. The prepared
@@ -51,6 +51,9 @@ pub struct AssessmentMemoryTerms {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AssessmentMemoryBounds {
     pub prepared_resource_bytes: u64,
+    /// Persistent graph upload regions, included in prepared resources,
+    /// held in the backend's shared-storage domain.
+    pub shared_upload_bytes: u64,
     pub startup_additional_bytes: u64,
     pub staging_upload_bytes: u64,
     /// Host heap of the sealed target graphs
@@ -107,11 +110,11 @@ pub struct AssessmentMemoryCharge {
     /// Host-resident tables: system RAM, which is the allocation domain of a
     /// unified-memory device and the staging domain of a dedicated one.
     pub host_table_bytes: u64,
-    /// The stored tables' host-shared bytes, part of `allocation_bytes` and
+    /// Host-shared model bytes, part of `allocation_bytes` and
     /// `serving_bytes`: held in the domain the device's host-shared storage
     /// consumes (`platform::shared_role`), host RAM on a dedicated device
     /// whose shared storage is not its own memory.
-    pub shared_table_bytes: u64,
+    pub shared_weight_bytes: u64,
 }
 
 /// A complete fit result: every domain the load touches, and whether the
@@ -138,7 +141,7 @@ pub enum AssessmentFitVerdict {
 /// it builds every graph a load prepares, so it fails with
 /// `GraphError::KernelDomain` exactly when the model's program calls a kernel
 /// outside its domain on the backend.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AssessmentGraphResourceBounds {
     pub target: NativeGraphCharge,
     pub readout: NativeGraphCharge,
@@ -183,7 +186,7 @@ impl AssessmentGraphResourceBounds {
         }
         // The same startup slots a load commits: one request's need.
         let slots = limits.startup_slots();
-        let (target_graph, sealed_target_graphs) =
+        let (target_graph, sealed_target_graphs, target_uploads) =
             crate::programs::native_target_graph::checked_target_family(
                 backend,
                 load,
@@ -196,7 +199,7 @@ impl AssessmentGraphResourceBounds {
             target_graph.storage,
             crate::programs::native_target_graph::target_runs_per_step(&definition.decoder),
             slots.target,
-        )?;
+        )?.with_upload_regions(target_uploads)?;
         let readout = NativeGraphCharge::from_checked(
             crate::programs::graph::readout::checked_readout_family_storage(
                 backend,
@@ -419,6 +422,10 @@ impl AssessmentHeaderBounds {
                 .and_then(|bytes| bytes.checked_add(graph.recorded_graph_bytes))
                 .ok_or("assessment prepared resource bound overflow")?,
             startup_additional_bytes: self.startup_additional_bytes,
+            shared_upload_bytes: super::resources::graph_shared_upload_bytes(&[
+                Some(&graph.target), Some(&graph.readout), graph.head.as_ref(),
+                graph.vision.as_ref(), Some(&graph.state),
+            ].into_iter().flatten().collect::<Vec<_>>())?,
             staging_upload_bytes: self.staging_upload_bytes,
             // The target's sealed plans, the prepared graphs that hold
             // them and the family's constant values, and the state copy
@@ -492,7 +499,7 @@ impl AssessmentMemoryTerms {
                 .map_err(|_| "assessment bank count exceeds u64")?,
             fit_depth: definition.decoder.context_limit.min(100_000),
             host_table_bytes: load.host_table_bytes()?,
-            shared_table_bytes: load.shared_table_bytes()?,
+            shared_weight_bytes: load.shared_weight_bytes()?,
         })
     }
 
@@ -558,18 +565,30 @@ impl AssessmentMemoryTerms {
             allocation_bytes,
             staging_bytes: bounds.staging_upload_bytes,
             host_table_bytes: self.host_table_bytes,
-            shared_table_bytes: self.shared_table_bytes,
+            shared_weight_bytes: self.shared_weight_bytes,
         })
     }
 }
 
 impl AssessmentMemoryCharge {
+    pub fn shared_bytes(&self) -> Result<u64, String> {
+        self.shared_weight_bytes.checked_add(self.bounds.shared_upload_bytes)
+            .ok_or_else(|| "shared assessment bytes overflow".to_owned())
+    }
+
+    pub fn device_allocation_bytes(&self, shared_in_host: bool) -> Result<u64, String> {
+        if shared_in_host {
+            self.allocation_bytes.checked_sub(self.shared_bytes()?)
+                .ok_or_else(|| "shared storage exceeds assessment charge".to_owned())
+        } else { Ok(self.allocation_bytes) }
+    }
+
     /// Compare the charge with every domain's stable fit capacity
     /// (`platform::fit_capacities`). A domain's remaining bytes are
     /// `capacity − reserve − required`; the workload fits when none is
     /// negative, and otherwise the domain with the largest deficit limits it.
     /// `shared` is the role of the domain the device's host-shared storage
-    /// consumes (`platform::shared_role`): the stored tables' bytes are
+    /// consumes (`platform::shared_role`): shared model bytes are
     /// charged there, so a dedicated device whose shared storage is host
     /// RAM holds them in its staging domain, not its own memory.
     pub fn assess_fit(
@@ -600,11 +619,11 @@ impl AssessmentMemoryCharge {
                 .and_then(|bytes| bytes.checked_add(self.bounds.sealed_graph_host_bytes.at_most))
                 .ok_or_else(|| "domain charge with host tables overflows".to_owned())
         };
-        // The stored tables' bytes, charged with the weights, move to host
+        // Shared model bytes, charged with the weights, move to host
         // RAM where the device's shared storage is host RAM.
         let shared_in_host = match shared {
             DomainRole::Allocation => 0,
-            DomainRole::Staging => self.shared_table_bytes,
+            DomainRole::Staging => self.shared_bytes()?,
         };
         let domains = capacities
             .iter()
@@ -886,7 +905,7 @@ mod tests {
         assert_eq!(pools.binding_constant_bytes, family.binding_constant_bytes);
         assert!(pools.binding_constant_bytes > 0);
         assert_eq!(
-            pools.target.upload_regions,
+            pools.target.upload_regions.len(),
             1 + definition.decoder.blocks.len()
         );
         assert!(pools.total_bytes >= pools.target.committed_bytes);
@@ -2273,6 +2292,7 @@ mod tests {
             exact_resident_bytes: allocation_bytes,
             bounds: AssessmentMemoryBounds {
                 prepared_resource_bytes: 0,
+                shared_upload_bytes: 0,
                 startup_additional_bytes: 0,
                 staging_upload_bytes: staging_bytes,
                 sealed_graph_host_bytes: SealedGraphHostBytes {
@@ -2285,7 +2305,7 @@ mod tests {
             allocation_bytes,
             staging_bytes,
             host_table_bytes: 0,
-            shared_table_bytes: 0,
+            shared_weight_bytes: 0,
         }
     }
 
@@ -2300,11 +2320,12 @@ mod tests {
             recurrent_banks: 3,
             fit_depth: 10,
             host_table_bytes: 30,
-            shared_table_bytes: 0,
+            shared_weight_bytes: 0,
         };
         assert_eq!(terms.exact_resident_bytes(50).unwrap(), 100 + 20 + 5 + 50);
         let bounds = AssessmentMemoryBounds {
             prepared_resource_bytes: 40,
+            shared_upload_bytes: 0,
             startup_additional_bytes: 60,
             staging_upload_bytes: 7,
             sealed_graph_host_bytes: SealedGraphHostBytes {
@@ -2491,7 +2512,7 @@ mod tests {
         let dedicated = [(DomainRole::Allocation, device), (DomainRole::Staging, ram)];
         // 900 device bytes, 250 of them stored tables; 100 staged.
         let charge = AssessmentMemoryCharge {
-            shared_table_bytes: 250,
+            shared_weight_bytes: 250,
             ..fixture_charge(900, 100)
         };
         // Device-local shared storage: everything on the device.

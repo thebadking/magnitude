@@ -43,6 +43,21 @@ pub trait ProgramFamily: 'static {
         Ok(0)
     }
 
+    fn peer_weight_bytes(&self) -> Result<u64, &'static str> { Ok(0) }
+    fn target_bank_source_bytes(&self) -> u64 { 0 }
+    fn peer_bank_source_bytes(&self) -> u64 { 0 }
+    fn peer_program_bytes(&self) -> Result<u64, &'static str> { Ok(0) }
+    fn peer_constant_bytes(&self) -> Result<u64, &'static str> { Ok(0) }
+
+    /// Model/program holdings of the second physical owner, when present.
+    fn peer_model_bytes(&self) -> Result<u64, &'static str> {
+        let weights = self.peer_weight_bytes()?;
+        let programs = self.peer_program_bytes()?;
+        let constants = self.peer_constant_bytes()?;
+        weights.checked_add(programs).and_then(|bytes| bytes.checked_add(constants))
+            .ok_or("peer model holdings overflow")
+    }
+
     fn prepared_program_bytes(&self) -> Result<u64, &'static str> {
         Ok(0)
     }
@@ -81,6 +96,7 @@ pub trait ProgramFamily: 'static {
 }
 
 pub struct NativeFamily {
+    peer: Option<(Box<NativeFamily>, Rc<std::cell::RefCell<crate::AllocatedResources>>)>,
     programs: Rc<AttestedPrograms>,
     resident: ResidentTarget,
     target: crate::programs::native_target::NativeTargetProgram,
@@ -90,6 +106,24 @@ pub struct NativeFamily {
 }
 
 impl NativeFamily {
+    pub(crate) fn new_placed(
+        programs: Rc<AttestedPrograms>, resident: ResidentTarget,
+        peer_programs: Rc<AttestedPrograms>, peer_resident: ResidentTarget,
+        peer_resources: Rc<std::cell::RefCell<crate::AllocatedResources>>,
+        geometry: Decoder,
+    ) -> Result<Self, String> {
+        let first = programs.target_graphs().ok_or("first owner lacks target graphs")?.owned_blocks();
+        let second = peer_programs.target_graphs().ok_or("second owner lacks target graphs")?.owned_blocks();
+        if first.start != 0 || first.end != second.start || second.end != geometry.blocks.len()
+            || resident.embedding.tensor().device().same_device(&peer_resident.embedding.tensor().device()) {
+            return Err("native target owners do not cover the decoder on two devices".into());
+        }
+        let mut family = Self::new(programs, resident, geometry.clone())?;
+        let peer = Self::new(peer_programs, peer_resident, geometry)?;
+        family.peer = Some((Box::new(peer), peer_resources));
+        Ok(family)
+    }
+
     pub(crate) fn new(
         programs: Rc<AttestedPrograms>,
         resident: ResidentTarget,
@@ -107,6 +141,7 @@ impl NativeFamily {
         }
         let state = programs.bind_state();
         Ok(Self {
+            peer: None,
             programs,
             resident,
             target,
@@ -118,8 +153,7 @@ impl NativeFamily {
 }
 
 impl ProgramFamily for NativeFamily {
-    type TargetSubmission =
-        <crate::programs::native_target::NativeTargetProgram as TargetProgram>::Submission;
+    type TargetSubmission = crate::programs::native_target::NativeTargetSubmission;
     type HeadSubmission =
         <crate::programs::native_drafter::NativeDrafterProgram as HeadProgram>::Submission;
     type VisionSubmission =
@@ -132,6 +166,7 @@ impl ProgramFamily for NativeFamily {
         resident: ResidentHead,
         definition: &ModelDefinition,
     ) -> Result<(), String> {
+        if self.peer.is_some() { return Err("distributed target does not yet support drafting".into()); }
         if self.head.is_none() {
             let binding_constants = self
                 .programs
@@ -154,6 +189,7 @@ impl ProgramFamily for NativeFamily {
         resident: ResidentVision,
         definition: &ModelDefinition,
     ) -> Result<(), String> {
+        if self.peer.is_some() { return Err("distributed target does not yet support vision".into()); }
         if self.vision.is_none() {
             self.vision = Some(
                 self.programs
@@ -180,6 +216,24 @@ impl ProgramFamily for NativeFamily {
 
     fn target_weight_bytes(&self) -> Result<u64, &'static str> {
         self.resident.storage_bytes()
+    }
+
+    fn target_bank_source_bytes(&self) -> u64 {
+        self.resident.bank.as_ref().map_or(0, |bank| bank.source_control_bytes)
+    }
+
+    fn peer_bank_source_bytes(&self) -> u64 {
+        self.peer.as_ref().map_or(0, |(peer, _)| peer.target_bank_source_bytes())
+    }
+
+    fn peer_weight_bytes(&self) -> Result<u64, &'static str> {
+        self.peer.as_ref().map_or(Ok(0), |(peer, _)| peer.target_weight_bytes())
+    }
+    fn peer_program_bytes(&self) -> Result<u64, &'static str> {
+        self.peer.as_ref().map_or(Ok(0), |(peer, _)| peer.prepared_program_bytes())
+    }
+    fn peer_constant_bytes(&self) -> Result<u64, &'static str> {
+        self.peer.as_ref().map_or(Ok(0), |(peer, _)| peer.target_constant_bytes())
     }
 
     fn prepared_program_bytes(&self) -> Result<u64, &'static str> {
@@ -211,7 +265,22 @@ impl ProgramFamily for NativeFamily {
         &mut self,
         chain: Vec<ValidatedTargetLaunch>,
     ) -> Result<Vec<Self::TargetSubmission>, (SubmitError, Vec<ValidatedTargetLaunch>)> {
-        self.target.submit(chain)
+        use crate::programs::native_target::NativeTargetSubmission;
+        if let Some((peer, resources)) = &self.peer {
+            let reserved = (0..chain.len()).map(|_| resources.borrow().reserve_target_range())
+                .collect::<Result<Vec<_>, _>>();
+            let reserved = match reserved {
+                Ok(reserved) => reserved,
+                Err(error) => return Err((SubmitError::Invariant(crate::InvariantError {
+                    context: "distributed target reservation", detail: error.to_string(),
+                }), chain)),
+            };
+            self.target.submit_pair(&peer.target, chain, reserved)
+                .map(|submissions| submissions.into_iter().map(NativeTargetSubmission::placed).collect())
+        } else {
+            self.target.submit(chain)
+                .map(|submissions| submissions.into_iter().map(NativeTargetSubmission::single).collect())
+        }
     }
     fn submit_head(
         &mut self,
@@ -235,6 +304,16 @@ impl ProgramFamily for NativeFamily {
         &mut self,
         launch: ValidatedStateLaunch,
     ) -> Result<Self::StateSubmission, (SubmitError, ValidatedStateLaunch)> {
-        self.state.submit(launch)
+        if let Some((peer, resources)) = &self.peer {
+            let workspace = match resources.borrow().state_graph().acquire_workspace() {
+                Ok(workspace) => workspace,
+                Err(error) => return Err((SubmitError::Invariant(crate::InvariantError {
+                    context: "distributed state reservation", detail: error.to_string(),
+                }), launch)),
+            };
+            self.state.submit_pair(&peer.state, workspace, launch)
+        } else {
+            self.state.submit(launch)
+        }
     }
 }

@@ -77,7 +77,7 @@ pub(super) struct Pending {
     operations: Vec<Operation>,
     selected_tokens: bool,
     priming: Option<QueuedPriming>,
-    launch_trace: Option<seismic::SubmissionTrace>,
+    launch_trace: Option<super::target::TargetSubmissionTrace>,
 }
 
 pub(super) struct QueuedStep<F: ProgramFamily> {
@@ -257,11 +257,21 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
     pub(super) fn build_group(
         &mut self,
         first: &ValidatedTargetLaunch,
+        first_operations: &[Operation],
         priming: Option<&PrimingReservation>,
         chunks: Vec<Operation>,
     ) -> Result<(Vec<ValidatedTargetLaunch>, Vec<Pending>), DomainError> {
         let mut launches: Vec<ValidatedTargetLaunch> = Vec::new();
         let mut pending: Vec<Pending> = Vec::new();
+        let context = crate::operators::row_rule_context(&self.definition.decoder);
+        let mut projected_tokens = if context == 0 {
+            None
+        } else {
+            let [operation] = first_operations else {
+                return Err(DomainError::invariant("a prompt group requires one request"));
+            };
+            Some(self.tokens_after(operation).map_err(DomainError::Input)?)
+        };
         for chunk in chunks {
             let operations = vec![chunk];
             let entry = self.queued_priming(&operations, |count| match pending.last() {
@@ -272,9 +282,25 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
                 break;
             };
             let predecessor = launches.last().unwrap_or(first).advances();
-            let Some(launch) = self.build_successor(predecessor, &operations, None, 0)? else {
+            let preceding = if let Some(history) = &projected_tokens {
+                let Operation::Forward { position, .. } = &operations[0] else {
+                    return Err(DomainError::invariant("a prompt chunk is not a forward"));
+                };
+                let before = history.before(*position).map_err(DomainError::Input)?;
+                vec![before[before.len().saturating_sub(context)..].iter()
+                    .map(|token| u64::from(token.0)).collect()]
+            } else {
+                self.target_preceding(&operations).map_err(DomainError::Input)?
+            };
+            let Some(launch) = self.build_successor(predecessor, &operations, None, preceding, 0)? else {
                 break;
             };
+            if let Some(history) = &mut projected_tokens {
+                let Operation::Forward { position, tokens, .. } = &operations[0] else {
+                    unreachable!("validated above")
+                };
+                history.feed(*position, tokens).map_err(DomainError::Input)?;
+            }
             launches.push(launch);
             pending.push(Pending {
                 operations,
@@ -353,10 +379,14 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
             }
             return Ok(());
         };
+        let Ok(preceding) = self.target_preceding(&predicted) else {
+            return Ok(());
+        };
         let Some(launch) = self.build_successor(
             flight.submission.launch().advances(),
             &predicted,
             selected,
+            preceding,
             flight.id,
         )?
         else {
@@ -621,10 +651,19 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
             .flight
             .priming
             .map(|priming| priming.submission.finish().map(drop));
-        match (step.flight.submission.finish().map(drop), priming) {
-            (Ok(()), None | Some(Ok(()))) => Ok(()),
-            (Err(error), _) | (_, Some(Err(error))) => Err(DomainError::Device(error)),
-        }
+        let target = step.flight.submission.finish()
+            .map_err(DomainError::Device)
+            .and_then(|completed| {
+                let (_core, output) = completed.into_parts();
+                // Discarding speculative sequence state does not undo the
+                // physical cache reads and fills that already completed.
+                output.retire_stored_reads();
+                output.bank_steps.into_iter()
+                    .fold(Ok(()), |outcome, bank| outcome.and(bank.complete()))
+                    .map_err(DomainError::Streaming)
+            });
+        // Both submissions have been drained, including when either failed.
+        target.and(priming.unwrap_or(Ok(())).map_err(DomainError::Device))
     }
 
     /// The launch of `predicted` queued behind a step whose advances are
@@ -638,6 +677,7 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
         predecessor: &[TentativeAdvance],
         predicted: &[Operation],
         selected: Option<GraphOutputTensor>,
+        preceding: Vec<Vec<u64>>,
         after: u64,
     ) -> Result<Option<ValidatedTargetLaunch>, DomainError> {
         let mut advances = Vec::with_capacity(predicted.len());
@@ -665,15 +705,11 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
             }
             segments = segments.max(super::target::reserved_segments(
                 &self.target_store,
-                advance.span_count(),
+                |domain| advance.domain_span_count(domain),
                 operation.row_count(),
             ));
             slots.push(slot);
         }
-        // The continuation follows the tokens fed so far.
-        let Ok(preceding) = self.target_preceding(predicted) else {
-            return Ok(None);
-        };
         let class_limits = self.target_class_limits();
         let vocabulary = self.definition.decoder.vocabulary as usize;
         let batch = if selected.is_some() {

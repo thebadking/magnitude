@@ -1,0 +1,76 @@
+{
+  "messages": [
+    {
+      "content": "Session 8. Use the supplied tools.",
+      "role": "system"
+    },
+    {
+      "content": "Find the area and perimeter of a circle with a radius of 5 and also find the circumference of a circle with diameter of 10.",
+      "role": "user"
+    }
+  ],
+  "tools": [
+    {
+      "function": {
+        "description": "Calculate the circumference of a circle based on the diameter.",
+        "name": "circle.calculate_circumference",
+        "parameters": {
+          "properties": {
+            "diameter": {
+              "description": "The diameter of the circle.",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "diameter"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Calculate the area of a circle based on the radius.",
+        "name": "circle.calculate_area",
+        "parameters": {
+          "properties": {
+            "radius": {
+              "description": "The radius of the circle.",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "radius"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "Calculate the perimeter of a rectangle based on the length and breadth.",
+        "name": "rectangle.calculate_perimeter",
+        "parameters": {
+          "properties": {
+            "breadth": {
+              "description": "The breadth of the rectangle.",
+              "type": "integer"
+            },
+            "length": {
+              "description": "The length of the rectangle.",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "length",
+            "breadth"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    }
+  ]
+}

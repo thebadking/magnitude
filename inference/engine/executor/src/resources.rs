@@ -139,14 +139,14 @@ impl ImportWindow {
     /// A window of a load's import, held to the import transient its
     /// execution plan admitted.
     pub(crate) fn new(
-        execution: &ExecutionPlan,
+        import_peak_bytes: u64,
         device: &Device,
         source: Arc<FileSource>,
         start: u64,
         end: u64,
     ) -> Result<Self, AllocationError> {
         let window = Self::map(device, source, start, end)?;
-        if window.mapped_bytes > execution.resources().qualification_peak_bytes() {
+        if window.mapped_bytes > import_peak_bytes {
             return Err(AllocationError::Plan(InvariantError {
                 context: "import window",
                 detail: "mapped source exceeds admitted import transient".into(),
@@ -292,6 +292,7 @@ impl std::error::Error for AllocationError {}
 /// Numerical graph slots authorized by one ResourcePlan. Import sources are
 /// allocated separately during component materialization.
 pub struct AllocatedResources {
+    boundary: Option<TargetBoundaryPool>,
     domain: ResourceDomainId,
     /// The device's one graph workspace, which every pool's activations bind.
     arena: seismic::NativeExecutionArena,
@@ -303,6 +304,21 @@ pub struct AllocatedResources {
 }
 
 impl AllocatedResources {
+    /// Acquire a complete second-owner reservation without allocating. A
+    /// partial acquisition rolls its leases back through their ordinary drops.
+    pub(crate) fn reserve_target_range(&self) -> Result<crate::programs::native_target::TargetRangeLaunchResources, crate::CapacityError> {
+        let lease = self.boundary.as_ref().ok_or(crate::CapacityError {
+            resource: crate::ResourceKind::Workspace, required: 1, available: 0,
+        })?.acquire()?;
+        Ok(crate::programs::native_target::TargetRangeLaunchResources {
+            workspace: self.target_graph.acquire_workspace()?,
+            outputs: [self.target_graph.acquire_output()?, self.target_graph.acquire_output()?],
+            readout_workspace: self.target_readout_graph.acquire_workspace()?,
+            readout_output: Some(self.target_readout_graph.acquire_output()?),
+            boundary: Some(lease.storage.clone()), _boundary_lease: lease,
+        })
+    }
+
     /// The workspace arena once, and the arenas these pools own while their
     /// slots are lent to launches or output views.
     pub fn committed_bytes(&self) -> Result<u64, &'static str> {
@@ -324,6 +340,7 @@ impl AllocatedResources {
                 .as_ref()
                 .map_or(0, VisionGraphPool::committed_bytes),
         )
+        .and_then(|bytes| bytes.checked_add(self.boundary.as_ref().map_or(0, |pool| pool.bytes)))
         .ok_or("graph pool charge overflows")
     }
 
@@ -349,6 +366,17 @@ impl AllocatedResources {
     }
     pub fn state_graph(&self) -> &NativeGraphPool {
         &self.state_graph
+    }
+
+    pub(crate) fn upload_bytes(&self) -> Result<u64, &'static str> {
+        [
+            self.target_graph.upload_bytes(),
+            self.target_readout_graph.upload_bytes(),
+            self.head_graph.as_ref().map_or(0, NativeGraphPool::upload_bytes),
+            self.state_graph.upload_bytes(),
+            self.vision_graph.as_ref().map_or(0, VisionGraphPool::upload_bytes),
+        ].into_iter().try_fold(0u64, u64::checked_add)
+            .ok_or("graph upload charge overflows")
     }
 
     /// The pool whose output slots `lane`'s launches retain beyond their
@@ -385,13 +413,64 @@ impl AllocatedResources {
     }
 }
 
+/// Persistent transfer slots charged with the second owner's graph resources.
+struct TargetBoundaryPool {
+    free: std::rc::Rc<std::cell::RefCell<Vec<crate::programs::native_target::TargetBoundaryStorage>>>,
+    bytes: u64,
+}
+
+pub(crate) struct TargetBoundaryLease {
+    storage: crate::programs::native_target::TargetBoundaryStorage,
+    free: std::rc::Rc<std::cell::RefCell<Vec<crate::programs::native_target::TargetBoundaryStorage>>>,
+}
+
+impl Drop for TargetBoundaryLease {
+    fn drop(&mut self) { self.free.borrow_mut().push(self.storage.clone()); }
+}
+
+impl TargetBoundaryPool {
+    fn new(plan: &crate::planning::TargetBoundaryPlan, device: &Device) -> Result<Self, AllocationError> {
+        let slots = (0..plan.slots).map(|_| {
+            let mut tensors = plan.tensors.iter().map(|meta| meta.as_ref().map(|meta|
+                Tensor::zeros(device, meta.element, &meta.extents)
+                    .map_err(|error| AllocationError::Device(error.to_string()))).transpose())
+                .collect::<Result<Vec<_>, _>>()?.into_iter();
+            Ok(crate::programs::native_target::TargetBoundaryStorage {
+                hidden: tensors.next().flatten().ok_or_else(|| AllocationError::Plan(InvariantError {
+                    context: "boundary pool", detail: "boundary hidden tensor is absent".into(),
+                }))?,
+                residual: tensors.next().flatten(), token_rows: tensors.next().flatten(),
+                per_layer_rows: tensors.next().flatten(),
+            })
+        }).collect::<Result<Vec<_>, AllocationError>>()?;
+        let actual = slots.iter().try_fold(0u64, |sum, slot| {
+            [Some(&slot.hidden), slot.residual.as_ref(), slot.token_rows.as_ref(), slot.per_layer_rows.as_ref()]
+                .into_iter().flatten().try_fold(sum, |sum, tensor| sum.checked_add(tensor.storage_bytes()))
+        });
+        if actual != Some(plan.bytes) {
+            return Err(AllocationError::Plan(InvariantError {
+                context: "boundary pool", detail: "allocated transfer storage differs from admission".into(),
+            }));
+        }
+        Ok(Self { free: std::rc::Rc::new(std::cell::RefCell::new(slots)), bytes: plan.bytes })
+    }
+
+    fn acquire(&self) -> Result<TargetBoundaryLease, crate::CapacityError> {
+        let storage = self.free.borrow_mut().pop().ok_or(crate::CapacityError {
+            resource: crate::ResourceKind::Workspace, required: 1, available: 0,
+        })?;
+        Ok(TargetBoundaryLease { storage, free: self.free.clone() })
+    }
+}
+
 pub struct ResourceAllocator;
 
 impl ResourceAllocator {
     /// Imports are serialized at startup or optional-component materialization.
     /// Each lease owns its source tensor until physical completion.
     pub(crate) fn import_workspace(
-        execution: &ExecutionPlan,
+        load: &crate::ModelLoadPlan,
+        import_peak_bytes: u64,
         weight: &WeightPlan,
         stored: &Stored,
         window: Option<&ImportWindow>,
@@ -404,7 +483,7 @@ impl ResourceAllocator {
                 detail: detail.into(),
             })
         };
-        if !execution.weights().any(|planned| planned == weight) {
+        if !load.weights().any(|planned| planned == weight) {
             return Err(invalid("weight is absent from the execution plan"));
         }
         let count = weight
@@ -412,7 +491,7 @@ impl ResourceAllocator {
             .iter()
             .try_fold(1u64, |count, extent| count.checked_mul(*extent))
             .ok_or_else(|| invalid("weight element count overflows"))?;
-        if weight.source_bytes > execution.resources().qualification_peak_bytes() {
+        if weight.source_bytes > import_peak_bytes {
             return Err(invalid(
                 "source upload exceeds admitted startup transient bytes",
             ));
@@ -423,7 +502,7 @@ impl ResourceAllocator {
         let own = match window {
             None if ImportWindow::serves(device) && !weight.host_prepared() => {
                 let (file, start, end) = stored_range(stored)?;
-                Some(ImportWindow::new(execution, device, file, start, end)?)
+                Some(ImportWindow::new(import_peak_bytes, device, file, start, end)?)
             }
             _ => None,
         };
@@ -462,6 +541,7 @@ impl ResourceAllocator {
     ) -> Result<AllocatedResources, AllocationError> {
         if device.backend() != execution.device().backend()
             || device.info().name != execution.device().name()
+            || device.info().selector != execution.device().selector()
         {
             return Err(AllocationError::Plan(InvariantError {
                 context: "resource allocator",
@@ -469,8 +549,65 @@ impl ResourceAllocator {
             }));
         }
         let plan = execution.resources();
+        if plan.decoder_range().is_some() {
+            return Err(AllocationError::Plan(InvariantError {
+                context: "resource allocator",
+                detail: "range resources require a range allocator".into(),
+            }));
+        }
+        Self::allocate_plan(
+            plan,
+            device,
+            domain,
+            target_graphs,
+            target_readout_graphs,
+            head_graphs,
+            vision_graphs,
+            state_graphs,
+        )
+    }
+
+    pub fn allocate_range(
+        plan: &crate::ResourcePlan,
+        device: &Device,
+        domain: ResourceDomainId,
+        target_graphs: &PreparedTargetGraphs,
+        target_readout_graphs: &PreparedTargetReadoutGraphs,
+        state_graphs: &PreparedStateCopyGraphs,
+    ) -> Result<AllocatedResources, AllocationError> {
+        let matches = plan.decoder_range().is_some_and(|range| {
+            range.device == device.info().selector && range.blocks == target_graphs.owned_blocks()
+        });
+        if !matches || plan.decoder_range().is_some_and(|range| range.blocks.start > 0) && plan.boundary().is_none() {
+            return Err(AllocationError::Plan(InvariantError {
+                context: "resource allocator",
+                detail: "opened device or graph range differs from admitted owner".into(),
+            }));
+        }
+        Self::allocate_plan(
+            plan,
+            device,
+            domain,
+            target_graphs,
+            target_readout_graphs,
+            None,
+            None,
+            state_graphs,
+        )
+    }
+
+    fn allocate_plan(
+        plan: &crate::ResourcePlan,
+        device: &Device,
+        domain: ResourceDomainId,
+        target_graphs: &PreparedTargetGraphs,
+        target_readout_graphs: &PreparedTargetReadoutGraphs,
+        head_graphs: Option<&PreparedDrafterGraphs>,
+        vision_graphs: Option<&PreparedVisionGraphs>,
+        state_graphs: &PreparedStateCopyGraphs,
+    ) -> Result<AllocatedResources, AllocationError> {
         // The admitted charge was derived from this family's footprint.
-        let admitted = |family: &seismic::NativeGraphFamily, charge: crate::NativeGraphCharge| {
+        let admitted = |family: &seismic::NativeGraphFamily, charge: &crate::NativeGraphCharge| {
             family.workspace_bytes() == charge.workspace_bytes
                 && family.output_bytes() == charge.output_bytes
                 && family.upload_bytes() == charge.upload_bytes
@@ -479,8 +616,8 @@ impl ResourceAllocator {
             .execution_arena(plan.arena_bytes())
             .map_err(|error| AllocationError::Device(error.to_string()))?;
         let graph_charge = plan.target_graph();
-        if !admitted(target_graphs.family(), graph_charge)
-            || target_graphs.runs_per_step() != graph_charge.upload_regions
+        if !admitted(target_graphs.family(), &graph_charge)
+            || target_graphs.upload_regions() != graph_charge.upload_regions
         {
             return Err(AllocationError::Plan(InvariantError {
                 context: "resource allocator",
@@ -490,7 +627,7 @@ impl ResourceAllocator {
         let target_graph =
             NativeGraphPool::new(domain.clone(), target_graphs.family(), graph_charge, &arena)?;
         let readout_charge = plan.target_readout_graph();
-        if !admitted(target_readout_graphs.family(), readout_charge) {
+        if !admitted(target_readout_graphs.family(), &readout_charge) {
             return Err(AllocationError::Plan(InvariantError {
                 context: "resource allocator",
                 detail: "prepared target readout graph differs from admitted Seismic footprint"
@@ -504,7 +641,7 @@ impl ResourceAllocator {
             &arena,
         )?;
         let head_graph = match (head_graphs, plan.head_graph()) {
-            (Some(graphs), Some(charge)) if admitted(graphs.family(), charge) => Some(
+            (Some(graphs), Some(charge)) if admitted(graphs.family(), &charge) => Some(
                 NativeGraphPool::new(domain.clone(), graphs.family(), charge, &arena)?,
             ),
             (None, None) => None,
@@ -516,10 +653,10 @@ impl ResourceAllocator {
             }
         };
         let vision_graph = match (vision_graphs, plan.vision_graph()) {
-            (Some(graphs), Some(charge)) if admitted(graphs.family(), charge) => {
+            (Some(graphs), Some(charge)) if admitted(graphs.family(), &charge) => {
                 Some(VisionGraphPool::new(
                     domain.clone(),
-                    charge.upload_regions,
+                    charge.upload_regions.len(),
                     graphs.class_families(),
                 ))
             }
@@ -532,7 +669,7 @@ impl ResourceAllocator {
             }
         };
         let state_charge = plan.state_graph();
-        if !admitted(state_graphs.family(), state_charge) {
+        if !admitted(state_graphs.family(), &state_charge) {
             return Err(AllocationError::Plan(InvariantError {
                 context: "resource allocator",
                 detail: "prepared state graph differs from admitted Seismic footprint".into(),
@@ -540,7 +677,9 @@ impl ResourceAllocator {
         }
         let state_graph =
             NativeGraphPool::new(domain.clone(), state_graphs.family(), state_charge, &arena)?;
+        let boundary = plan.boundary().map(|plan| TargetBoundaryPool::new(plan, device)).transpose()?;
         let allocated = AllocatedResources {
+            boundary,
             domain: domain.clone(),
             arena,
             target_graph,

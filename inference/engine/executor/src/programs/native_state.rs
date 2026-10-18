@@ -103,11 +103,27 @@ impl NativeStateProgram {
         Self { graphs }
     }
 
+    /// State maintenance is synchronous; retain both owners' leases until
+    /// every plane copy completes, then reconcile the original logical work.
+    pub(crate) fn submit_pair(
+        &self, peer: &Self, mut peer_workspace: NativeGraphWorkspaceLease,
+        mut launch: ValidatedStateLaunch,
+    ) -> Result<ReadySubmission<StateLaunchCore, NativeGraphWorkspaceLease, ()>, (SubmitError, ValidatedStateLaunch)> {
+        let result = {
+            let (batch, work, workspace) = launch.execution_parts_mut();
+            self.execute(batch, work, workspace, Some((peer, &mut peer_workspace)))
+        };
+        if let Err(error) = result { return Err((error, launch)); }
+        let (core, workspace) = launch.into_submission_parts();
+        Ok(ReadySubmission::new(core, workspace, ()))
+    }
+
     fn execute(
         &self,
         batch: &magnitude_batching::ValidatedStateBatch,
         work: &mut StateWork,
         state_graph_workspace: &mut NativeGraphWorkspaceLease,
+        mut peer: Option<(&Self, &mut NativeGraphWorkspaceLease)>,
     ) -> Result<(), SubmitError> {
         match work {
             StateWork::StoreCopy(copy) => {
@@ -118,6 +134,10 @@ impl NativeStateProgram {
                         .collect::<Vec<_>>(),
                     copy.copies(),
                 );
+                if planes.iter().any(|(plane, _)| !plane.belongs_to(&self.graphs.device)
+                    && !peer.as_ref().is_some_and(|(program, _)| plane.belongs_to(&program.graphs.device))) {
+                    return Err(invalid("state copy plane has no prepared device owner"));
+                }
                 if copies.is_empty() {
                     return Err(invalid("empty copy mapping"));
                 }
@@ -140,6 +160,13 @@ impl NativeStateProgram {
                     let &(plane, slab_rows) = planes
                         .get(copy.plane_index)
                         .ok_or_else(|| invalid("copy plane is outside pinned history"))?;
+                    let (graphs, workspace) = if plane.belongs_to(&self.graphs.device) {
+                        (&self.graphs, &mut *state_graph_workspace)
+                    } else {
+                        let (program, workspace) = peer.as_mut()
+                            .ok_or_else(|| invalid("state copy owner is absent"))?;
+                        (&program.graphs, &mut **workspace)
+                    };
                     let shape = plane.extents();
                     let width = shape[1..]
                         .iter()
@@ -153,17 +180,17 @@ impl NativeStateProgram {
                         map_rows: class_rows as u64,
                         slab_rows,
                     };
-                    let plan = self.graphs.plan(&class)?;
-                    let bindings = self.graphs.bindings(&class, &view)?;
+                    let plan = graphs.plan(&class)?;
+                    let bindings = graphs.bindings(&class, &view)?;
                     // Native copy bodies skip negative map entries. Padding
                     // must not launch concurrent writes to a real row.
                     let mut from = words(&copy.from)?;
                     from.resize(class_rows, -1);
                     let mut to = words(&copy.to)?;
                     to.resize(class_rows, -1);
-                    self.graphs.run(
+                    graphs.run(
                         &class,
-                        state_graph_workspace.slot_mut(),
+                        workspace.slot_mut(),
                         bindings,
                         plan.new_outputs().map_err(device)?,
                         &bytes(&from),
@@ -189,6 +216,7 @@ pub(crate) struct StateCopyGraphClass {
 }
 
 pub struct PreparedStateCopyGraphs {
+    device: Device,
     variants: Vec<PreparedStateCopyGraph>,
     family: NativeGraphFamily,
     /// The host heap the plan counted for the graphs
@@ -256,6 +284,7 @@ impl PreparedStateCopyGraphs {
             .collect::<Vec<_>>();
         let family = NativeGraphFamily::new(&plans).map_err(device)?;
         let graphs = Self {
+            device: target_device.clone(),
             variants,
             family,
             planned,
@@ -501,7 +530,7 @@ impl StateProgram for NativeStateProgram {
     ) -> Result<Self::Submission, (SubmitError, ValidatedStateLaunch)> {
         let result = {
             let (batch, work, state_graph_workspace) = launch.execution_parts_mut();
-            self.execute(batch, work, state_graph_workspace)
+            self.execute(batch, work, state_graph_workspace, None)
         };
         if let Err(error) = result {
             return Err((error, launch));

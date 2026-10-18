@@ -595,6 +595,27 @@ impl AttestedPrograms {
         )
     }
 
+    /// Seal only the assigned global decoder blocks with this device's
+    /// attested kernels. The caller admits the matching range certificate.
+    pub fn prepare_target_graphs_range(
+        &self,
+        device: &Device,
+        load: &crate::ModelLoadPlan,
+        geometry: &magnitude_family_contracts::Decoder,
+        state: &crate::StateResourcePlan,
+        plan: &crate::TargetProgramPlan,
+        limits: crate::ResourceLimits,
+        workers: &seismic::Workers,
+        owned: std::ops::Range<usize>,
+    ) -> Result<crate::PreparedTargetGraphs, String> {
+        if !self.belongs_to(device) {
+            return Err("target range kernels belong to another opened device".into());
+        }
+        crate::programs::native_target_graph::PreparedTargetGraphs::prepare_range(
+            device, &self.target, load, geometry, state, plan, limits, workers, owned,
+        )
+    }
+
     /// Device bytes reserved by the exact native specializations before
     /// construction on `backend`. Duplicate bindings share one prepared
     /// handle, matching the native factory's preparation and the actual
@@ -2069,7 +2090,12 @@ impl AttestedPrograms {
                     bindings: "resident readout weights".into(),
                     outcome: error,
                 })?;
-            crate::programs::native_target::NativeTargetProgram::new(
+            let bind = if graphs.prepared.owned_blocks() == (0..geometry.blocks.len()) {
+                crate::programs::native_target::NativeTargetProgram::new
+            } else {
+                crate::programs::native_target::NativeTargetProgram::new_range
+            };
+            bind(
                 model.embedding.tensor().device(),
                 self.state.clone(),
                 geometry,

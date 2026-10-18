@@ -3,7 +3,7 @@
 //! the service publishes. Because memory is elastic these are the standing at
 //! the observation, not a fixed reservation.
 
-use magnitude_executor::MemoryChargeReconciliation;
+use magnitude_executor::{DeviceMemoryCharge, MemoryChargeReconciliation};
 use seismic::{DeviceSelector, MemoryPoolKind};
 use serde::{Deserialize, Serialize};
 
@@ -57,28 +57,55 @@ impl MemoryDomain {
     }
 }
 
-/// The model's bytes in host RAM beside the device's allocation domain.
+/// Holdings in host RAM beside the device's allocation domain.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct HostModelBytes {
+pub(crate) struct HostAllocationBytes {
     /// Host-resident gathered tables, which Seismic does not charge.
     pub tables: u64,
-    /// Stored tables' host-shared storage on a dedicated device whose
+    /// Host-shared model storage on a dedicated device whose
     /// shared storage is host RAM (`platform::shared_role`): Seismic charges
     /// it with the device's allocations, and the census reports it in host
     /// RAM, where it is.
-    pub stored_tables: u64,
+    pub shared_weights: u64,
+    /// Host-visible graph inputs, attributed to compute.
+    pub uploads: u64,
 }
 
 impl AllocationCensus {
+    pub(crate) fn classify(owners: &[DeviceMemoryCharge]) -> Result<Self, String> {
+        let mut domains: Vec<DomainAllocation> = Vec::new();
+        for owner in owners {
+            let local = Self::classify_one(&owner.charge, HostAllocationBytes {
+                tables: owner.host_tables, shared_weights: owner.host_shared_weights,
+                uploads: owner.host_shared_uploads,
+            }, MemoryDomain::of(owner.device, owner.pool_kind))?;
+            for allocation in local.domains {
+                if let Some(total) = domains.iter_mut().find(|total| total.domain == allocation.domain) {
+                    total.model_bytes = total.model_bytes.checked_add(allocation.model_bytes)
+                        .ok_or("model census sum overflow")?;
+                    total.context_bytes = total.context_bytes.checked_add(allocation.context_bytes)
+                        .ok_or("context census sum overflow")?;
+                    total.compute_bytes = total.compute_bytes.checked_add(allocation.compute_bytes)
+                        .ok_or("compute census sum overflow")?;
+                    total.auxiliary_bytes = total.auxiliary_bytes.checked_add(allocation.auxiliary_bytes)
+                        .ok_or("auxiliary census sum overflow")?;
+                } else {
+                    domains.push(allocation);
+                }
+            }
+        }
+        Ok(Self { domains })
+    }
+
     /// Classify the device allocation domain's current Seismic charge from
     /// its reconciliation against every holder, so every charged byte is
     /// reported exactly once. Storage the reconciliation has not attributed
     /// to a holder is reported with the compute class. The model's
     /// host-resident tables, and its stored tables where they are host RAM
     /// of a dedicated device, are model bytes of host RAM.
-    pub(crate) fn classify(
+    fn classify_one(
         charge: &MemoryChargeReconciliation,
-        host: HostModelBytes,
+        host: HostAllocationBytes,
         domain: MemoryDomain,
     ) -> Result<Self, String> {
         let overflow = || "census byte count overflow".to_owned();
@@ -126,8 +153,8 @@ impl AllocationCensus {
             auxiliary_bytes,
         };
         let domains = match (domain, host) {
-            (_, HostModelBytes { tables: 0, stored_tables: 0 }) => vec![allocation],
-            (MemoryDomain::HostRam, HostModelBytes { stored_tables: 0, tables }) => {
+            (_, HostAllocationBytes { tables: 0, shared_weights: 0, uploads: 0 }) => vec![allocation],
+            (MemoryDomain::HostRam, HostAllocationBytes { shared_weights: 0, uploads: 0, tables }) => {
                 vec![DomainAllocation {
                     model_bytes: model_bytes
                         .checked_add(tables)
@@ -141,18 +168,20 @@ impl AllocationCensus {
             (MemoryDomain::DeviceLocal { .. }, host) => vec![
                 DomainAllocation {
                     model_bytes: model_bytes
-                        .checked_sub(host.stored_tables)
+                        .checked_sub(host.shared_weights)
                         .ok_or("stored tables exceed the model's charged bytes")?,
+                    compute_bytes: compute_bytes.checked_sub(host.uploads)
+                        .ok_or("shared graph uploads exceed the compute charge")?,
                     ..allocation
                 },
                 DomainAllocation {
                     domain: MemoryDomain::HostRam,
                     model_bytes: host
                         .tables
-                        .checked_add(host.stored_tables)
+                        .checked_add(host.shared_weights)
                         .ok_or("census byte count overflow")?,
                     context_bytes: 0,
-                    compute_bytes: 0,
+                    compute_bytes: host.uploads,
                     auxiliary_bytes: 0,
                 },
             ],
@@ -187,36 +216,39 @@ mod tests {
     /// them with the device's weights; a host-backed device reports one
     /// domain.
     #[test]
-    fn stored_tables_in_host_ram_are_reported_there() {
+    fn shared_weights_in_host_ram_are_reported_there() {
         let device = MemoryDomain::DeviceLocal {
             device: DeviceSelector::Cuda { uuid: [3; 16] },
         };
-        let host = HostModelBytes {
+        let host = HostAllocationBytes {
             tables: 10,
-            stored_tables: 300,
+            shared_weights: 300,
+            uploads: 0,
         };
-        let census = AllocationCensus::classify(&charge(1_000), host, device).unwrap();
+        let census = AllocationCensus::classify_one(&charge(1_000), host, device).unwrap();
         assert_eq!(census.domains.len(), 2);
         assert_eq!(census.domains[0].domain, device);
         assert_eq!(census.domains[0].model_bytes, 700);
         assert_eq!(census.domains[1].domain, MemoryDomain::HostRam);
         assert_eq!(census.domains[1].model_bytes, 310);
         assert!(
-            AllocationCensus::classify(
+            AllocationCensus::classify_one(
                 &charge(100),
-                HostModelBytes {
+                HostAllocationBytes {
                     tables: 0,
-                    stored_tables: 300,
+                    shared_weights: 300,
+                    uploads: 0,
                 },
                 device,
             )
             .is_err()
         );
-        let unified = AllocationCensus::classify(
+        let unified = AllocationCensus::classify_one(
             &charge(1_000),
-            HostModelBytes {
+            HostAllocationBytes {
                 tables: 10,
-                stored_tables: 0,
+                shared_weights: 0,
+                uploads: 0,
             },
             MemoryDomain::HostRam,
         )

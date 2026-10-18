@@ -131,7 +131,7 @@ pub enum NativeBindingCheck {
     Unsupported(String),
 }
 
-/// One checked tensor port or result before device or native implementation formation.
+/// One checked tensor port or result, available from metadata planning or a sealed graph.
 /// The byte count uses the registered canonical representation layout.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeTensorMetadata {
@@ -664,6 +664,9 @@ pub struct TensorStorageObserver {
 }
 
 impl TensorStorageObserver {
+    pub fn belongs_to(&self, device: &Device) -> bool {
+        self.inner.belongs_to(&device.inner)
+    }
     pub fn identity(&self) -> u64 {
         self.inner.identity()
     }
@@ -910,11 +913,35 @@ impl Tensor {
     pub fn read_to_host(&self) -> Result<Vec<u8>, ExecutionError> {
         self.inner.read_to_host()
     }
+    /// Copy from a tensor on a different opened device, preserving every
+    /// representation byte. Both tensors must have identical canonical shapes
+    /// and representations. Waits for conflicting device work and uses at most
+    /// 1 MiB of host staging, including on devices without peer access.
+    ///
+    /// Validation errors leave the destination unchanged. A transfer failure
+    /// may leave it partly written; callers must not publish it after failure.
+    pub fn copy_from_device(&mut self, source: &Tensor) -> Result<(), TensorError> {
+        self.inner.copy_from_device(&source.inner)
+    }
     /// Replaces the bytes of this exact tensor view.  The byte count must
     /// match its canonical representation layout; allocation-level access
     /// exclusion makes this safe even when other views share the allocation.
     pub fn write_from_host(&mut self, bytes: &[u8]) -> Result<(), TensorError> {
         self.inner.write_from_host(bytes)
+    }
+    /// Copy bytes into a canonical CUDA tensor through its independent
+    /// transfer stream, completing the copy before return. This does not
+    /// acquire the allocation's ordinary device-work exclusion.
+    ///
+    /// # Safety
+    /// The caller owns the destination byte range through a host/device
+    /// publication protocol. All earlier readers have completed; queued or
+    /// running work cannot read or write the range until the caller publishes
+    /// its readiness after this call succeeds. No other host writer overlaps.
+    /// A failed copy must never be published.
+    pub unsafe fn write_in_protocol(&self, offset: u64, bytes: &[u8]) -> Result<(), TensorError> {
+        // SAFETY: the caller owns this range through its publication protocol.
+        unsafe { self.inner.write_in_protocol(offset, bytes) }
     }
     /// The host address and byte length of this tensor's bytes on a device
     /// that keeps them in host-addressable memory (unified memory), for
@@ -2756,6 +2783,13 @@ pub struct NativeGraphPlan {
 }
 
 impl NativeGraphPlan {
+    /// Allocation-free metadata from the sealed graph's checked tensor descriptors.
+    pub fn tensor_metadata(&self, tensor: &WorkflowTensor) -> Option<NativeTensorMetadata> {
+        let (representation, extents) = self.inner.tensor_metadata(tensor.inner)?;
+        let element = Element(representation);
+        let canonical_bytes = element.canonical_byte_len(&extents).ok()?;
+        Some(NativeTensorMetadata { element, extents, canonical_bytes })
+    }
     /// The host heap this sealed plan holds, at its vectors' capacities.
     pub fn host_heap(&self) -> HostHeap {
         self.inner.host_heap()
@@ -2874,15 +2908,15 @@ impl NativeGraphFamily {
             .new_slot(regions)
             .map(|inner| NativeGraphFamilySlot { inner })
     }
-    /// A slot whose workspace is the shared `arena`, with `regions` upload
-    /// regions of its own.
+    /// A slot whose workspace is the shared `arena`, with upload regions
+    /// of the supplied byte capacities. Activation selects an idle fitting region.
     pub fn new_slot_in(
         &self,
         arena: &NativeExecutionArena,
-        regions: usize,
+        upload_bytes: &[u64],
     ) -> Result<NativeGraphFamilySlot, WorkflowError> {
         self.inner
-            .new_slot_in(&arena.inner, regions)
+            .new_slot_in(&arena.inner, upload_bytes)
             .map(|inner| NativeGraphFamilySlot { inner })
     }
 }

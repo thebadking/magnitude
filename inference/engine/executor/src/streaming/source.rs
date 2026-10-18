@@ -1,5 +1,6 @@
 //! The file source (spec 5.1): stored records read straight from the model
-//! file into staging, around the OS page cache, by persistent workers.
+//! file into staging by persistent workers. macOS reads bypass the page cache;
+//! other Unix platforms currently use buffered reads with random-access advice.
 //!
 //! Reads come in two classes. A demand read is one a parked step waits on; a
 //! prefetch is a prediction. Workers always take a queued demand read before
@@ -26,14 +27,17 @@ pub(crate) const WORKERS: usize = 8;
 /// path (about 50 MB/s against 2.45 GB/s on an M4 Pro instance). A worker
 /// reads a range's aligned cover into its own aligned buffer and copies the
 /// range's exact bytes into staging.
+#[cfg(target_os = "macos")]
 const BLOCK: usize = 16384;
 
 /// A worker's block-aligned read buffer, grown to the largest cover read.
+#[cfg(target_os = "macos")]
 struct AlignedBuffer {
     base: Option<std::ptr::NonNull<u8>>,
     capacity: usize,
 }
 
+#[cfg(target_os = "macos")]
 impl AlignedBuffer {
     fn new() -> Self {
         Self {
@@ -73,6 +77,7 @@ impl AlignedBuffer {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Drop for AlignedBuffer {
     fn drop(&mut self) {
         self.release();
@@ -81,6 +86,7 @@ impl Drop for AlignedBuffer {
 
 /// Read `range` through its block-aligned cover. The cover may run past the
 /// end of the file; only the range's own bytes must be read.
+#[cfg(target_os = "macos")]
 fn read_range(file: &File, range: &Range, buffer: &mut AlignedBuffer) -> std::io::Result<()> {
     let block = BLOCK as u64;
     let start = range.offset / block * block;
@@ -104,19 +110,28 @@ fn read_range(file: &File, range: &Range, buffer: &mut AlignedBuffer) -> std::io
     Ok(())
 }
 
-/// The model file, opened for reads that bypass the page cache.
+/// Buffered reads have no destination-alignment requirement. The ticket owns
+/// this staging range until completion, so the kernel can copy exactly the
+/// requested bytes into it without an aligned cover or an intermediate copy.
+#[cfg(not(target_os = "macos"))]
+fn read_range(file: &File, range: &Range) -> std::io::Result<()> {
+    let destination = unsafe { std::slice::from_raw_parts_mut(range.destination, range.bytes) };
+    file.read_exact_at(destination, range.offset)
+}
+
+/// The model file, opened with the platform's expert-read policy.
 pub(crate) struct ModelFile(File);
 
 impl ModelFile {
     pub(crate) fn open(path: &Path) -> Result<Self, String> {
         let file = File::open(path).map_err(|error| format!("{}: {error}", path.display()))?;
-        bypass_page_cache(&file).map_err(|error| format!("{}: {error}", path.display()))?;
+        configure_reads(&file).map_err(|error| format!("{}: {error}", path.display()))?;
         Ok(Self(file))
     }
 }
 
 #[cfg(target_os = "macos")]
-fn bypass_page_cache(file: &File) -> std::io::Result<()> {
+fn configure_reads(file: &File) -> std::io::Result<()> {
     // Faulting experts in through the page cache is the 3 tok/s case
     // (spec §3 finding 5).
     if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_NOCACHE, 1) } != 0 {
@@ -126,7 +141,7 @@ fn bypass_page_cache(file: &File) -> std::io::Result<()> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn bypass_page_cache(file: &File) -> std::io::Result<()> {
+fn configure_reads(file: &File) -> std::io::Result<()> {
     // Linux page-cache advice for a sequential-random reader; O_DIRECT needs
     // aligned destinations the staging layout does not promise.
     let status =
@@ -139,6 +154,7 @@ fn bypass_page_cache(file: &File) -> std::io::Result<()> {
 
 /// One contiguous range of the model file into host-addressed staging.
 pub(crate) struct Range {
+    pub file: usize,
     pub offset: u64,
     pub bytes: usize,
     pub destination: *mut u8,
@@ -176,21 +192,34 @@ struct TicketState {
     /// Ranges still being read.
     running: usize,
     failed: bool,
+    error: Option<String>,
     cancelled: bool,
     priority: Priority,
+    progress_at: Instant,
 }
 
 impl Ticket {
     #[cfg(test)]
     pub(crate) fn controlled() -> Arc<Self> {
+        Self::controlled_ranges(1)
+    }
+    #[cfg(test)]
+    pub(crate) fn controlled_ranges(ranges: usize) -> Arc<Self> {
         let ticket = Self::done(Priority::Demand);
-        { let mut state = ticket.state.lock().unwrap(); state.running = 1; }
+        ticket.state.lock().unwrap().running = ranges;
         ticket
+    }
+    #[cfg(test)]
+    pub(crate) fn complete_controlled_range(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.running -= 1;
+        state.progress_at = Instant::now();
+        self.changed.notify_all();
     }
     #[cfg(test)]
     pub(crate) fn finish_controlled(&self, failed: bool) {
         let mut state = self.state.lock().unwrap();
-        state.running = 0; state.failed = failed;
+        state.running = 0; state.failed = failed; state.progress_at = Instant::now();
         self.changed.notify_all();
     }
     /// A record whose bytes are already in staging: no read.
@@ -200,8 +229,10 @@ impl Ticket {
                 queued: 0,
                 running: 0,
                 failed: false,
+                error: None,
                 cancelled: false,
                 priority,
+                progress_at: Instant::now(),
             }),
             changed: Condvar::new(),
         })
@@ -221,6 +252,19 @@ impl Ticket {
     /// The outcome, if the reads have ended.
     pub(crate) fn poll(&self) -> Option<Outcome> {
         Self::outcome(&self.state.lock().expect("ticket lock"))
+    }
+
+    /// Latest range start or completion, independent of its queue priority.
+    pub(crate) fn progress_at(&self) -> Instant {
+        self.state.lock().expect("ticket lock").progress_at
+    }
+
+    /// Snapshot for an unsuccessful fetch, including outstanding work.
+    pub(crate) fn diagnostic(&self) -> String {
+        let state = self.state.lock().expect("ticket lock");
+        format!("outcome={:?}, queued={}, running={}, idle_ms={}, error={}",
+            Self::outcome(&state), state.queued, state.running,
+            state.progress_at.elapsed().as_millis(), state.error.as_deref().unwrap_or("none"))
     }
 
     /// Wait for the reads to end, at most until `deadline`.
@@ -259,7 +303,7 @@ struct Queues {
 }
 
 struct Shared {
-    file: ModelFile,
+    files: Vec<ModelFile>,
     queues: Mutex<Queues>,
     work: Condvar,
 }
@@ -270,9 +314,9 @@ pub(crate) struct ExpertSource {
 }
 
 impl ExpertSource {
-    pub(crate) fn new(file: ModelFile) -> Result<Self, String> {
+    pub(crate) fn new(files: Vec<ModelFile>) -> Result<Self, String> {
         let shared = Arc::new(Shared {
-            file,
+            files,
             queues: Mutex::new(Queues {
                 demand: VecDeque::new(),
                 prefetch: VecDeque::new(),
@@ -299,8 +343,10 @@ impl ExpertSource {
                 queued: ranges.len(),
                 running: 0,
                 failed: false,
+                error: None,
                 cancelled: false,
                 priority,
+                progress_at: Instant::now(),
             }),
             changed: Condvar::new(),
         });
@@ -367,6 +413,7 @@ impl Drop for ExpertSource {
 }
 
 fn work(shared: &Shared) {
+    #[cfg(target_os = "macos")]
     let mut buffer = AlignedBuffer::new();
     loop {
         let job = {
@@ -376,6 +423,7 @@ fn work(shared: &Shared) {
                     let mut state = job.ticket.state.lock().expect("ticket lock");
                     state.queued -= 1;
                     state.running += 1;
+                    state.progress_at = Instant::now();
                     drop(state);
                     break job;
                 }
@@ -385,11 +433,73 @@ fn work(shared: &Shared) {
                 queues = shared.work.wait(queues).expect("source queues");
             }
         };
-        let failed = read_range(&shared.file.0, &job.range, &mut buffer).is_err();
+        #[cfg(target_os = "macos")]
+        let result = read_range(&shared.files[job.range.file].0, &job.range, &mut buffer);
+        #[cfg(not(target_os = "macos"))]
+        let result = read_range(&shared.files[job.range.file].0, &job.range);
         let mut state = job.ticket.state.lock().expect("ticket lock");
         state.running -= 1;
-        state.failed |= failed;
+        state.progress_at = Instant::now();
+        if let Err(error) = result {
+            state.failed = true;
+            state.error.get_or_insert_with(|| format!(
+                "file {}, offset {}, bytes {}: {error}",
+                job.range.file, job.range.offset, job.range.bytes));
+        }
         drop(state);
         job.ticket.changed.notify_all();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn one_ticket_reads_identical_offsets_from_distinct_shards() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("magnitude-source-{}-{nonce}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let paths = [directory.join("first.gguf"), directory.join("second.gguf")];
+        std::fs::write(&paths[0], b"aaaFIRSTzzz").unwrap();
+        std::fs::write(&paths[1], b"bbbOTHERyyy").unwrap();
+        let source = ExpertSource::new(
+            paths
+                .iter()
+                .map(|path| ModelFile::open(path).unwrap())
+                .collect(),
+        )
+        .unwrap();
+        let mut first = [0u8; 5];
+        let mut second = [0u8; 5];
+        let ticket = source.submit(
+            vec![
+                Range {
+                    file: 1,
+                    offset: 3,
+                    bytes: 5,
+                    destination: second.as_mut_ptr(),
+                },
+                Range {
+                    file: 0,
+                    offset: 3,
+                    bytes: 5,
+                    destination: first.as_mut_ptr(),
+                },
+            ],
+            Priority::Demand,
+        );
+        let outcome = ticket.wait_until(Instant::now() + Duration::from_secs(1));
+        // Join readers before checking, including the timeout failure path.
+        drop(source);
+        assert_eq!(outcome, Some(Outcome::Done));
+        assert_eq!(&first, b"FIRST");
+        assert_eq!(&second, b"OTHER");
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

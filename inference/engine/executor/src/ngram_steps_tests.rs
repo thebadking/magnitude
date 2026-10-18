@@ -136,7 +136,7 @@ fn an_ngram_decoder_steps_on_host_and_selected_tokens() {
     definition.artifact_identity = package.manifest().identity;
     let definition = Rc::new(definition);
     for backend in [seismic::BackendName::Metal, seismic::BackendName::Cpu] {
-        let Some((mut domain, mut bindings)) = load(&catalog, &definition, &package, backend)
+        let Some((mut domain, mut bindings)) = load(&catalog, &definition, &package, backend, 1)
         else {
             continue;
         };
@@ -180,6 +180,58 @@ fn an_ngram_decoder_steps_on_host_and_selected_tokens() {
         drop(returned);
     }
     std::fs::remove_dir_all(&directory).ok();
+}
+
+/// Known prompt chunks may be built before the first chunk is submitted.
+/// Their n-gram windows follow the private chain, while the published token
+/// history advances only when the owner submits or claims each chunk.
+#[test]
+fn an_ngram_prompt_group_keeps_private_preceding_tokens() {
+    let catalog = seismic::DeviceCatalog::discover().unwrap();
+    let directory = std::env::temp_dir().join(format!("magnitude-ngram-group-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("fixture.gguf");
+    let mut definition = qwen4exp_fixture_definition();
+    write_gguf(&definition, &path);
+    let package = Package::open_without_projector(&path).unwrap();
+    definition.artifact_identity = package.manifest().identity;
+    let definition = Rc::new(definition);
+    let backend = seismic::BackendName::Cpu;
+    let mut selections = Vec::new();
+    for group_capacity in [1, 3] {
+        let (mut domain, mut bindings) = load(&catalog, &definition, &package, backend, group_capacity)
+            .expect("CPU fixture");
+        let request = RequestId(2);
+        domain.install_input(request, PreparedModelInput::continuation_only()).unwrap();
+        domain.open_state(&mut bindings, request, None).unwrap();
+        let chunks = [
+            forward(request, WorkKind::Prefill, &[5, 1], 0, false),
+            forward(request, WorkKind::Prefill, &[9, 3], 2, false),
+            forward(request, WorkKind::Prefill, &[7, 2], 4, true),
+        ];
+        for index in 0..3 {
+            domain.plan_successors(if group_capacity > 1 { chunks[index + 1..].to_vec() } else { Vec::new() });
+            domain.provision(&mut bindings, &chunks[index..index + 1]).unwrap();
+            let (outcome, returned) = run(&mut domain, bindings, chunks[index].clone(),
+                group_capacity > 1 && index > 0, backend);
+            bindings = returned;
+            if group_capacity > 1 && index == 0 {
+                assert_eq!(domain.group_holder(&bindings), Some(request));
+                assert_eq!(domain.preceding_tokens(request, 2, 2).unwrap(), &[TokenId(5), TokenId(1)]);
+                assert!(domain.preceding_tokens(request, 4, 2).is_err(),
+                    "unclaimed chunks must not publish their token history");
+            }
+            if index == 2 {
+                let Outcome::Forward { rows } = outcome else { panic!("forward outcome") };
+                let selected = rows.last().and_then(|row| row.selected).expect("final selection");
+                assert_eq!(selected.status, 0);
+                selections.push(selected.token);
+            }
+        }
+        assert_eq!(domain.resume_state(request).unwrap().position(), 6);
+    }
+    assert_eq!(selections[0], selections[1], "grouping changed the selected token");
+    std::fs::remove_dir_all(directory).unwrap();
 }
 
 /// Reserve, submit, finish and accept one target step; with `claims`, the
@@ -230,6 +282,7 @@ fn load(
     definition: &Rc<ModelDefinition>,
     package: &Package,
     backend: seismic::BackendName,
+    group_capacity: usize,
 ) -> Option<(ExecutorDomain, crate::StateBindings)> {
     let reserves = platform::MemoryReserves::standard();
     let selected = platform::select_device(
@@ -253,7 +306,7 @@ fn load(
         max_images_per_request: magnitude_artifacts::MAX_IMAGES_PER_REQUEST,
         max_image_cells: 0,
         lookahead: true,
-        group_capacity: std::num::NonZeroUsize::MIN,
+        group_capacity: std::num::NonZeroUsize::new(group_capacity).unwrap(),
     };
     let capacity = ResourceCapacity {
         domain_bytes: selected.assessment_capacity_bytes.min(1024 * 1024 * 1024),
@@ -326,6 +379,7 @@ fn load(
         .unwrap();
     let resources_plan = ResourcePlanner::plan_with_state(
         device.backend(),
+        crate::platform::shared_role(device.info()).unwrap(),
         state,
         &target_graphs,
         &target_readout_graphs,
@@ -358,7 +412,7 @@ fn load(
     )
     .unwrap();
     let target = residency
-        .load_target(definition, package, Box::new(|_, _| Ok(())))
+        .load_target(definition, package, Box::new(|_, _, _| Ok(())))
         .unwrap_or_else(|error| panic!("{backend:?}: {error}"));
     let plan = execution.resources().clone();
     let target_state = plan.allocate_target_state(device.clone()).unwrap();

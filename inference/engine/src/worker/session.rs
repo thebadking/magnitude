@@ -125,9 +125,6 @@ pub(crate) struct Loaded {
     pub execution: Worker<UnloadCause>,
     pub binding: GenerationBinding,
     pub definition: ModelDefinition,
-    /// The model's bytes in host RAM beside the device's allocation domain.
-    pub host_model: crate::census::HostModelBytes,
-    pub domain: MemoryDomain,
 }
 
 pub(crate) struct Session {
@@ -429,22 +426,28 @@ impl Session {
                 Ok(WorkerReply::Observed {
                     reconciliation,
                     readings,
-                }) => match AllocationCensus::classify(
-                    &reconciliation,
-                    self.loaded.host_model,
-                    self.loaded.domain,
-                ) {
+                }) => match AllocationCensus::classify(&reconciliation) {
                     Ok(census) => {
-                        let domains = readings
-                            .iter()
-                            .map(|reading| DomainHeadroom {
-                                domain: match reading.role {
-                                    DomainRole::Allocation => self.loaded.domain,
-                                    DomainRole::Staging => MemoryDomain::HostRam,
-                                },
-                                headroom_bytes: reading.headroom_bytes,
-                            })
-                            .collect();
+                        let mut domains: Vec<DomainHeadroom> = Vec::new();
+                        for reading in &readings {
+                            let domain = match reading.role {
+                                DomainRole::Staging => MemoryDomain::HostRam,
+                                DomainRole::Allocation => {
+                                    let Some(owner) = reconciliation.iter().find(|owner|
+                                        owner.allocation_pool == reading.domain) else {
+                                        return Ok(Flow::Exit(WorkerExit::Unloaded(UnloadCause::Internal {
+                                            reason: "memory observation has no physical owner".into(),
+                                        })));
+                                    };
+                                    MemoryDomain::of(owner.device, owner.pool_kind)
+                                }
+                            };
+                            if let Some(existing) = domains.iter_mut().find(|item| item.domain == domain) {
+                                existing.headroom_bytes = existing.headroom_bytes.min(reading.headroom_bytes);
+                            } else {
+                                domains.push(DomainHeadroom { domain, headroom_bytes: reading.headroom_bytes });
+                            }
+                        }
                         self.send(WorkerMessage::Observed {
                             observation: Ok(MemoryObservation { census, domains }),
                         })?

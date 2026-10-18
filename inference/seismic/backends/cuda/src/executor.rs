@@ -27,6 +27,7 @@ pub struct Device {
     stream: Arc<Stream>,
     blocks: Arc<Blocks>,
     graph_bytes: Arc<AtomicU64>,
+    mapped_bytes: Arc<AtomicU64>,
 }
 
 /// One `cuMemGetInfo` sample.
@@ -50,6 +51,7 @@ impl Device {
             stream,
             blocks,
             graph_bytes: Arc::new(AtomicU64::new(0)),
+            mapped_bytes: Arc::new(AtomicU64::new(0)),
         })
     }
     pub fn ordinal(&self) -> u32 {
@@ -120,7 +122,7 @@ impl Device {
             ExecutionError::AllocationFailed("CUDA allocation exceeds host address space".into())
         })?;
         HostMapped::new(&self.context, bytes)
-            .map(Buffer::mapped)
+            .map(|mapped| Buffer::mapped(mapped, self.mapped_bytes.clone()))
             .map_err(allocation_error)
     }
 
@@ -235,6 +237,9 @@ impl DeviceService<Cuda> for Device {
     ) -> Result<Buffer, ExecutionError> {
         Device::allocate_within(self, bytes, alignment, room)
     }
+    fn host_shared_bytes(&self) -> u64 {
+        self.mapped_bytes.load(Ordering::Relaxed)
+    }
     fn held_beyond_allocations(&self) -> u64 {
         self.held_beyond_ranges()
     }
@@ -253,6 +258,9 @@ impl DeviceService<Cuda> for Device {
     }
     fn buffer_len(&self, buffer: &Buffer) -> u64 {
         buffer.len()
+    }
+    fn host_address(&self, buffer: &Buffer) -> Option<std::ptr::NonNull<u8>> {
+        buffer.host_address()
     }
 }
 
@@ -739,6 +747,7 @@ fn launch(
     let mut frame = frame;
     let mut params = [(&mut frame as *mut u64).cast::<c_void>()];
     let context = &kernel.module.context;
+    let _submission = context.submission();
     let _current = context.enter().map_err(submission_error)?;
     unsafe {
         let submit = match mode {

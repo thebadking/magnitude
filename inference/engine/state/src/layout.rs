@@ -106,6 +106,8 @@ pub fn banks_per_slab(bank_bytes: u64) -> Result<usize, String> {
 pub struct ModelStateLayout {
     pub target_history: Vec<HistoryDomainLayout>,
     pub target_banks: Vec<BankComponent>,
+    /// Semantic layer for each recurrent component, in the same order as the banks.
+    pub target_bank_layers: Vec<LayerRef>,
     pub target_recurrent: Vec<ComponentSpec>,
     pub head_history: Vec<HistoryDomainLayout>,
 }
@@ -130,8 +132,10 @@ impl ModelStateLayout {
         let activation = activation_dtype(decoder.activation_dtype);
         let mut target_history = HistoryDomains::default();
         let mut target_banks = Vec::new();
+        let mut target_bank_layers = Vec::new();
         for (index, block) in decoder.blocks.iter().enumerate() {
             let layer = LayerRef::Target(layer(index)?);
+            let first_bank = target_banks.len();
             for stateful in block_state(block)? {
                 match stateful {
                     Stateful::History(attention, domain) => {
@@ -158,6 +162,7 @@ impl ModelStateLayout {
                     Stateful::NGram(input) => target_banks.extend(ngram_bank(decoder, input)?),
                 }
             }
+            target_bank_layers.extend(std::iter::repeat_n(layer, target_banks.len() - first_bank));
         }
         let target_recurrent = target_banks
             .iter()
@@ -190,6 +195,7 @@ impl ModelStateLayout {
         Ok(Self {
             target_history: target_history.into_layouts(),
             target_banks,
+            target_bank_layers,
             target_recurrent,
             head_history: head_history.into_layouts(),
         })

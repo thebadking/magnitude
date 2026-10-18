@@ -49,12 +49,14 @@ impl From<crate::platform::MemoryBand> for MemoryBand {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MemoryObservation {
-    /// Stable domain capacity, after applicable process and device limits.
+    /// Stable allocation-domain capacity, after applicable process and device limits.
     pub capacity_bytes: u64,
     /// Fresh bytes an additional allocation may claim: the allocation
     /// domain's ceiling above its planning reserve.
     pub available_bytes: u64,
-    /// Current Seismic charge for this engine/device scope.
+    /// Current aggregate Seismic charge for this engine/device scope, including
+    /// host-shared allocations on a dedicated device. This can exceed the
+    /// allocation domain capacity: physical domain readings bound new claims.
     pub charged_bytes: u64,
     pub band: MemoryBand,
 }
@@ -133,9 +135,7 @@ impl MemoryHeap {
     }
 
     pub fn observe(&mut self, observation: MemoryObservation) -> Result<(), MemoryError> {
-        if observation.available_bytes > observation.capacity_bytes
-            || observation.charged_bytes > observation.capacity_bytes
-        {
+        if observation.available_bytes > observation.capacity_bytes {
             return Err(MemoryError::InvalidObservation);
         }
         self.observation = Some(observation);
@@ -376,6 +376,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn aggregate_host_and_device_charge_can_exceed_device_capacity() {
+        let mut heap = MemoryHeap::new();
+        heap.observe(MemoryObservation {
+            capacity_bytes: 100,
+            available_bytes: 20,
+            charged_bytes: 120,
+            band: MemoryBand::Normal,
+        })
+        .unwrap();
+        heap.insert(120, HoldingClass::Model).unwrap();
+        assert_eq!(heap.standing().unwrap().unattributed_bytes, 0);
+        assert_eq!(
+            heap.decide(MemoryNeed {
+                minimum_bytes: 21,
+                preferred_bytes: 21,
+                class: HoldingClass::Live,
+            })
+            .unwrap(),
+            MemoryAction::Reject {
+                required: 21,
+                available: 20
+            }
+        );
+        assert_eq!(
+            heap.decide(MemoryNeed {
+                minimum_bytes: 20,
+                preferred_bytes: 20,
+                class: HoldingClass::Live,
+            })
+            .unwrap(),
+            MemoryAction::Grant { bytes: 20 }
+        );
+    }
     #[test]
     fn claims_fail_outside_the_normal_band() {
         let mut heap = heap(100, 20, MemoryBand::Reclaim);

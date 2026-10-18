@@ -58,15 +58,15 @@ struct Replay<G> {
 
 impl<G: RecordedGraph> Replays<G> {
     /// Run `replay` with the graph of `key`, recording it with `record` when
-    /// it is absent (dropping the least recently replayed graph at
-    /// capacity).
-    pub(crate) fn replay(
+    /// it is absent and recording is currently permitted. The recording's
+    /// guard also protects eviction; release it before the replay queues work.
+    pub(crate) fn replay<R>(
         &self,
         key: Vec<u64>,
         retained: &Arc<dyn Any + Send + Sync>,
-        record: impl FnOnce() -> Result<G, CallError>,
+        record: impl FnOnce() -> Result<Option<(G, R)>, CallError>,
         replay: impl FnOnce(&mut G) -> Result<(), CallError>,
-    ) -> Result<(), CallError> {
+    ) -> Result<bool, CallError> {
         let mut entries = self
             .entries
             .lock()
@@ -74,6 +74,9 @@ impl<G: RecordedGraph> Replays<G> {
         entries.clock += 1;
         let clock = entries.clock;
         if !entries.graphs.contains_key(&key) {
+            // A backend may need idle queues to instantiate safely. A busy
+            // miss changes no cache entry and evicts no live graph.
+            let Some((graph, recording)) = record()? else { return Ok(false); };
             if entries.graphs.len() == REPLAY_CAPACITY {
                 let oldest = entries
                     .graphs
@@ -83,7 +86,6 @@ impl<G: RecordedGraph> Replays<G> {
                     .expect("a full replay set has an entry");
                 entries.graphs.remove(&oldest);
             }
-            let graph = record()?;
             // Drop the least recently replayed graphs until the new one fits
             // the device memory graphs may hold.
             let mut held = entries
@@ -114,12 +116,14 @@ impl<G: RecordedGraph> Replays<G> {
                     _retained: retained.clone(),
                 },
             );
+            drop(recording);
         }
         let entry = entries
             .graphs
             .get_mut(&key)
             .expect("the submission's graph was recorded above");
         entry.used = clock;
-        replay(&mut entry.graph)
+        replay(&mut entry.graph)?;
+        Ok(true)
     }
 }

@@ -195,7 +195,9 @@ common_chat_params common_chat_params_init_qwen3_coder(const common_chat_templat
             auto tool_calls = p.trigger_rule("tool-call-root", p.repeat(calls, min_calls, 1));
             auto content    = p.rule("content-text", p.content(p.until_one_of(tool_call_starts)));
 
-            auto body = reasoning << p.text_before_calls(content, inputs.tool_choice) << tool_calls;
+            // Required calls still admit the model's native content preamble.
+            // min_calls keeps the turn from ending before a complete call.
+            auto body = reasoning << content << tool_calls;
             if (supports_reasoning && extract_reasoning) {
                 // GBNF has no lookahead. Reasoning closed implicitly by a tool
                 // call is exactly reasoning followed directly by the calls;
@@ -204,7 +206,7 @@ common_chat_params common_chat_params_init_qwen3_coder(const common_chat_templat
                 // way to reach the first call shares one path into the calls.
                 std::string think         = "\"<think>\" space reasoning-text";
                 std::string closed        = think + " \"</think>\"";
-                std::string text          = min_calls == 0 ? " space content-text space" : " space";
+                std::string text          = " space content-text space";
                 std::string before_calls  = think + " (\"</think>\"" + text + ")?";
                 std::string without_calls = closed + text;
                 // Reasoning the generation prompt opens is only reasoning: it

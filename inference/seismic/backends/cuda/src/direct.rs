@@ -255,7 +255,28 @@ pub struct DirectGraphBuilder {
     graph: driver::Graph,
 }
 
+/// Retains context quiescence through cache insertion and eviction. Drop
+/// before replaying the new graph, whose queue operation takes the read side.
+pub struct GraphRecording<'a> {
+    _guard: std::sync::RwLockWriteGuard<'a, ()>,
+}
+
 impl DirectGraphBuilder {
+    /// Instantiate only with every stream idle. Busy cache misses launch
+    /// their existing kernels individually; instantiation must not block
+    /// the host copies a running kernel needs to finish.
+    pub fn record_when_idle<'a>(
+        device: &'a Device,
+        record: impl FnOnce(&mut Self) -> Result<(), ExecutionError>,
+    ) -> Result<Option<(DirectGraph, GraphRecording<'a>)>, ExecutionError> {
+        let guard = device.context().graph_recording.write().expect("CUDA graph recording lock");
+        if !device.context().idle().map_err(submission)? { return Ok(None); }
+        let mut builder = Self::new(device)?;
+        record(&mut builder)?;
+        let graph = builder.instantiate()?;
+        Ok(Some((graph, GraphRecording { _guard: guard })))
+    }
+
     pub fn new(device: &Device) -> Result<Self, ExecutionError> {
         Ok(Self {
             device: device.clone(),
@@ -410,6 +431,7 @@ impl DirectBatch {
         }
         let mut parameters = formed.parameters();
         let context = self.device.context();
+        let _submission = context.submission();
         let _current = context.enter().map_err(submission)?;
         let driver = &context.driver;
         let status = unsafe {
@@ -467,6 +489,7 @@ impl DirectBatch {
                 "the CUDA driver predates driver API 11.7 stream memory operations".into(),
             )
         })?;
+        let _submission = context.submission();
         let _current = context.enter().map_err(submission)?;
         let status = unsafe {
             operation(
@@ -489,6 +512,7 @@ impl DirectBatch {
             self.marks.is_none(),
             "DirectBatch::replay precondition: a timed batch times each launch"
         );
+        let _submission = self.device.context().submission();
         graph.exec.launch(self.device.stream()).map_err(submission)
     }
 

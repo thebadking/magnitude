@@ -322,6 +322,47 @@ impl SlabTensor {
         Ok(Some(slab.observe_storage()))
     }
 
+    /// Remove a common slot from several device-owned stores. Check every
+    /// binding before changing any store, and retain all allocations until all
+    /// address tables have been updated. A failed publication restores the old
+    /// slots and tables before returning the error.
+    pub fn free_slab_group(
+        stores: &mut [&mut Self],
+        index: usize,
+    ) -> Result<Vec<TensorStorageObserver>, TensorError> {
+        for store in stores.iter() {
+            store.ensure_unbound()?;
+        }
+        let mut removed = stores
+            .iter_mut()
+            .map(|store| store.slabs.get_mut(index).and_then(Option::take))
+            .collect::<Vec<_>>();
+        for position in 0..stores.len() {
+            if let Err(error) = stores[position].publish_addresses() {
+                for (store, slab) in stores.iter_mut().zip(&mut removed) {
+                    if let Some(slab) = slab.take() {
+                        store.slabs[index] = Some(slab);
+                    }
+                }
+                // Attempt every restoration even if one device reports an
+                // error. An unrecoverable driver failure is returned to the
+                // caller; no allocation has been released in that case.
+                let mut rollback_error = None;
+                for store in stores.iter_mut() {
+                    if let Err(error) = store.publish_addresses() {
+                        rollback_error.get_or_insert(error);
+                    }
+                }
+                return Err(rollback_error.unwrap_or(error));
+            }
+        }
+        Ok(removed
+            .into_iter()
+            .flatten()
+            .map(|slab| slab.observe_storage())
+            .collect())
+    }
+
     /// Write every slot's address: a backed slot names its own slab, and a
     /// free slot names the lowest backed slab. Kernels that read a query
     /// tile's span union may load rows in slots no row's span selects; those

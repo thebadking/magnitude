@@ -14,6 +14,63 @@ const LFM25: &str = include_str!("../../templates/tests/assets/LFM2.5-2.6B.jinja
 const MINICPM5: &str = include_str!("../../templates/tests/assets/MiniCPM5-2B.jinja");
 const QWEN35: &str = include_str!("../../templates/tests/assets/Qwen3.5-4B.jinja");
 
+#[test]
+fn qwen_required_parallel_calls_allow_a_second_call() {
+    let tokenizer = byte_tokenizer("<|im_end|>");
+    // unsloth/Qwen3.8-Flash-Next-GGUF, revision
+    // 766911a6b7369840a91dbcd95f9f997acaab6cd6, tokenizer.chat_template.
+    // SHA256: 12827f24b742ea4e80cdc12dbcf9622227056b9f797252a3149263d4f9aaadce.
+    let bundle = bundle(
+        include_str!("assets/qwen3.8-flash-next.jinja"),
+        "",
+        "<|im_end|>",
+    );
+    let mut request = ChatRequest::new(
+        vec![
+            json!({"role":"user","content":"Calculate area for radius 5 and circumference for diameter 10."}),
+        ],
+        946684800,
+    );
+    request.tool_choice = ToolChoice::Required;
+    request
+        .template_arguments
+        .insert("enable_thinking".into(), json!(false));
+    request.tools = [("circle.calculate_area", "radius"), ("circle.calculate_circumference", "diameter")]
+        .into_iter().map(|(name, argument)| json!({"type":"function","function":{
+            "name":name,"description":"Calculate the requested circle measurement",
+            "parameters":{"type":"object","properties":{(argument):{"type":"number"}},"required":[argument]}
+        }})).collect();
+    let output = "<tool_call>\n<function=circle.calculate_area>\n<parameter=radius>\n5\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=circle.calculate_circumference>\n<parameter=diameter>\n10\n</parameter>\n</function>\n</tool_call>";
+    for parallel in [true, false] {
+        request.parallel_tool_calls = parallel;
+        let prepared =
+            PreparedChat::prepare(&bundle, &tokenizer, &request, &TemplateSelection::default())
+                .unwrap();
+        let plan = prepared.input().constraint.as_ref().unwrap();
+        let mut vocabulary = vocabulary(&tokenizer);
+        let grammar = vocabulary.bind(&plan.grammar, &plan.prefix).unwrap();
+        let mut tokens = tokenizer.encode(output, SpecialTokens::Recognize).unwrap();
+        tokens.push(TokenId(256));
+        assert_eq!(grammar.advance(&tokens).is_ok(), parallel);
+        if parallel {
+            let mut stream = prepared.native().stream(1 << 20).unwrap();
+            let mut calls = 0;
+            for byte in output.as_bytes() {
+                calls += stream
+                    .feed(&[*byte])
+                    .unwrap()
+                    .iter()
+                    .filter(|event| matches!(event, magnitude_chat::Event::ToolStart { .. }))
+                    .count();
+            }
+            stream
+                .finish(magnitude_chat::TerminalCause::Natural)
+                .unwrap();
+            assert_eq!(calls, 2);
+        }
+    }
+}
+
 /// Whether the constraint of `source` under `choice` admits `output` and
 /// then the end of the turn.
 fn admits(source: &str, bos: &str, choice: ToolChoice, output: &str) -> bool {

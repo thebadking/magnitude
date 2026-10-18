@@ -171,7 +171,8 @@ where
     }
     pub(crate) fn memory_usage(&self) -> MemoryUsage {
         let mut usage = self.memory.usage();
-        usage.held += self.service.held_beyond_allocations();
+        usage.held = usage.charged.saturating_sub(self.service.host_shared_bytes())
+            + self.service.held_beyond_allocations();
         usage.unallocated = self.service.unallocated();
         usage
     }

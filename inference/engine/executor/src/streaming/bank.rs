@@ -11,7 +11,7 @@ use crate::ResidentRoles;
 use crate::planning::{BANK_KINDS, ExpertBankPlan};
 use crate::residency::{ImportArtifactTensor, Stored};
 use magnitude_artifacts::gguf::GgufArtifact;
-use magnitude_family_contracts::WeightRole;
+use magnitude_family_contracts::{WeightRole, WeightScope};
 use seismic::Device;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -19,6 +19,8 @@ use std::sync::atomic::{AtomicI32, Ordering};
 /// The resident side of a streamed target: every bank starts empty (rule 5).
 pub(crate) struct ResidentBank {
     pub tensors: BankTensors,
+    /// Admitted source/control storage actually held by this opened bank.
+    pub source_control_bytes: u64,
     runtime: StreamingRuntime,
     /// The sequence of the last step submitted (4.3).
     submitted: AtomicI32,
@@ -73,15 +75,20 @@ impl ResidentBank {
         target: &GgufArtifact,
         sublayers: &ResidentRoles,
         lender: Option<[seismic::Tensor; 3]>,
-    ) -> Result<Self, String> {
-        let shared = plan.shared.as_ref().ok_or("a streamed load without its shared bank plan")?;
-        let tensors = BankTensors::allocate(device, plan, shared, lender)?;
+        checkpoint: &mut dyn FnMut() -> Result<(), crate::ResidencyError>,
+    ) -> Result<Self, crate::ResidencyError> {
+        let shared = plan
+            .shared
+            .as_ref()
+            .ok_or_else(|| "a streamed load without its shared bank plan".to_owned())?;
+        let tensors = BankTensors::allocate(device, plan, shared, lender, checkpoint)?;
         let directory = super::shared_directory::SharedDirectory::new(shared, plan.experts)
             .map_err(|e| format!("shared bank directory: {e:?}"))?;
-        let mut path = None;
+        let mut paths = Vec::new();
         let mut layers = Vec::with_capacity(plan.layers.len());
         for (layer, bank) in plan.layers.iter().zip(&tensors.layers) {
             let mut stored = [StoredTensor {
+                file: 0,
                 base: 0,
                 bytes: 0,
                 pool: 0,
@@ -95,21 +102,25 @@ impl ResidentBank {
                 let source = ImportArtifactTensor::from_gguf(target, descriptor)
                     .map_err(|error| error.to_string())?;
                 let Stored::GgmlBlocks { .. } = source.stored() else {
-                    return Err(format!("{role:?} is not stored as packed records"));
+                    return Err(format!("{role:?} is not stored as packed records").into());
                 };
                 let (file, offset, bytes) = source.stored().file_range();
                 if Some(bytes) != planned.stored_bytes.checked_mul(plan.experts) {
                     return Err(format!(
                         "{role:?} stores {bytes} bytes, not {} experts of {}",
                         plan.experts, planned.stored_bytes
-                    ));
+                    )
+                    .into());
                 }
-                match &path {
-                    None => path = Some(file.path().to_owned()),
-                    Some(path) if path == file.path() => {}
-                    Some(_) => return Err("streamed experts span several files".into()),
-                }
+                let file = match paths.iter().position(|path| path == file.path()) {
+                    Some(index) => index,
+                    None => {
+                        paths.push(file.path().to_owned());
+                        paths.len() - 1
+                    }
+                };
                 stored[kind] = StoredTensor {
+                    file,
                     base: offset,
                     bytes: planned.stored_bytes,
                     pool: planned.pool,
@@ -132,21 +143,26 @@ impl ResidentBank {
             u32::try_from(plan.staging_records).map_err(|_| "staging records exceed u32")?;
         let hints = u32::try_from(crate::streaming::layout::hint_records(plan.selected))
             .map_err(|_| "hint records exceed u32")?;
-        let conveyor = u32::try_from(crate::streaming::layout::conveyor_records(plan.experts))
+        let conveyor = u32::try_from(plan.conveyor_records())
             .map_err(|_| "conveyor records exceed u32")?;
         let pools = plan
             .pools
             .iter()
             .zip(tensors.pools.iter().zip(&tensors.conveyors))
-            .map(|(pool, (own, carried))| {
-                Ok(StagingPool::new(
+            .enumerate()
+            .map(|(index, (pool, (own, carried)))| {
+                let staging = StagingPool::new(
                     SharedBytes::new(own.clone())?,
                     SharedBytes::new(carried.clone())?,
                     records,
                     hints,
                     conveyor,
                     pool.record_bytes,
-                ))
+                );
+                Ok(match &tensors.device_pools {
+                    Some(device) => staging.with_device(device[index].clone()),
+                    None => staging,
+                })
             })
             .collect::<Result<Vec<_>, String>>()?;
         // The bank records the conveyor lies on, when a group lends them.
@@ -160,21 +176,44 @@ impl ResidentBank {
             }
             None => None,
         };
-        let path = path.ok_or("a streamed load without routed layers")?;
-        let source = ExpertSource::new(ModelFile::open(&path)?)?;
+        if paths.is_empty() {
+            return Err("a streamed load without routed layers".into());
+        }
+        let files = paths
+            .iter()
+            .map(|path| ModelFile::open(path))
+            .collect::<Result<Vec<_>, _>>()?;
+        let source = ExpertSource::new(files)?;
         let words = |tensor: &seismic::Tensor| SharedWords::new(tensor.clone());
+        let list_words = |tensor: &seismic::Tensor, mirror: Option<&seismic::Tensor>| {
+            let host = words(tensor)?;
+            match mirror { Some(mirror) => host.with_mirror(mirror.clone()), None => Ok(host) }
+        };
         let scratch = ScratchFill::new(
             words(&tensors.scratch_flags)?,
             tensors
                 .scratch_lists
                 .iter()
-                .map(|[gate, up, down]| Ok([words(gate)?, words(up)?, words(down)?]))
+                .enumerate()
+                .map(|(round, [gate, up, down])| {
+                    let mirror = tensors.device_scratch_lists.get(round);
+                    Ok([
+                        list_words(gate, mirror.map(|lists| &lists[0]))?,
+                        list_words(up, mirror.map(|lists| &lists[1]))?,
+                        list_words(down, mirror.map(|lists| &lists[2]))?,
+                    ])
+                })
                 .collect::<Result<Vec<_>, String>>()?,
             {
                 let [gate, up, down] = &tensors.copy_lists;
-                [words(gate)?, words(up)?, words(down)?]
+                let mirror = tensors.device_copy_lists.as_ref();
+                [
+                    list_words(gate, mirror.map(|lists| &lists[0]))?,
+                    list_words(up, mirror.map(|lists| &lists[1]))?,
+                    list_words(down, mirror.map(|lists| &lists[2]))?,
+                ]
             },
-            words(&tensors.seed_list)?,
+            list_words(&tensors.seed_list, tensors.device_seed_list.as_ref())?,
             usize::try_from(plan.experts).map_err(|_| "experts exceed the host")?,
             usize::try_from(plan.round_records()).map_err(|_| "round records exceed the host")?,
         );
@@ -183,19 +222,42 @@ impl ResidentBank {
             StreamingRuntime::new(layers, scratch, heartbeat, pools, source, directory, loan)?;
         Ok(Self {
             tensors,
+            source_control_bytes: plan.shared_bytes()?.checked_add(plan.device_staging_bytes()?)
+                .ok_or("bank source/control bytes overflow")?,
             runtime,
             submitted: AtomicI32::new(0),
         })
     }
 
+
     /// `count` steps are being submitted as one chain, bank-served or
     /// scratch-served (spec 4.5): one step, or a layer-major group, which
     /// interleaves their streamed layers on the device. Their sequences are
-    /// the next `count`, in chain order.
-    pub(crate) fn begin_group(self: &Arc<Self>, count: usize) -> Vec<BankStep> {
+    /// the next `count`, in chain order. `seed_member` identifies each
+    /// layer's last scratch-served member, before any small decode tail.
+    pub(crate) fn begin_group(
+        self: &Arc<Self>,
+        count: usize,
+        seed_member: impl Fn(WeightScope) -> Option<usize>,
+    ) -> Vec<BankStep> {
+        let seeds = self
+            .tensors
+            .layers
+            .iter()
+            .map(|layer| {
+                seed_member(layer.scope).map(|index| {
+                    assert!(index < count, "a seed member belongs to its group");
+                    index
+                })
+            })
+            .collect::<Vec<_>>();
         let count = i32::try_from(count).expect("a layer-major group's steps fit i32");
         let first = self.submitted.fetch_add(count, Ordering::AcqRel) + 1;
-        self.runtime.steps_submitted(first, count);
+        self.runtime.steps_submitted(
+            first,
+            count,
+            seeds.into_iter().map(|index| index.map(|index| first + index as i32)),
+        );
         (first..first + count)
             .map(|sequence| BankStep {
                 bank: Arc::clone(self),

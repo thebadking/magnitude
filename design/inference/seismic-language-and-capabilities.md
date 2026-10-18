@@ -103,7 +103,9 @@ not infer representations from byte lengths or reproduce registry layout tables.
 Vulkan asset may include library files written for its backend (`.h`, `.cuh`, `.glsl`) with
 `#include "<relative path>"`, resolved relative to the including file; the canonical target must lie
 inside the build's source roots, so directory layout is the library's choice. The build inlines each
-included file once, hashes it into the implementation identity and ABI-validates it like the asset;
+included backend header once. Macro-instantiated `.inc` fragments expand at every directive;
+recursive fragment inclusion is rejected. Every dependency is captured once, hashed into the
+implementation identity and ABI-validated like the asset;
 it rejects vendor and system headers, absolute paths, other extensions and files outside the source
 roots. `#include <seismic/<name>>` names Seismic's native library for the backend — dense element
 types, packed-weight decoders and layouts, weight slot bindings — which Seismic owns because it owns

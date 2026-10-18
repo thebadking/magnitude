@@ -176,7 +176,7 @@ fn prefill(
 }
 
 fn assert_accounted(domain: &ExecutorDomain) {
-    let charge = domain.reconcile_memory_charge(&[]).unwrap();
+    let charge = domain.reconcile_memory_charge(&[]).unwrap()[0].charge;
     assert_eq!(charge.unattributed, 0, "{charge:?}");
 }
 
@@ -213,13 +213,13 @@ fn reclaim_relocates_live_banks_without_changing_continuation() {
     );
     let expected = expected.unwrap();
     let before = domain.state_compactions().0;
-    let charge_before = domain.reconcile_memory_charge(&[]).unwrap();
+    let charge_before = domain.reconcile_memory_charge(&[]).unwrap()[0].charge;
     assert_eq!(charge_before.unattributed, 0, "{charge_before:?}");
     let released = domain
         .shrink_state(&mut bindings, ShrinkPolicy::Reclaim)
         .unwrap();
     let after = domain.state_compactions().0;
-    let charge_after = domain.reconcile_memory_charge(&[]).unwrap();
+    let charge_after = domain.reconcile_memory_charge(&[]).unwrap()[0].charge;
     assert!(after.banks > before.banks, "banks were not relocated");
     assert!(released > 0 && charge_after.charged < charge_before.charged);
     assert_eq!(released, charge_before.charged - charge_after.charged);
@@ -284,13 +284,13 @@ fn reclaim_relocates_live_history_and_banks_without_changing_continuation() {
     );
     let expected = expected.unwrap();
     let before = domain.state_compactions().0;
-    let charge_before = domain.reconcile_memory_charge(&[]).unwrap();
+    let charge_before = domain.reconcile_memory_charge(&[]).unwrap()[0].charge;
     assert_eq!(charge_before.unattributed, 0, "{charge_before:?}");
     let released = domain
         .shrink_state(&mut bindings, ShrinkPolicy::Reclaim)
         .unwrap();
     let after = domain.state_compactions().0;
-    let charge_after = domain.reconcile_memory_charge(&[]).unwrap();
+    let charge_after = domain.reconcile_memory_charge(&[]).unwrap()[0].charge;
     eprintln!(
         "released={released} compactions={after:?} charge={}=>{}",
         charge_before.charged, charge_after.charged

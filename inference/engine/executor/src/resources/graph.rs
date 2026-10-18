@@ -31,7 +31,7 @@ pub struct NativeGraphPool {
 
 impl NativeGraphPool {
     /// The startup slots of `charge`: its activations in `arena`, each with
-    /// `upload_regions` upload regions, and its startup output slots.
+    /// separately sized upload regions, and its startup output slots.
     pub(crate) fn new(
         domain: ResourceDomainId,
         family: &NativeGraphFamily,
@@ -39,16 +39,15 @@ impl NativeGraphPool {
         arena: &NativeExecutionArena,
     ) -> Result<Self, super::AllocationError> {
         let workspace = (0..charge.activations)
-            .map(|_| family.new_slot_in(arena, charge.upload_regions))
+            .map(|_| family.new_slot_in(arena, &charge.upload_regions))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| super::AllocationError::Device(error.to_string()))?;
         let output = (0..charge.output_slots)
             .map(|_| family.new_output_slot())
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| super::AllocationError::Device(error.to_string()))?;
-        let activation_bytes = charge
-            .upload_bytes
-            .checked_mul(charge.upload_regions as u64)
+        let activation_bytes = charge.upload_regions.iter()
+            .try_fold(0u64, |total, &bytes| total.checked_add(bytes))
             .ok_or_else(|| {
                 super::AllocationError::Plan(crate::InvariantError {
                     context: "graph pool",
@@ -81,6 +80,11 @@ impl NativeGraphPool {
     /// The charge of one more output slot.
     pub fn output_slot_bytes(&self) -> u64 {
         self.output_bytes
+    }
+
+    /// Host-visible input storage, separate from workspace and outputs.
+    pub(crate) fn upload_bytes(&self) -> u64 {
+        self.activation_bytes * self.activations as u64
     }
 
     pub fn available_workspace(&self) -> usize {
@@ -163,6 +167,12 @@ struct VisionGraphClass {
 }
 
 impl VisionGraphPool {
+    pub(crate) fn upload_bytes(&self) -> u64 {
+        self.classes.iter().map(|class|
+            class.family.upload_bytes() * self.upload_regions as u64 * class.activations as u64
+        ).sum()
+    }
+
     pub(crate) fn new<'a>(
         domain: ResourceDomainId,
         upload_regions: usize,
