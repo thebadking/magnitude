@@ -320,9 +320,9 @@ against a reference require that reference to pass its sanity gate.
 | 1 | Batched asynchronous expert transfers | Disposed: prompt candidate failed; decode candidate not promoted | 0 |
 | 2 | Trace-informed GPU expert retention | 2a and 2b retained as opt-in; controlled timing and tool gates passed | 1 decision |
 | 3 | Confidence-limited expert prefetch | Repeated-miss candidate rejected after no actionable predictions; other conditioning deferred | 2 decision |
-| 4 | MTP across the two owners | Full-acceptance lifecycle passed; ordinary parity failed; target batching differences reproduced on plain main; diagnosis before timing | 3 decision |
-| 5 | SM86 packed-kernel and representation improvements | Pending | 4 decision |
-| 6 | Selective CPU expert execution | Exploratory | Measured transfer/compute crossover |
+| 4 | MTP across the two owners | Qualified experimental capability; repeat generation improves, ordinary primary bar fails and total time regresses | 3 decision |
+| 5 | SM86 packed-kernel and representation improvements | Packing experiment qualified; repeat improves, ordinary gain below bar; four-warp declaration deferred after a confounded gate | 4 decision |
+| 6 | Selective CPU expert execution | Source/upload diagnostics qualified; CPU/GPU crossover pending | Transfer profiling, then compute crossover |
 | 7 | Adaptive placement and prompt grouping | Pending | Accepted earlier stages |
 | 8 | Consolidated qualification and reference comparison | Pending | Selected candidates disposed |
 
@@ -532,6 +532,7 @@ before running it; fill measured fields only from saved artifacts.
 | Placed MTP with one CUDA affine decode choice | 4 | Candidate `47f852f5` + `da537eff…`; frozen Stage 2b plain control | Build `20261019T122031Z-stage4-build-87d1df`; generated prefix `20261019T122157Z-stage4-shared-prefix-f881f0`; serving `20261019T122452Z-stage4-shared-strict-heldout-c073bf`; lifecycle `20261019T123227Z-stage4-shared-lifecycle-8d6b29`; comparison `20261019T123708Z-stage4-comparison-626259` | All correctness gates and 24 benchmark responses exact. Repeat generation −21.911%, total −0.268%; ordinary generation −2.940%, total +11.129% | Keep experimental capability; do not promote the fixed-budget profile as a general speedup. Continue Stage 5 with the plain control |
 | Four-warp CUDA bank conversion | 5a | `356ab093` + `fd8ff569…`; frozen Stage 2b plain control | Build `20261019T131221Z-stage5-build-b663af`; serving `20261019T131615Z-stage5-strict-d25818` | Ordinary continuation changed from 60-token stop to 64-token length; three attention configurations also changed after module-wide tuning invalidation | Failed serving gate; conversion effect is not isolated. Revert launch declaration and defer this experiment; no speed comparison |
 | Shared extraction for packed low/high planes | 5b | `356ab093` + `f906f66c…`; frozen Stage 2b plain control | Build `20261019T132409Z-stage5-build-c23e98`; serving `20261019T132526Z-stage5-strict-3a0610`; lifecycle `20261019T132942Z-stage5-lifecycle-6aed11`; comparison `20261019T133130Z-stage5-comparison-2f88c4` | All gates and 24 benchmark responses exact, with identical unrelated kernel configurations. Repeat generation −4.515%, total −2.101%; ordinary generation −2.850%, total −1.551% | Keep experimental packing source; ordinary primary metric remains below the declared 3% bar. Preserve Stage 2b as the accepted plain control |
+| Separate source and blocking upload service | 6 diagnostic | `6572bbd2` + `e84abda8…`; accepted plain profile, Stage 5 frozen output controls | Build `20261019T135156Z-stage6-build-63ee63`; diagnostic `20261019T135740Z-stage6-source-service-5f527a`; trace-disabled lifecycle `20261019T140411Z-stage6-lifecycle-7f6abd` | Six exact responses and identical selected configurations; both owner traces present. Ordinary blocking uploads average 327.121 µs per 3.125 MB expert; trace-disabled retention/cancellation/recovery passes | Retain opt-in diagnostics. No speed or CPU-crossover claim; measure matched CPU work next |
 
 
 ### Stage 0 progress — baseline and diagnostic correction
@@ -1738,14 +1739,101 @@ verifies all 2,916 inference source files against the measured candidate. The
 accepted plain profile remains Stage 2b, and the four-warp declaration is absent
 from the retained candidate.
 
+### Stage 6 source service and blocking uploads
+
+New opt-in counters separate the host's blocking device-upload calls from
+source-worker service, ticket queue-to-completion spans and watcher polling
+sleep. They use the existing `MAGNITUDE_TRACE_EXPERT_STREAMING` switch. A shared
+bulk ticket is counted once, at its first completed consumer; a prefetch may
+have started before that consumer's step. Already-staged synthetic tickets
+report no new source service. Uploads distinguish scratch and bank paths and
+retain the existing synchronous transfer/publication protocol. These diagnostics
+do not change kernels, expert placement, cache policies or tuning declarations.
+
+Measured source is **`6572bbd2` + dirty digest
+`e84abda805fff2ce1fe9ccf4ca1967e944be1bcac3f9e5758eb021a2759674e0`**.
+Build/provenance **`20261019T135156Z-stage6-build-63ee63`** passes. The stale debug
+target was cleaned during this locked build; recorded release controls and the
+main release symlink were preserved.
+
+Diagnostic **`20261019T135740Z-stage6-source-service-5f527a`** uses a thermal gate
+and one lease, plain decoding, lookahead, group 8, context 1,024, decode-reuse
+seeding/replacement and no managed host cache. It follows the same interleaved
+repeat/ordinary order as Stage 5, with two warmups per fixture before one
+diagnostic request each. All **six responses match the frozen control** in
+text, usage and stop reason, with identical rendered tokens and selected
+kernel configurations. This is an instrumented diagnostic, not a speed comparison.
+
+The summarizer counts only complete streaming/bank/scratch record groups between
+first-content delivery and terminal delivery. Both owners are represented;
+no partial groups were excluded. These are delivery windows, not exact device-step
+boundaries, and they can include lookahead.
+
+| Fixture | Completed owner steps | Expert installs | Upload bytes | Blocking upload host time | Mean upload host time / expert | Watcher service | Polling sleep |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Repeat | 126 | 2,298 | 7.174 GB | 780.780 ms | 339.765 µs | 1,501.712 ms | 603.181 ms |
+| Ordinary | 118 | 1,186 | 3.706 GB | 387.965 ms | 327.121 µs | 764.775 ms | 309.591 ms |
+
+Every installed expert has three uploads. Average source size is approximately
+3.122/3.125 MB for repeat/ordinary. Blocking upload host time accounts for
+**51.993%/50.729% of observed bank watcher service**, respectively. Polling sleep
+and the remaining 117.751/67.219 ms cover other watcher work; they are not a
+GPU-execution breakdown. A CPU path would compete with upload, conversion and
+GPU expert work while also paying for CPU representation, computation and
+activation/result transport. The upload average alone is not a complete crossover.
+
+Source-worker service sums are 2,692.590/1,214.830 ms, with ticket-span sums
+1,180.263/515.732 ms. Parallel range reads and prefetched/adopted tickets overlap,
+so these sums cannot be added to watcher time or divided by generation time
+to assign latency percentages. Repeat records 2,298 source tickets / 6,894 ranges;
+ordinary records 1,179 / 3,537. Ordinary's seven revived experts need uploads
+without new file service, explaining its smaller source-ticket count.
+
+Logical generation-delivery reads are 7.227/3.952 GB, while process-attributed
+physical reads are only 26.255/4.014 MB. This separates buffered RAM/file service
+and upload work from physical disk bytes. The run also has cold/loading work,
+which must not be conflated with these warm delivery windows.
+
+Miss-bearing bank requests average **1.588/1.414 installed experts** for
+repeat/ordinary. A CPU study should start with small missed subsets rather than
+assume all ten selected experts miss. These averages do not provide the full
+per-layer miss-count or latency distribution. The CPU has existing rows8/rows16
+packed paths and GGUF import code; compare compatible representations and
+include import cost instead of silently treating CUDA's `mma16` records as
+CPU-ready. Rotate enough real expert weights to distinguish cache-resident CPU
+results from a working set exceeding the CPU's last-level cache.
+
+An **idle** PCIe query after qualification reports x8 negotiated width for both
+cards, x16 device maxima, current generation 1 and maximum generation 4.
+`pcie-idle.json` retains that query. This is not an active-load link-generation
+measurement; collect that during the matched operator study before attributing
+bandwidth to the idle reading.
+
+Trace-disabled lifecycle **`20261019T140411Z-stage6-lifecycle-7f6abd`** also passes:
+cold/retain/hit/recovery responses all match with 64 outputs and `length`, hit
+and recovery reuse 757 prompt tokens, cancellation closes after four content
+events before terminal delivery, and recovery/health pass. The log confirms
+the new trace is disabled. No unit or integration tests were added or run.
+
+Retain the opt-in diagnostics and their existing design contract. The accepted
+performance control remains frozen Stage 2b. There is **no CPU execution path,
+compute crossover, full GPU breakdown or speedup claim from this run**.
+Artifacts include complete patches, source identities, native renders, raw
+observations, log/IO window offsets, thermal records, selected configurations,
+`source-service-analysis.json`, and the launcher/driver/summarizer.
+
 ## Immediate next action
 
-Continue **Stage 6** using the frozen Stage 2b plain control. Before implementing
-CPU miss execution, obtain a bounded measurement of source/upload service and
-a fixture-derived CPU/GPU expert crossover on this AVX2 host. Account for CPU
-conversion, queueing and activation/result transfers; retain GPU execution unless
-the crossover and affected serving measurements justify a CPU path. Do not
-infer CPU benefit merely from file-cache occupancy or low physical disk bytes.
+Continue **Stage 6** using the frozen Stage 2b plain control. Source/upload
+service is now measured; obtain the **fixture-derived CPU/GPU expert crossover**
+on this AVX2 host next. Use real model weights, the actual semantic activation
+rounding and small missed subsets. Measure CPU resident execution and
+import-plus-execution separately, with weight rotation beyond last-level CPU
+cache. Include GPU conversion/execution and activation/result transport before
+deciding whether a selective CPU path is justified. Preserve normal numerical
+admission and the fixed tuning budget; retain GPU execution unless the crossover
+and affected serving measurements justify a CPU path. Do not infer CPU benefit
+merely from file-cache occupancy or low physical disk bytes.
 
 Keep Stage 4's causal-head MTP and Stage 5's fragment-packing sources as separate
 experimental controls. Neither met its ordinary primary generation bar; do not

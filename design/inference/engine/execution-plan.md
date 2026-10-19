@@ -835,6 +835,13 @@ A parent cache's capacities or lender cannot implicitly become another GPU's
 allocation authority. Physical admission must account for each resulting cache,
 including any additional staging or scratch allocation introduced by the split.
 Each physical cache needs its own directory, watcher and completion clock.
+Opt-in expert-streaming diagnostics distinguish source-worker service, a ticket's
+queue-to-completion span, and host time inside blocking device uploads. A completed
+source ticket is counted once at its first consumer, including shared bulk tickets
+and adopted prefetches; its work may precede that consumer's step. Worker and ticket
+times can overlap across ranges and owners and do not partition generation latency.
+Upload counters distinguish scratch and bank service and report requested bytes;
+logical source bytes remain separate from process-attributed physical disk reads.
 Dedicated CUDA owners of one loaded target may opt into a shared host cache of
 immutable compressed expert records. Its key includes the source file and
 complete record geometry; cached bytes use the same staging and conversion
