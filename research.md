@@ -401,7 +401,7 @@ against a reference require that reference to pass its sanity gate.
 | 5 | SM86 packed-kernel and representation improvements | Packing experiment qualified; repeat improves, ordinary gain below bar; four-warp declaration deferred after a confounded gate | 4 decision |
 | 6 | Selective CPU expert execution | Isolated crossover established; serving fails warmed parity; grouped arithmetic follow-up remains experimental | Transfer profiling, then compute crossover |
 | 7 | Adaptive placement and prompt grouping | Accounting, paired reservations and startup phases qualified experimentally; keep group 8. Capacity helps ordinary generation but exposes repeat source-page misses. Derived-cap RAM retention fails warm speed bars; no overall promotion | Recorded earlier-stage decisions |
-| 8 | Consolidated qualification and reference comparison | In progress: 32K retrieval and 4B single-GPU serving/lifecycle pass; current maximum-context and matched timing/reference checks pending | Selected candidates disposed |
+| 8 | Consolidated qualification and reference comparison | In progress: 32K and 4B serving/lifecycle pass; current maximum-context request fails memory admission after readiness. Repair full-context cache sizing before consolidated timing | Selected candidates disposed |
 
 A dependency on a decision permits a recorded revert or deferral. It does not
 require forcing an unsuccessful optimization into the code. Reorder remaining
@@ -627,6 +627,7 @@ before running it; fill measured fields only from saved artifacts.
 | Derived-cap host demand retention | 7c profile | Same frozen `7a0a1f30` binaries; cache off versus 35,433,480,192-byte cap | Serving `20261019T223532Z-stage7-host-retention-strict-ae8390`; lifecycle `20261019T223835Z-stage7-host-retention-lifecycle-849d09`; comparison `20261019T224145Z-stage7-host-retention-comparison-b6c6e9` | Serving/lifecycle and all 24 comparison responses exact; GPU choices/inventory identical. Retains 15.190 GiB, displacing file cache; logical reads −99.630%/−98.942%, generation −0.535%/+0.137% for repeat/ordinary | Neither generation bar passes. Keep retention opt-in; this run does not reproduce the costly cache-off miss or prove tail prevention. No larger-cap sweep |
 | Current 32K context retrieval | 8 qualification | Frozen complete candidate `7a0a1f30` | `20261019T230253Z-stage8-context-60e410` | Both 2226+37 and 31661+37 requests retrieve the first-block record exactly, with zero prefix reuse. Slots 221/223; invocation inventories agree on both owners | Affected 32K path passes. No renewed maximum-context or speed claim; qualify the larger declaration next |
 | Smaller dense model on one GPU | 8 qualification | Accepted Stage 2b versus `7a0a1f30`; catalog Qwen3.5 4B Q4, GPU0 | Acquisition `20261019T230015Z-stage8-acquire-small-e20ebb`; serving `20261019T230807Z-stage8-small-strict-104d5b`; lifecycle `20261019T230948Z-stage8-small-lifecycle-2f5e36` | Six exact responses and equal native choices/usage/stops; complete tool passes. Prefix reuse, cancellation, recovery and health pass; exactly one GPU in all censuses | Checked dense single-GPU behavior passes. No speed-regression bound or coverage of other smaller models yet |
+| Current 262K context request | 8 failure | Frozen `7a0a1f30`, group 8 and ordinary reserves | `20261019T231254Z-stage8-context-262144-d839b3` | Readiness and 2226+37 retrieval pass; 260137-input request fails without output, requiring 60,817,408 bytes with 31,689,933 available. Cache fit uses only 100000 tokens, admitting 216/217 slots | Preserve failure; isolated `82763130` accounts for full configured state before selecting cache capacity. Build and qualify before timing |
 
 
 ### Stage 0 progress — baseline and diagnostic correction
@@ -3119,18 +3120,59 @@ and lifecycle records. This establishes the checked dense 4B single-GPU behavior
 not every smaller model, distributed quality or a speed regression bound.
 No unit or integration tests were added or run.
 
-### Stage 8 next gate — current maximum context and consolidated timing
+### Stage 8 current maximum-context result — readiness passes, request fails
+
+**`20261019T231254Z-stage8-context-262144-d839b3`** completes with a recorded
+failure on frozen candidate `7a0a1f30`. Both source-verified executable-copy
+hashes match. Readiness reports **262144 context tokens** and the short
+**2226-input + 37-output** retrieval is exact. The native-rendered long request
+has **260137 input tokens**, but returns no answer and fails with
+`insufficient_memory`: **60,817,408 bytes required versus 31,689,933 bytes
+available above the planning reserve**. This is a terminal request failure,
+not a 1500-second watchdog expiration or permission to reduce the reserve.
+The full current context qualification therefore **fails**; readiness alone
+does not preserve the earlier maximum-context result.
+
+Both cache assessments use **100000 fit tokens** and admit **216/217 expert
+slots per layer**. Inspection finds that placed-cache sizing reused the
+metadata assessment's deliberately capped workload. An expert inventory fixed
+at load time can consequently consume space needed by later state growth.
+The endpoint memory census follows failure cleanup and cannot reconstruct the
+instantaneous refusing owner's footprint; do not label it a peak or infer the
+exact failure position from elapsed time.
+
+Isolated repair **`82763130`** on `two-gpu-context-capacity-experimental` budgets
+each placed owner's slab-rounded state at the **full configured context**,
+with the ordinary in-flight recurrent bank count. It keeps the metadata-only
+assessment capped, preserves startup-phase accounting and leaves actual slab
+growth under fresh heap claims. It changes no GPU arithmetic, token limit,
+tuning allowance or reserve. Its effectiveness is **pending build and model
+qualification**. Preserve the failed candidate and its independent binaries;
+do not mutate them or run its pending speed comparison as if maximum context
+had passed. [Bug and reproduction](bugs/26-10-19/context-capacity.md).
+
+Before rebuilding, locked cleanup
+**`20261019T232457Z-stage8-reclaim-stale-targets-6739e5`** preserves both exact
+Stage 6 source-service executables in `stage6-source-service-control` and both
+request-identity executables in `cpu-expert-request-control`. Every original
+and copied hash matches its previously verified build record. The run and each
+control directory retain manifests with build identities and source-proof
+links. It then cleans only their stale `stage6-target` and `cpu-experts-target`
+Cargo output, increasing free disk from **5.619 to 18.877 GiB**. Source
+worktrees and the accepted/Stage 7 controls are untouched. Use these independent
+copies when revisiting the corresponding Stage 6 diagnostics.
+
+### Stage 8 next gate — repair maximum context, then consolidated timing
 
 The 32K and smaller dense-model checks pass. Inspection shows that the placed
 fit assessment caps its state-depth estimate at **100000**, so 32K coverage
 does not exercise a larger declaration. The changed capacity/accounting path
-therefore warrants **one current 262144-capacity qualification**, with a native
-fixture sized near the limit and exact first-block retrieval. Preserve the
-candidate's group 8 and all ordinary reserves; do not infer a maximum from
-readiness or the shorter run alone. Use the prior 971 s full-context prefill to
-declare a bounded **1800-second job hold** and **1500-second request/stall
-limits**, with no change to the 30-second preparation allowance. This remains
-qualification, without a comparative speed claim.
+therefore required the current maximum-context qualification above. Build the
+full-context cache-sizing repair, then repeat the failed canonical case on that
+exact candidate. Preserve group 8, the ordinary reserves, the bounded
+**1800-second job hold**, **1500-second request/stall limits** and the
+30-second preparation allowance. Exact terminal retrieval, not readiness,
+determines success. This remains qualification without a comparative speed claim.
 
 Then measure consolidated Stage 7c against accepted Stage 2b directly with
 fixed warm work and alternating launches. Add a short paired 4B timing check
@@ -3138,6 +3180,12 @@ to quantify the single-GPU regression bound; exact outputs alone do not prove
 unchanged speed. Finally compare the retained configuration with Stage 0 and
 the independent llama.cpp setup. Keep RAM retention, MTP, packing and CPU
 dispatch outside this candidate; their previous dispositions remain in force.
+The original Stage 0 `bench-target` executables are no longer present in the
+current cache inventory. Historical timings cannot replace a new alternating
+comparison. Recover or rebuild a traceable initial-source control before
+claiming a cumulative Stage 0 result, and distinguish a rebuilt control from
+the exact archived executable. The installed llama.cpp reference remains
+available; verify its binary/version and actual serving conditions in its job.
 
 ## Immediate next action
 
@@ -3168,9 +3216,10 @@ cap sweep or select a flag-only `NOREUSE` patch for the reviewed buffered path.
 Use the existing upload/service evidence before proposing another transfer
 change, and retain the earlier asynchronous-batching rejection.
 
-**Stage 8** now has passing 32K retrieval and 4B single-GPU serving/lifecycle
-evidence. Run the one declared current maximum-context check, preserving ordinary
-reserves and the 30-second tuning allowance. Then compare the consolidated
+**Stage 8** has passing 32K retrieval and 4B single-GPU serving/lifecycle
+evidence, but the current maximum-context request fails after readiness. Build
+and qualify `82763130`'s full-context cache-sizing repair with the ordinary
+reserves and 30-second tuning allowance. Then compare the consolidated
 candidate directly with accepted Stage 2b, quantify the smaller-model speed
 regression bound, and compare with initial/reference implementations in
 alternating sessions. Do not multiply separate-session improvements. Keep RAM
