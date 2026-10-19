@@ -1,6 +1,7 @@
 //! One CPU execution lane and one bounded prepared-expert cache per target.
 //! Both device watchers share this owner; layer registration precedes readiness.
 use super::cpu_cache::{CpuExpertCache, CpuExpertLayer, CpuExpertLayerSpec, CpuExpertLease};
+use super::cpu_capture::CpuExpertCapture;
 use super::cpu_programs::{CpuExpertEntry, CpuExpertPrograms};
 use crate::memory::{HoldingClass, MemoryHeap, MemoryNeed, MemoryObservation};
 use crate::planning::CpuExpertBinding;
@@ -37,6 +38,7 @@ pub struct CpuExpertService {
     pub(crate) eligible: AtomicU64,
     pub(crate) hits: AtomicU64,
     fills: AtomicU64,
+    capture: Option<CpuExpertCapture>,
 }
 
 impl CpuExpertService {
@@ -46,6 +48,8 @@ impl CpuExpertService {
         reserves: MemoryReserves,
         protected_host_bytes: u64,
     ) -> Result<Arc<Self>, String> {
+        let capture = CpuExpertCapture::requested()?;
+        let capture_bytes = capture.as_ref().map_or(0, CpuExpertCapture::owned_bytes);
         let mut raw_sizes = [0_u64; 3];
         let mut width = 0;
         let mut scratch = 0;
@@ -78,7 +82,7 @@ impl CpuExpertService {
         heap.observe(MemoryObservation {
             capacity_bytes: catalog.topology().host_pool().capacity_bytes,
             available_bytes: reading.ceiling_bytes.saturating_sub(protected_host_bytes),
-            charged_bytes: programs.plan.program_bytes()?,
+            charged_bytes: programs.plan.program_bytes()?.saturating_add(capture_bytes),
             band: reading.band.into(),
         })
         .map_err(|e| format!("CPU workspace observation: {e:?}"))?;
@@ -103,6 +107,7 @@ impl CpuExpertService {
             .map_err(|e| format!("CPU workspace reconciliation: {e:?}"))?;
         let standing_bytes = persistent
             .checked_add(programs.plan.program_bytes()?)
+            .and_then(|bytes| bytes.checked_add(capture_bytes))
             .ok_or("CPU standing charge overflow")?;
         let cache = CpuExpertCache::new(
             catalog.clone(),
@@ -130,6 +135,7 @@ impl CpuExpertService {
             eligible: AtomicU64::new(0),
             hits: AtomicU64::new(0),
             fills: AtomicU64::new(0),
+            capture,
         }))
     }
 
@@ -164,6 +170,7 @@ impl CpuExpertService {
     fn admitted<T>(
         &self,
         workspace: &mut Workspace,
+        diagnostic_bytes: u64,
         run: impl FnOnce(&mut Workspace) -> Result<T, String>,
     ) -> Result<T, String> {
         let reading =
@@ -182,8 +189,14 @@ impl CpuExpertService {
         let claim = workspace
             .heap
             .claim(MemoryNeed {
-                minimum_bytes: self.scratch_bytes,
-                preferred_bytes: self.scratch_bytes,
+                minimum_bytes: self
+                    .scratch_bytes
+                    .checked_add(diagnostic_bytes)
+                    .ok_or("CPU scratch charge overflow")?,
+                preferred_bytes: self
+                    .scratch_bytes
+                    .checked_add(diagnostic_bytes)
+                    .ok_or("CPU scratch charge overflow")?,
                 class: HoldingClass::InFlight,
             })
             .map_err(|e| format!("CPU invocation admission: {e:?}"))?;
@@ -199,12 +212,34 @@ impl CpuExpertService {
         layer: &CpuExpertLayerContext,
         lease: &CpuExpertLease,
         input: &[u8],
+        sequence: i32,
+        expert: usize,
     ) -> Result<Vec<u8>, String> {
         let mut workspace = self
             .lane
             .try_lock()
             .map_err(|_| "CPU expert lane unavailable")?;
-        self.admitted(&mut workspace, |workspace| {
+        let capture = self
+            .capture
+            .as_ref()
+            .filter(|capture| capture.select(sequence));
+        let diagnostic_bytes = if capture.is_some() {
+            let maximum = lease
+                .weights()
+                .iter()
+                .map(Tensor::byte_len)
+                .max()
+                .unwrap_or(0);
+            if maximum > 64 << 20 {
+                return Err("CPU capture weight exceeds 64 MiB".into());
+            }
+            maximum
+                .checked_add(1 << 20)
+                .ok_or("CPU capture scratch overflow")?
+        } else {
+            0
+        };
+        self.admitted(&mut workspace, diagnostic_bytes, |workspace| {
             let h = layer.program.binding.hidden();
             let mut normalized = workspace
                 .input
@@ -231,8 +266,35 @@ impl CpuExpertService {
                     routed_cpu_expert::OutputArgs { value: &mut output },
                 )
                 .map_err(|e| e.to_string())?;
-            output.read_to_host().map_err(|e| e.to_string())
+            let output = output.read_to_host().map_err(|e| e.to_string())?;
+            if let Some(capture) = capture {
+                let result = (|| {
+                    let (index, identity) = self.cache.capture_identity(layer.key, expert)?;
+                    capture.record(sequence, index, expert, &identity, weights, input, &output)
+                })();
+                if let Err(error) = result {
+                    capture.failed(&error);
+                    return Err(error);
+                }
+            }
+            Ok(output)
         })
+    }
+    pub(crate) fn confirm_capture(
+        &self,
+        layer: &CpuExpertLayerContext,
+        sequence: i32,
+        expert: usize,
+    ) {
+        if let Some(capture) = &self.capture {
+            let result = self
+                .cache
+                .capture_identity(layer.key, expert)
+                .and_then(|(index, _)| capture.consumed(sequence, index, expert));
+            if let Err(error) = result {
+                capture.failed(&error);
+            }
+        }
     }
     pub(crate) fn retain(
         &self,
@@ -249,7 +311,7 @@ impl CpuExpertService {
         };
         let entry = &layer.program;
         let held = self.cache.get_or_fill(layer.key, expert, |outputs| {
-            self.admitted(&mut workspace, |workspace| {
+            self.admitted(&mut workspace, 0, |workspace| {
                 for kind in 0..3 {
                     let matrix = entry.binding.matrices[kind];
                     let mut source = workspace.raw[kind]

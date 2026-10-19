@@ -113,7 +113,7 @@ impl ResidentBank {
                     return Err(format!("{role:?} is not stored as packed records").into());
                 };
                 let (file, offset, bytes) = source.stored().file_range();
-                cpu_sources.push(serde_json::json!({"path":file.path(),"offset":offset,"bytes":bytes,
+                cpu_sources.push(serde_json::json!({"tensor":descriptor.name,"path":file.path(),"offset":offset,"bytes":bytes,
                     "source":plan.pools[planned.pool].source.name(),"matrix":plan.pools[planned.pool].matrix}));
                 if Some(bytes) != planned.stored_bytes.checked_mul(plan.experts) {
                     return Err(format!(

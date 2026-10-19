@@ -1,10 +1,12 @@
 //! An operator/storage diagnostic. It never dispatches experts for serving.
 mod cache;
 mod exchange;
+mod replay;
 use crate::{Inputs, Rendered, digest::sha256_hex, render::RenderedFile};
 use clap::Args;
 use magnitude_artifacts::gguf::Encoding;
 use magnitude_kernels::{repack_weight, routed_bank_fill, routed_down, routed_gate_up};
+pub use replay::{ReplayOptions, run as replay};
 use seismic::NativeGraphFamily;
 use seismic::{
     BackendName, BoundEntry, BoundNativeGraphPlan, Device, DeviceCatalog, DeviceOptions,

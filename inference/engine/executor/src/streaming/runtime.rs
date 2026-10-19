@@ -1514,7 +1514,13 @@ fn try_cpu(
         if let Ok(Some(lease)) = cpu.service.get(&cpu.layer, expert as usize) {
             contribution = cpu
                 .service
-                .execute(&cpu.layer, &lease, request.activation())
+                .execute(
+                    &cpu.layer,
+                    &lease,
+                    request.activation(),
+                    sequence,
+                    expert as usize,
+                )
                 .ok();
         }
     }
@@ -1537,6 +1543,8 @@ fn try_cpu(
             std::thread::yield_now();
         }
         cpu.service.hits.fetch_add(1, Ordering::Relaxed);
+        cpu.service
+            .confirm_capture(&cpu.layer, sequence, expert as usize);
         (Some(position), None)
     } else {
         (None, needs_conversion.then_some((cpu, expert)))

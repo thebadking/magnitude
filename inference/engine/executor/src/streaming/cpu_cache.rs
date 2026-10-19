@@ -3,7 +3,7 @@
 //! A sealed source inventory fixes each layer's representation and quota. Fills
 //! reserve capacity before allocation and publish complete immutable triples.
 //! Weak storage observations keep retired allocations charged even when callers
-//! retain tensor aliases after dropping a lease. No serving path enables it yet.
+//! retain tensor aliases after dropping a lease. Serving enables it only by plan.
 
 use crate::memory::{ClaimId, HoldingClass, MemoryBand, MemoryHeap, MemoryNeed, MemoryObservation};
 use crate::platform::{self, MemoryReserves};
@@ -360,6 +360,20 @@ impl CpuExpertCache {
             return Err("CPU expert key belongs to another cache or is out of bounds".into());
         }
         Ok(())
+    }
+
+    pub(super) fn capture_identity(
+        &self,
+        layer: CpuExpertLayer,
+        expert: usize,
+    ) -> Result<(usize, String), String> {
+        let state = self.state.lock().expect("CPU expert cache");
+        self.validate(&state, layer, expert)?;
+        let source = &state.layers[layer.index].spec.source_identity;
+        if source.len() > 4096 {
+            return Err("CPU capture source identity exceeds 4096 bytes".into());
+        }
+        Ok((layer.index, source.clone()))
     }
 
     fn hit(

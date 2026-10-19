@@ -137,6 +137,9 @@ Header-only fit assessment includes the lane's standing storage, checked
 invocation scratch and the temporary program groups of both owners in host RAM.
 The optional expert payload ceiling remains a surplus limit rather than a
 required startup allocation.
+An opt-in CPU dispatch observation has a bounded sequence range and record count.
+It claims transient host capacity for one weight readback and bounded metadata
+before taking fingerprints; file output does not retain another weight cache.
 
 The device reserve is sized by measurement on the smallest supported devices. With every byte of
 the engine's device usage charged or held (Standing and claims), what remains is the residual: the

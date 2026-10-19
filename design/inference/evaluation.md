@@ -105,6 +105,14 @@ Rules for every measurement:
   and stalled-host termination. Reusing feature rows as operands does not make
   them captured routed activations, and protocol qualification grants no model
   quality, production admission or generation-speed claim.
+  A serving-dispatch diagnostic may retain a bounded range of actual routed
+  activations, unweighted CPU contributions and retained-weight fingerprints.
+  Its producer binds the sequence range to the rendered fixture request and
+  records device consumption separately. Replay verifies the catalog source
+  ranges and fingerprints against fresh imports before attributing arithmetic
+  differences. Capturing a computation is not proof that the GPU consumed it;
+  replay and cross-backend differences grant neither numerical admission nor
+  model quality or speed claims.
 - **Tuning:** first-load tuning runs under an explicit budget. Fresh tuning ignores stored tuning results and keeps compiled kernels. The tuning trace and outcome are part of every measured run.
 
 ## Comparison

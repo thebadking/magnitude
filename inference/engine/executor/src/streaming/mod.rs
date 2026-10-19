@@ -5,6 +5,7 @@
 pub(crate) mod bank;
 pub(crate) mod cache;
 pub(crate) mod cpu_cache;
+mod cpu_capture;
 pub(crate) mod cpu_exchange;
 pub(crate) mod cpu_programs;
 pub(crate) mod cpu_service;

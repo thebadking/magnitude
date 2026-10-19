@@ -68,6 +68,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Replay captured routed CPU contributions against fresh CPU/CUDA imports.
+    ExpertReplay {
+        #[command(flatten)]
+        common: Common,
+        #[command(flatten)]
+        study: expert_crossover::ReplayOptions,
+    },
     /// Compare canonical CPU and CUDA expert operators on fixture-derived features.
     ExpertCrossover {
         #[command(flatten)]
@@ -457,8 +464,11 @@ fn engine_options(
     Ok((
         EngineOptions {
             cache_dir: engine.cache_dir.clone(),
-            decoder_ranges: engine.decoder_ranges.as_deref()
-                .map(serde_json::from_str).transpose()
+            decoder_ranges: engine
+                .decoder_ranges
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
                 .map_err(|error| format!("--decoder-ranges: {error}"))?
                 .unwrap_or_default(),
             device: engine
@@ -516,6 +526,15 @@ fn tuned(
 
 fn run(command: Command) -> Result<(), String> {
     match command {
+        Command::ExpertReplay { common, study } => {
+            let inputs = Inputs::read(&common, "harness.expert_replay")?;
+            let rendered = inputs.render(None)?;
+            let digest = inputs.write_rendered(&rendered)?;
+            let (result, devices) = expert_crossover::replay(&inputs, &study, &digest)?;
+            let mut measurements = Map::new();
+            measurements.insert("expert_replay".into(), result);
+            inputs.finish(digest, Some(devices), measurements, Map::new())
+        }
         Command::ExpertCrossover { common, study } => {
             let inputs = Inputs::read(&common, "harness.expert_crossover")?;
             let rendered = inputs.render(study.context)?;
@@ -690,14 +709,25 @@ fn run(command: Command) -> Result<(), String> {
             let (measurements, traces) = tuned(&engine, &options)?;
             inputs.finish(digest, Some(vec![device]), measurements, traces)
         }
-        Command::TargetCompare { common, engine, anchor, model_context, lookahead } => {
+        Command::TargetCompare {
+            common,
+            engine,
+            anchor,
+            model_context,
+            lookahead,
+        } => {
             let inputs = Inputs::read(&common, "harness.target_compare")?;
             let rendered = inputs.render(None)?;
             let digest = inputs.write_rendered(&rendered)?;
             let (options, development) = engine_options(&engine, &inputs)?;
             let compared = target_compare::run(
-                &inputs.artifacts.artifacts, &options, &rendered, &digest,
-                anchor.get(), model_context.get(), lookahead,
+                &inputs.artifacts.artifacts,
+                &options,
+                &rendered,
+                &digest,
+                anchor.get(),
+                model_context.get(),
+                lookahead,
                 &inputs.run.path("target-compare.json"),
             )?;
             development.finish()?;
