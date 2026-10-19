@@ -164,6 +164,28 @@ Snapshot and read-only observer:
 `20261019T103247Z-stage4-main-features-3ebbf3/ram-103427.json` and
 `ram-observer.py` under the local results directory.
 
+A further read-only snapshot at **2026-10-19 11:52:44 UTC** found **53.363 GiB
+`Cached`, 7.590 GiB actually free and 60.773 GiB `MemAvailable`** out of
+62.696 GiB total. No Magnitude process was running and both GPUs were idle;
+an existing sleeping llama-server had approximately 3 MiB RSS and 3.25 GiB
+swapped out. System swap occupancy is not evidence that the earlier active
+Magnitude probe was swapping; its sampled `VmSwap` was zero. The snapshot did
+not inventory model-page residency, and `Cached` includes other files.
+
+The practical answer is conditional: retain more useful expert pages when
+physical misses are costly, while preserving runtime headroom. Here most spare
+RAM is already serving the filesystem cache. Stage 2b's two candidate generation
+delivery windows each had approximately **4.84 GB logical reads and 6.14 MB
+physical reads**. Those windows do not show a warm disk-bandwidth bottleneck or
+establish which remaining operation dominates. The existing managed-cache
+comparison also failed to demonstrate a speedup. Prioritize measuring source
+service time, RAM copies, uploads, conversions and GPU expert reuse before
+allocating another cache. Cold loading and broader or changing expert demand
+may have a different miss rate and require their own measurement.
+
+Snapshot and its reproduction script:
+`20261019T115244Z-idle-ram-diagnostic/` under the local results directory.
+
 ### Confirmed code observations
 
 - [CUDA upload](inference/seismic/backends/cuda/src/driver.rs) calls
@@ -1260,7 +1282,7 @@ unit keys and their chosen configurations also match across widths
 the change to history/preparation/attention rather than Q/K/V projection, but
 does not establish an independent model-quality verdict.
 
-**Query-tile experiment, not retained.** Build
+**Query-tile experiment, insufficient alone.** Build
 `20261019T110211Z-stage4-build-18af2b`, dirty digest
 `e5814cf1528add8dae38a587548c63bc638149e6646f22fffe3d8b89c104a1e2`,
 assigned one query token per CUDA matrix tile, keeping tokens parallel and
@@ -1321,6 +1343,50 @@ pinned launchers and exact input/output evidence; builds retain complete patches
 The history correction and MTP implementation remain unpromoted, and timing
 remains held until the actual serving gate passes.
 
+### Stage 4 failed text replay and combined serving gate
+
+The saved plain output was rendered as an explicitly identified diagnostic chat
+fixture in `20261019T113504Z-stage4-greedy-prefix-7ac07e`. Build
+`20261019T113339Z-stage4-build-8b1643` adds an explicit logits-harness model
+context reservation, allowing the serving capacity of 1,024 without changing
+the input. Its dirty digest is
+`559cb4a268429619934feaa2675d4cf6910ef10d55e1ee90e7a33db6c8d83abd`.
+
+The rendered prompt's first 396 tokens match serving, and positions 411–413
+contain `[8026,11,321]`. However, **the single-row replay fails its own saved
+greedy control at position 397**: the rendered answer expects token 34565 and
+the target selects 3896. The run terminated with code 1 and records
+`control-issue.json`. Re-rendered text does not establish the actual sampled
+token path. The source of this mismatch needs sampled-token evidence; this
+probe cannot isolate rejection-dependent repair. Its comparison at position
+412 must not be described as proof of a repair defect or an exact serving-prefix
+comparison.
+
+Both candidate corrections were then combined: canonical history joins and
+one query per CUDA matrix tile, with queries still parallel. Build
+`20261019T114027Z-stage4-build-2b0009`, dirty digest
+`24f3085f7159b3706b43425a1daec01e044e3d8a6fc9742644a4ddc3113bde94`,
+completed. The full original serving gate
+`20261019T114235Z-stage4-combined-heldout-a58779` **failed**:
+
+| Fixture | Frozen plain control | Combined MTP candidate | Exact parity |
+| --- | --- | --- | --- |
+| Repeated passage | 64 output tokens, length limit | 64; 31/31 proposals accepted | Pass |
+| Ordinary continuation | 60 output tokens, natural stop | 64, length limit; 35 proposed, 27 accepted, 8 rejected | Fail |
+| Tool call | 53 output tokens, tool stop | 53; 26/26 proposals accepted | Pass |
+
+Both tool outputs passed BFCL validation and called `calculate_triangle_area`
+with exactly `{"base":10,"height":5,"unit":"units"}`. Generated call IDs
+are excluded from parity. The candidate's ordinary text again selects ` went`
+where plain selects ` and`. Its round trace reproduces position 411 inputs
+`[8026,11]`, target selections `[11,3804]`, after five prior rejection rounds
+(`round-analysis.json`). Combining the corrections does not qualify MTP.
+
+The run retains all controls, stop reasons, outputs and checks, plus a launcher
+pinned to its candidate build proof. It is instrumented qualification with no
+thermal timing gate and supports no speed claim. Both corrections and the MTP
+implementation remain candidate-only.
+
 ## Immediate next action
 
 Continue **Stage 4 qualification**, preserving the frozen Stage 2b plain control.
@@ -1329,18 +1395,17 @@ target-reading heads, vision and separate block drafters need other placement
 contracts. Real proposals, full-acceptance prefix reuse and cancellation/recovery
 now work; the ordinary-continuation parity gate remains failed.
 
-Compare target execution on the exact saved plain greedy continuation through
-the differing position 411 round. Represent that saved output as an explicitly
-identified diagnostic chat fixture, render it through the engine, and verify
-the full serving prompt prefix and the round's input IDs. Keep model context
-at the serving limit of 1,024; add an explicit harness context reservation if
-needed rather than changing the input to obtain that capacity. This is a
-control-derived diagnostic, not an independent reference-quality measurement.
-Compare single-row and two-row execution without rejected suffixes at positions
-411 and 412. If these match, inspect rejected-prefix state repair against the
-same accepted prefix; if they differ, localize that target difference first.
-The original grouped kernels are restored, and the canonical history correction
-must remain in both sides. Keep the frozen Stage 2b plain control unchanged.
+Generate the actual greedy prefix inside the evaluation harness from the
+original serving chat fixture, rendered through the engine at context capacity
+1,024. Record the tokens selected by the model; the failed text-derived replay
+cannot supply this control. Advance two fresh sequences by ordinary greedy
+decoding to position 411 and require their sampled prefixes to match. Then
+compare two sequential target rows with one two-row target verification using
+the first sequence's sampled next token. This compares actual generated tokens
+without MTP proposals or rejected suffixes. If these match, inspect rejected-prefix
+state repair against that prefix; if they differ, localize that target difference
+first. Keep both candidate corrections fixed across the comparison and preserve
+the frozen Stage 2b plain control unchanged.
 Preserve graph/state leases and every owner's completion, keep diagnostics
 opt-in, and make no timing claim from an instrumented run. Do not serialize
 verification or relax precision/greedy parity to obtain a pass. Requalify the
