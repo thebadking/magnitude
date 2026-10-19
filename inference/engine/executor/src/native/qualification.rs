@@ -78,7 +78,7 @@ impl<'a> QualificationView<'a> {
             )
             .map_err(|error| qualification_dynamic("import_dense", &bindings, error))?;
             let destination = handle
-                .call(import_dense::Args { source: &source })
+                .call_scoped(import_dense::Args { source: &source })
                 .map(|results| results.value)
                 .map_err(|error| qualification_dynamic("import_dense", &bindings, error))?;
             let output = destination
@@ -128,7 +128,7 @@ impl<'a> QualificationView<'a> {
             let source = Tensor::from_host(device, *source_element, &shape, &bytes)
                 .map_err(|error| failure(error.to_string()))?;
             let result = handle
-                .call(repack_weight::Args { source: &source })
+                .call_scoped(repack_weight::Args { source: &source })
                 .map(|results| results.value)
                 .map_err(|error| failure(error.to_string()))?;
             let output = result

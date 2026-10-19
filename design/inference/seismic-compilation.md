@@ -369,6 +369,12 @@ is a tuning axis. The measured interval of a CPU submission starts when it holds
 submission never measures another's work.
 Standalone native calls use the same checked entry without creating a graph. Their scalar-result
 slots and scratch are the prepared kernel's invocation workspace, which reports both.
+A call-scoped invocation instead owns its scratch until that call completes;
+returned tensors retain their independent result storage. It uses the same
+placement, scalar-result exclusion, native execution and result decoding as a
+cached invocation. Releasing its scratch cannot release or reuse another call's
+cached workspace. One-shot qualification uses this scope so its temporary
+arenas do not become persistent resources of the prepared kernel.
 Every non-empty scratch arena (the standalone arena and every graph workspace that places
 anything) reserves a fixed range at its start for `sync` scratch. Nothing else is placed there;
 within one graph each node's sync buffers are disjoint from every other node's, and never

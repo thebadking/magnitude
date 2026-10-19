@@ -103,7 +103,7 @@ impl<'a> QualificationView<'a> {
                     let mut table_values = vec![0.0; (l * h) as usize];
                     table_values[..h as usize].copy_from_slice(&table_row);
                     let result = prepared(&kernels.patch_stem, kernel, entry, label)?
-                        .call(vision_patch_stem::Args {
+                        .call_scoped(vision_patch_stem::Args {
                             pixels: &zeros(entry, Element::f32(), &[rows, c, 1 + s, p, p])?,
                             frame_weight: &zeros(entry, element("W0")?, &[h, c, p, p])?,
                             next_frame_weight: &zeros(entry, element("W1")?, &[s, h, c, p, p])?,
@@ -149,7 +149,7 @@ impl<'a> QualificationView<'a> {
                     );
                     let bias_values = pattern(h, 7, 2);
                     let result = prepared(&kernels.norm, kernel, entry, label)?
-                        .call(vision_norm::Args {
+                        .call_scoped(vision_norm::Args {
                             source: &semantic_f32(
                                 device,
                                 &[1, g, h],
@@ -202,7 +202,7 @@ impl<'a> QualificationView<'a> {
                     let residual_values = pattern(rows * n, 9, 3);
                     let gate_values = pattern(rows * n, 3, 1);
                     let result = prepared(&kernels.linear, kernel, entry, label)?
-                        .call(vision_linear::Args {
+                        .call_scoped(vision_linear::Args {
                             x: &values(entry, activation, &[rows, k], &pattern(rows * k, 5, 0))?,
                             weight: &zeros(entry, element("W")?, &[n, k])?,
                             bias: &values(
@@ -267,7 +267,7 @@ impl<'a> QualificationView<'a> {
                     let n = 64;
                     let input = pattern(rows * n, 7, 0);
                     let result = prepared(&kernels.clamp, kernel, entry, label)?
-                        .call(vision_clamp::Args {
+                        .call_scoped(vision_clamp::Args {
                             x: &values(entry, element("A")?, &[rows, n], &input)?,
                             minimum: &semantic_f32(device, &[1], &[-1.0], entry, label)?,
                             maximum: &semantic_f32(device, &[1], &[2.0], entry, label)?,
@@ -296,7 +296,7 @@ impl<'a> QualificationView<'a> {
                     // attention returns them.
                     let value_row = pattern(heads * width, 7, 0);
                     let result = prepared(&kernels.attention, kernel, entry, label)?
-                        .call(vision_attention::Args {
+                        .call_scoped(vision_attention::Args {
                             query: &zeros(entry, activation, &shape)?,
                             key: &zeros(entry, activation, &shape)?,
                             value: &values(entry, activation, &shape, &repeated(&value_row, rows))?,
@@ -346,7 +346,7 @@ impl<'a> QualificationView<'a> {
                     let (g, h, ns) = (statics("G")?, statics("H")?, statics("NS")?);
                     let input = pattern(g * h, 5, 0);
                     let result = prepared(&kernels.pool, kernel, entry, label)?
-                        .call(vision_pool::Args {
+                        .call_scoped(vision_pool::Args {
                             source: &semantic_f32(device, &[1, g, h], &input, entry, label)?,
                             standard_bias: &zeros(entry, element("SB")?, &[ns, h])?,
                             standard_scale: &semantic_ones(
@@ -384,7 +384,7 @@ impl<'a> QualificationView<'a> {
                     let mut table_values = vec![0.0; (l * h) as usize];
                     table_values[..h as usize].copy_from_slice(&table_row);
                     let result = prepared(&kernels.position, kernel, entry, label)?
-                        .call(vision_position::Args {
+                        .call_scoped(vision_position::Args {
                             source: &semantic_f32(device, &[rows, h], &input, entry, label)?,
                             table: &values(entry, element("PE")?, &[l, h], &table_values)?,
                             indices: &semantic_i32(
@@ -416,7 +416,7 @@ impl<'a> QualificationView<'a> {
                     let width = description.hidden;
                     let input = pattern(rows * width, 9, 0);
                     let result = prepared(&kernels.post_norm, kernel, entry, label)?
-                        .call(post_norm_residual::Args {
+                        .call_scoped(post_norm_residual::Args {
                             residual: &semantic_f32(device, &[rows, width], &input, entry, label)?,
                             projected: &zeros(entry, Element::f32(), &[rows, width])?,
                             norm: &semantic_ones(device, element("NW")?, &[width], entry, label)?,

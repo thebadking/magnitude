@@ -57,7 +57,7 @@ impl<'a> QualificationView<'a> {
                 .programs
                 .target
                 .embedding
-                .call(embedding_rows::Args {
+                .call_scoped(embedding_rows::Args {
                     table: &table,
                     tokens: &tokens,
                     directory: &direct,
@@ -229,7 +229,7 @@ impl<'a> QualificationView<'a> {
                 .map_err(|error| qualification_dynamic("target_recurrent", &label, error))?;
             let projection = kernels
                 .project
-                .call(gated_delta_project::Args {
+                .call_scoped(gated_delta_project::Args {
                     hidden: &input,
                     input_norm: &norm,
                     qkv_weight: &qkv,
@@ -244,7 +244,7 @@ impl<'a> QualificationView<'a> {
                 .value;
             let gated = match &kernels.step {
                 RecurrentStepKernels::Step(step) => {
-                    step.call(gated_delta_step::Args {
+                    step.call_scoped(gated_delta_step::Args {
                         projection: &projection,
                         convolution: &convolution,
                         rate: &rate,
@@ -269,7 +269,7 @@ impl<'a> QualificationView<'a> {
                 }
                 RecurrentStepKernels::Convolved { project, step } => {
                     let projected = project
-                        .call(gated_delta_project_convolved::Args {
+                        .call_scoped(gated_delta_project_convolved::Args {
                             hidden: &input,
                             input_norm: &norm,
                             qkv_weight: &qkv,
@@ -289,7 +289,7 @@ impl<'a> QualificationView<'a> {
                         .map_err(|error| {
                             qualification_dynamic("gated_delta_project_convolved", &label, error)
                         })?;
-                    step.call(gated_delta_step_convolved::Args {
+                    step.call_scoped(gated_delta_step_convolved::Args {
                         projection: &projected.r0,
                         convolved: &projected.r1,
                         rate: &rate,
@@ -316,7 +316,7 @@ impl<'a> QualificationView<'a> {
             };
             kernels
                 .chunk
-                .call(gated_delta_chunk::Args {
+                .call_scoped(gated_delta_chunk::Args {
                     projection: &projection,
                     convolution: &convolution,
                     rate: &rate,
@@ -339,7 +339,7 @@ impl<'a> QualificationView<'a> {
                 .map_err(|error| qualification_dynamic("gated_delta_chunk", &label, error))?;
             let result = kernels
                 .output
-                .call(attention_output::Args {
+                .call_scoped(attention_output::Args {
                     hidden: &residual,
                     inject: &rows.inject(device, 1, "attention_output", &label)?,
                     gated: &gated,
@@ -429,7 +429,7 @@ impl<'a> QualificationView<'a> {
                 |extent| semantic_ones(device, Element::f32(), &[extent], "target_dense", &label);
             let product = kernels
                 .expand
-                .call(dense_expand::Args {
+                .call_scoped(dense_expand::Args {
                     residual: &hidden_residual,
                     norm: &norm,
                     gate_weight: &gate,
@@ -447,7 +447,7 @@ impl<'a> QualificationView<'a> {
             let result = match (&kernels.output, binding.tail) {
                 (SublayerOutput::Residual(output), SublayerTail::Residual) => {
                     output
-                        .call(dense_output::Args {
+                        .call_scoped(dense_output::Args {
                             residual: &hidden_residual,
                             product: &product,
                             down_weight: &down,
@@ -572,7 +572,7 @@ impl<'a> QualificationView<'a> {
                 &label,
             )?;
             let features = kernel
-                .call(readout_features_rows::Args {
+                .call_scoped(readout_features_rows::Args {
                     hidden: &parts,
                     norm: &norm,
                     out_rows: &out_rows,
@@ -622,7 +622,7 @@ impl<'a> QualificationView<'a> {
                         &label,
                     )?;
                     let logits = head
-                        .call(readout_head_rows::Args {
+                        .call_scoped(readout_head_rows::Args {
                             hidden: &exit_rows,
                             norm: &norm,
                             weight: &weight,
@@ -642,7 +642,7 @@ impl<'a> QualificationView<'a> {
                     require_zero_result(&logits, "readout_head_rows", &label)?;
                     let rows = semantic_i32(device, &[1], &[0], "readout_selected_rows", &label)?;
                     let selected_result = selected
-                        .call(readout_selected_rows::Args {
+                        .call_scoped(readout_selected_rows::Args {
                             hidden: &exit_rows,
                             norm: &norm,
                             weight: &weight,
@@ -686,7 +686,7 @@ impl<'a> QualificationView<'a> {
                 &label,
             )?;
             let result = kernel
-                .call(readout_features_rows::Args {
+                .call_scoped(readout_features_rows::Args {
                     hidden: &parts,
                     norm: &norm,
                     out_rows: &out_rows,
@@ -742,7 +742,7 @@ pub(super) fn qualify_routed(
         let route = |routes: &mut Tensor, scores: &mut Tensor| {
             kernels
                 .route
-                .call(routed_route::Args {
+                .call_scoped(routed_route::Args {
                     residual: &input,
                     norm: &norm,
                     router: &router,
@@ -760,7 +760,7 @@ pub(super) fn qualify_routed(
                 RoutedDecodeKernels::Expand(expand) => {
                     let routed = route(&mut routes, &mut scores)?;
                     let expanded = expand
-                        .call(routed_expand::Args {
+                        .call_scoped(routed_expand::Args {
                             normalized: &routed.r0,
                             routes: &first,
                             expert_gate: &expert_gate,
@@ -773,7 +773,7 @@ pub(super) fn qualify_routed(
                 }
                 RoutedDecodeKernels::SharedRoute { route, choices } => {
                     let routed = route
-                        .call(routed_route_shared::Args {
+                        .call_scoped(routed_route_shared::Args {
                             residual: &input,
                             norm: &norm,
                             router: &router,
@@ -789,7 +789,7 @@ pub(super) fn qualify_routed(
                             qualification_dynamic("routed_route_shared", &label, error)
                         })?;
                     let product = choices
-                        .call(routed_gate_up::Args {
+                        .call_scoped(routed_gate_up::Args {
                             normalized: &routed.r0,
                             routes: &first,
                             expert_gate: &expert_gate,
@@ -803,7 +803,7 @@ pub(super) fn qualify_routed(
             };
             kernels
                 .output
-                .call(routed_output::Args {
+                .call_scoped(routed_output::Args {
                     residual: &residual,
                     inject: &inject,
                     expert_product: &expert_product,
@@ -826,7 +826,7 @@ pub(super) fn qualify_routed(
             let mut block_experts = zeros(Element::i32(), &[blocks])?;
             kernels
                 .group
-                .call(routed_group::Args {
+                .call_scoped(routed_group::Args {
                     routes: &first,
                     counts: &mut counts,
                     order: &mut order,
@@ -836,7 +836,7 @@ pub(super) fn qualify_routed(
                 .map_err(|error| qualification_dynamic("routed_group", &label, error))?;
             let experts = kernels
                 .experts
-                .call(routed_experts::Args {
+                .call_scoped(routed_experts::Args {
                     normalized: &routed.r0,
                     order: &order,
                     blocks: &block_experts,
@@ -849,7 +849,7 @@ pub(super) fn qualify_routed(
                 .value;
             kernels
                 .combine
-                .call(routed_combine::Args {
+                .call_scoped(routed_combine::Args {
                     residual: &residual,
                     inject: &inject,
                     expert_output: &experts,
@@ -895,7 +895,7 @@ fn qualify_parallel(
     let out_rows = semantic_i32(device, &[1], &[0], "dense_expand", &label)?;
     let product = kernels
         .expand
-        .call(dense_expand::Args {
+        .call_scoped(dense_expand::Args {
             residual: hidden_residual,
             norm: &zeros(dense.norm, &[hidden], "dense_expand")?,
             gate_weight: &zeros(dense.gate, &[features, hidden], "dense_expand")?,
@@ -912,7 +912,7 @@ fn qualify_parallel(
         .value;
     let projected = kernels
         .down
-        .call(project_rows::Args {
+        .call_scoped(project_rows::Args {
             source: &product,
             weight: &zeros(dense.down, &[hidden, features], "project_rows")?,
             weight_scale: &absent_scale,
@@ -924,7 +924,7 @@ fn qualify_parallel(
     let norm = zeros(binding.norm, &[hidden], "moe_tail")?;
     let result = kernels
         .tail
-        .call(moe_tail::Args {
+        .call_scoped(moe_tail::Args {
             residual: hidden_residual,
             dense: &projected,
             routed: &branch,
@@ -993,7 +993,7 @@ fn qualify_general_routed(
                 let product = match (expansion, gate) {
                     (DenseExpansionKernel::Gated(kernel), Some(gate)) => {
                         kernel
-                            .call(dense_expand::Args {
+                            .call_scoped(dense_expand::Args {
                                 residual: &residual,
                                 norm: &norm,
                                 gate_weight: &zeros(gate, &[s, h])?,
@@ -1011,7 +1011,7 @@ fn qualify_general_routed(
                     }
                     (DenseExpansionKernel::Plain(kernel), None) => {
                         kernel
-                            .call(dense_up::Args {
+                            .call_scoped(dense_up::Args {
                                 residual: &residual,
                                 norm: &norm,
                                 up_weight: &up,
@@ -1032,7 +1032,7 @@ fn qualify_general_routed(
                     }
                 };
                 output
-                    .call(dense_output::Args {
+                    .call_scoped(dense_output::Args {
                         residual: &residual,
                         product: &product,
                         down_weight: &zeros(down, &[h, s])?,
@@ -1056,7 +1056,7 @@ fn qualify_general_routed(
         let mut weights = zeros(Element::f32(), &[rows, k])?;
         let normalized = kernels
             .select
-            .call(routed_select::Args {
+            .call_scoped(routed_select::Args {
                 residual: &residual,
                 norm: &norm,
                 router_norm: &router_norm,
@@ -1076,7 +1076,7 @@ fn qualify_general_routed(
         let (input, sum_base) = match (&kernels.latent, binding.latent) {
             (Some((project, _)), Some((down, _))) => (
                 project
-                    .call(project_rows::Args {
+                    .call_scoped(project_rows::Args {
                         source: &normalized,
                         weight: &zeros(down, &[x, h])?,
                         weight_scale: &scale(scales.latent.0)?,
@@ -1094,7 +1094,7 @@ fn qualify_general_routed(
             let product = match &kernels.experts {
                 ExpertKernels::Gated { decode, .. } => {
                     decode
-                        .call(routed_gate_up::Args {
+                        .call_scoped(routed_gate_up::Args {
                             normalized: &input,
                             routes: &first,
                             expert_gate: expert_gate.as_ref().unwrap_or(&expert_up),
@@ -1106,7 +1106,7 @@ fn qualify_general_routed(
                 }
                 ExpertKernels::Plain { decode, .. } => {
                     decode
-                        .call(routed_up::Args {
+                        .call_scoped(routed_up::Args {
                             normalized: &input,
                             routes: &first,
                             expert_up: &expert_up,
@@ -1119,7 +1119,7 @@ fn qualify_general_routed(
             };
             kernels
                 .down
-                .call(routed_down::Args {
+                .call_scoped(routed_down::Args {
                     base: &sum_base,
                     product: &product,
                     routes: &first,
@@ -1136,7 +1136,7 @@ fn qualify_general_routed(
             let mut block_experts = zeros(Element::i32(), &[blocks])?;
             kernels
                 .group
-                .call(routed_group::Args {
+                .call_scoped(routed_group::Args {
                     routes: &first,
                     counts: &mut counts,
                     order: &mut order,
@@ -1147,7 +1147,7 @@ fn qualify_general_routed(
             let expert_output = match &kernels.experts {
                 ExpertKernels::Gated { grouped, .. } => {
                     grouped
-                        .call(routed_experts::Args {
+                        .call_scoped(routed_experts::Args {
                             normalized: &input,
                             order: &order,
                             blocks: &block_experts,
@@ -1161,7 +1161,7 @@ fn qualify_general_routed(
                 }
                 ExpertKernels::Plain { grouped, .. } => {
                     grouped
-                        .call(routed_experts_up::Args {
+                        .call_scoped(routed_experts_up::Args {
                             normalized: &input,
                             order: &order,
                             blocks: &block_experts,
@@ -1176,7 +1176,7 @@ fn qualify_general_routed(
             };
             kernels
                 .scatter
-                .call(routed_scatter::Args {
+                .call_scoped(routed_scatter::Args {
                     base: &sum_base,
                     expert_output: &expert_output,
                     inverse: &inverse,
@@ -1188,7 +1188,7 @@ fn qualify_general_routed(
         let result = match (&kernels.latent, binding.latent) {
             (Some((_, up_kernel)), Some((_, up))) => {
                 up_kernel
-                    .call(dense_output::Args {
+                    .call_scoped(dense_output::Args {
                         residual: &base,
                         product: &routed,
                         down_weight: &zeros(up, &[h, x])?,
@@ -1251,7 +1251,7 @@ fn qualify_short_conv(
         .map_err(|error| qualification_dynamic(entry, &label, error))?;
     let projection = kernels
         .project
-        .call(short_conv_project::Args {
+        .call_scoped(short_conv_project::Args {
             residual: hidden_residual,
             norm: &norm,
             b_weight: &input_gate,
@@ -1266,7 +1266,7 @@ fn qualify_short_conv(
         .value;
     let gated = kernels
         .rows
-        .call(short_conv_rows::Args {
+        .call_scoped(short_conv_rows::Args {
             projection: &projection,
             convolution: &convolution,
             segments: &segments,
@@ -1283,7 +1283,7 @@ fn qualify_short_conv(
         .map_err(|error| qualification_dynamic("short_conv_rows", &label, error))?;
     let result = kernels
         .output
-        .call(attention_output::Args {
+        .call_scoped(attention_output::Args {
             hidden: hidden_residual,
             inject: &semantic_zeros(device, Element::f32(), &[1, 0], "attention_output", &label)?,
             gated: &gated,
@@ -1365,7 +1365,7 @@ fn qualify_state_space(
     let (mut window, mut state, mut tape) = (region(0)?, region(1)?, region(2)?);
     let projection = kernels
         .project
-        .call(attention_project::Args {
+        .call_scoped(attention_project::Args {
             hidden: hidden_residual,
             input_norm: &norm,
             query_weight: &projection_weight,
@@ -1384,7 +1384,7 @@ fn qualify_state_space(
     macro_rules! advance {
         ($module:ident, $kernel:expr) => {
             $kernel
-                .call($module::Args {
+                .call_scoped($module::Args {
                     projection: &projection,
                     convolution: &convolution,
                     convolution_bias: &convolution_bias,
@@ -1409,7 +1409,7 @@ fn qualify_state_space(
     advance!(state_space_chunk, kernels.chunk);
     let gated = kernels
         .gate
-        .call(state_space_gate::Args {
+        .call_scoped(state_space_gate::Args {
             mixed: &mixed,
             projection: &projection,
             state_norm: &state_norm,
@@ -1419,7 +1419,7 @@ fn qualify_state_space(
         .value;
     let result = kernels
         .output
-        .call(attention_output::Args {
+        .call_scoped(attention_output::Args {
             hidden: hidden_residual,
             inject: &semantic_zeros(device, Element::f32(), &[1, 0], "attention_output", &label)?,
             gated: &gated,
@@ -1459,7 +1459,7 @@ impl QualificationView<'_> {
             )?;
             let rounded = kernels
                 .round
-                .call(import_dense::Args { source: &embedded })
+                .call_scoped(import_dense::Args { source: &embedded })
                 .map_err(|error| qualification_dynamic("import_dense", &label, error))?
                 .value;
             let projection = semantic_zeros(
@@ -1471,7 +1471,7 @@ impl QualificationView<'_> {
             )?;
             let projected = kernels
                 .project
-                .call(project_rows::Args {
+                .call_scoped(project_rows::Args {
                     source: &rounded
                         .reshape(&[1, hidden])
                         .map_err(|error| qualification_dynamic("project_rows", &label, error))?,
@@ -1491,13 +1491,13 @@ impl QualificationView<'_> {
             let table = match &kernels.table {
                 TableConversion::Dense(kernel) => {
                     kernel
-                        .call(import_dense::Args { source: &source })
+                        .call_scoped(import_dense::Args { source: &source })
                         .map_err(|error| qualification_dynamic("import_dense", &label, error))?
                         .value
                 }
                 TableConversion::Repack(kernel) => {
                     kernel
-                        .call(repack_weight::Args { source: &source })
+                        .call_scoped(repack_weight::Args { source: &source })
                         .map_err(|error| qualification_dynamic("repack_weight", &label, error))?
                         .value
                 }
@@ -1511,7 +1511,7 @@ impl QualificationView<'_> {
             )?;
             let combined = kernels
                 .inputs
-                .call(per_layer_inputs::Args {
+                .call_scoped(per_layer_inputs::Args {
                     gathered: &table.reshape(&[1, channels]).map_err(|error| {
                         qualification_dynamic("per_layer_inputs", &label, error)
                     })?,
@@ -1571,7 +1571,7 @@ impl QualificationView<'_> {
             )?;
             let gated = kernels
                 .gate
-                .call(per_layer_gate::Args {
+                .call_scoped(per_layer_gate::Args {
                     hidden: hidden_residual,
                     gate_weight: &gate,
                     inputs: &inputs,
@@ -1663,7 +1663,7 @@ pub(super) fn qualify_progressive(
     let constrained = semantic_i32(device, &[1], &[0], context, &label)?;
     let first = kernels
         .top
-        .call(readout_top_rows::Args {
+        .call_scoped(readout_top_rows::Args {
             softcap: 0.0,
             hidden: hidden_residual,
             norm,
@@ -1683,7 +1683,7 @@ pub(super) fn qualify_progressive(
     require_zero_result(&first.r0, "readout_top_rows", &label)?;
     let second = kernels
         .refine
-        .call(readout_refine_rows::Args {
+        .call_scoped(readout_refine_rows::Args {
             softcap: 0.0,
             features: &first.r2,
             top: &top,
@@ -1703,7 +1703,7 @@ pub(super) fn qualify_progressive(
     require_zero_result(&second.r0, "readout_refine_rows", &label)?;
     let exact = kernels
         .exact
-        .call(readout_exact_rows::Args {
+        .call_scoped(readout_exact_rows::Args {
             softcap: 0.0,
             features: &first.r2,
             top: &top,
@@ -1724,7 +1724,7 @@ pub(super) fn qualify_progressive(
     require_zero_result(&exact, "readout_exact_rows", &label)?;
     let planes = kernels
         .planes
-        .call(readout_planes_rows::Args {
+        .call_scoped(readout_planes_rows::Args {
             softcap: 0.0,
             hidden: hidden_residual,
             norm,

@@ -55,7 +55,7 @@ impl<'a> QualificationView<'a> {
             )?;
             let features = block
                 .input
-                .call(draft_rows::Args {
+                .call_scoped(draft_rows::Args {
                     tokens: &tokens,
                     directory: &direct,
                     table: &table,
@@ -109,7 +109,7 @@ impl<'a> QualificationView<'a> {
                     )?;
                     let product = kernels
                         .expand
-                        .call(dense_expand::Args {
+                        .call_scoped(dense_expand::Args {
                             residual: &attended,
                             norm: &norm,
                             gate_weight: &gate,
@@ -144,7 +144,7 @@ impl<'a> QualificationView<'a> {
                         ));
                     };
                     output
-                        .call(dense_output::Args {
+                        .call_scoped(dense_output::Args {
                             residual: &attended,
                             product: &product,
                             down_weight: &down,
@@ -184,7 +184,7 @@ impl<'a> QualificationView<'a> {
             )?;
             let projected_features = block
                 .features
-                .call(readout_features_rows::Args {
+                .call_scoped(readout_features_rows::Args {
                     hidden: &parts,
                     norm: &output_norm,
                     out_rows: &out_rows,
@@ -241,7 +241,7 @@ impl<'a> QualificationView<'a> {
                         &label,
                     )?;
                     let logits = kernel
-                        .call(readout_project_rows::Args {
+                        .call_scoped(readout_project_rows::Args {
                             features: &projected_features,
                             weight: &projection,
                             token_rows: &token_rows,

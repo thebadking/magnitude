@@ -2402,6 +2402,13 @@ pub mod kernel {
         kernel.inner.call_into(args, outputs)
     }
 
+    pub fn call_native_scoped(
+        kernel: &Arc<NativePreparedAny>,
+        args: EncodedArgs,
+    ) -> Result<DecodedResults, CallError> {
+        kernel.inner.call_scoped(args)
+    }
+
     /// Tensor-result calls from different native entries in one ordered
     /// device submission. The caller retains output tensors until completion.
     pub struct NativeTensorBatchAny {

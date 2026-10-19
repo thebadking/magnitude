@@ -328,8 +328,12 @@ The resource plan authorizes persistent weights and startup state slabs, includi
 pristine recurrent zero seed, the device's one workspace arena, outputs that outlive launches,
 structural retention slots, optional component residency, and the
 qualification/startup peak. Persistent allocation follows planning. Qualification scratch is
-released before physical model import. A placed load bounds preparation,
-import, initial-state allocation and serving separately and takes their maximum
+released before physical model import.
+One-shot entry qualification owns scratch per call, through completion, and
+verifies the planned fixed invocation charge again after qualification; a
+temporary standalone arena cannot escape into the prepared program inventory.
+A placed load bounds preparation, import, initial-state allocation and serving
+separately and takes their maximum
 per physical allocation domain. Preparation retains native invocation buffers
 and the recorded-graph allowance, but no model weights or graph pools. Its
 qualification bound uses the complete graph inventory the factory prepares,

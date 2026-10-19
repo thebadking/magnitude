@@ -225,7 +225,7 @@ impl<'a> QualificationView<'a> {
             .map_err(|_| qualification_dynamic("ngram_rows", label, "reset token exceeds i32"))?;
         let rows = kernels
             .rows
-            .call(ngram_rows::Args {
+            .call_scoped(ngram_rows::Args {
                 tokens: &tokens,
                 multipliers: &u64_tensor(device, &hash.multipliers, "ngram_rows", label)?,
                 sizes: &u64_tensor(device, &hash.sizes, "ngram_rows", label)?,
@@ -263,7 +263,7 @@ impl<'a> QualificationView<'a> {
         let slots = zeros(binding.table_source, &[1, binding.width])?;
         let decoded = kernels
             .stored
-            .call(stored_rows::Args {
+            .call_scoped(stored_rows::Args {
                 slots: &slots,
                 tokens: &zeros(Element::i32(), &[heads, 2])?,
                 directory: &zeros(Element::i32(), &[0, 1])?,
@@ -295,7 +295,7 @@ impl<'a> QualificationView<'a> {
                 })?;
             let extent = weight_plan.scale_extent();
             let result = kernel
-                .call(project_rows::Args {
+                .call_scoped(project_rows::Args {
                     source: &decoded,
                     weight_bound: &semantic_ones(
                         device,
@@ -326,7 +326,7 @@ impl<'a> QualificationView<'a> {
         let norm = semantic_ones(device, binding.norm, &[s, h], entry, label)?;
         let scales = kernels
             .gate
-            .call(ngram_gate::Args {
+            .call_scoped(ngram_gate::Args {
                 hidden: &view(&streams, &[1, s, h], "ngram_gate", label)?,
                 key: &view(&key, &[1, s, h], "ngram_gate", label)?,
                 value: &value,
@@ -342,7 +342,7 @@ impl<'a> QualificationView<'a> {
         require_f32_near(&scales, &gates, "ngram_gate", label)?;
         let injected = kernels
             .inject
-            .call(ngram_inject::Args {
+            .call_scoped(ngram_inject::Args {
                 hidden: &streams,
                 scales: &scales,
                 value: &value,
@@ -366,7 +366,7 @@ impl<'a> QualificationView<'a> {
         let mut notice = zeros(Element::i32(), &[1, 2])?;
         kernels
             .notice
-            .call(selection_notice::Args {
+            .call_scoped(selection_notice::Args {
                 selection: &tokens,
                 notice: &mut notice,
             })
@@ -408,7 +408,7 @@ fn qualify_stream_binding(
     let inverses = vec![inverse; s as usize];
     let mixed = kernels
         .down
-        .call(stream_mix_down::Args {
+        .call_scoped(stream_mix_down::Args {
             hidden: &hidden,
             norm: &norm,
             down_weight: &down,
@@ -423,7 +423,7 @@ fn qualify_stream_binding(
     // zero-row view of its down weights.
     let exit = kernels
         .exit
-        .call(stream_mix_down::Args {
+        .call_scoped(stream_mix_down::Args {
             hidden: &hidden,
             norm: &norm,
             down_weight: &down,
@@ -437,7 +437,7 @@ fn qualify_stream_binding(
     require_f32_near(&exit.r2, &inverses, "stream_mix_down", &label)?;
     let partials = kernels
         .up
-        .call(stream_mix_up::Args {
+        .call_scoped(stream_mix_up::Args {
             low: &mixed.r0,
             up_weight: &up,
             hidden: &hidden,
@@ -458,7 +458,7 @@ fn qualify_stream_binding(
     let row = semantic_f32(device, &[1, h], &row_values, "repeat_rows", &label)?;
     let widened = kernels
         .repeat
-        .call(repeat_rows::Args {
+        .call_scoped(repeat_rows::Args {
             rows: &row,
             scales: &semantic_ones(device, Element::f32(), &[s], "repeat_rows", &label)?,
         })

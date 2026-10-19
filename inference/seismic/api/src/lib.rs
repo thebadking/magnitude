@@ -3302,6 +3302,15 @@ impl<E: Entry> NativeKernel<E> {
         Ok(E::decode(decoded))
     }
 
+    /// Execute with scratch owned by this call and released after completion.
+    /// Returned tensors keep their ordinary independent storage lifetime.
+    /// Scalar results remain serialized with all calls of this kernel.
+    pub fn call_scoped(&self, args: E::Args<'_>) -> Result<E::Results, CallError> {
+        let encoded = E::encode(args);
+        let decoded = seismic_runtime::api::kernel::call_native_scoped(&self.inner, encoded)?;
+        Ok(E::decode(decoded))
+    }
+
     /// Execute into caller-owned tensor results after validating their checked
     /// representation, device, and extents. Scalar results remain returned.
     pub fn call_into(

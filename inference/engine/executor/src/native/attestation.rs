@@ -1689,6 +1689,16 @@ impl AttestedPrograms {
             load,
         )
         .qualify(device)?;
+        let retained = Self::sum_invocation_workspace_bytes(&prepared)?;
+        if retained != planned_bytes {
+            return Err(CatalogFailure::Qualification {
+                entry: "program_factory",
+                bindings: "qualification workspace lifetime".into(),
+                outcome: format!(
+                    "qualification retained {retained} invocation bytes; plan charged {planned_bytes}"
+                ),
+            });
+        }
         Ok(attested)
     }
 

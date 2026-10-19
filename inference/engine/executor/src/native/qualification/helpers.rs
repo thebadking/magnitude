@@ -181,7 +181,7 @@ pub(super) fn qualify_attention(
         .map_err(|error| qualification_dynamic(ENTRY, label, error))?;
     let projected = kernels
         .project
-        .call(attention_project::Args {
+        .call_scoped(attention_project::Args {
             hidden: &input,
             input_norm: &input_norm,
             query_weight: &query,
@@ -237,7 +237,7 @@ pub(super) fn qualify_attention(
             });
             $(let mut $plane = planes.next().expect("one slab per history plane")?;)*
             $kernel
-                .call($module::Args {
+                .call_scoped($module::Args {
                     query: &mixed_query,
                     gate: &mixed_gate,
                     key: &mixed_key,
@@ -311,7 +311,7 @@ pub(super) fn qualify_attention(
         let result = match (&kernels.output, binding.tail) {
             (SublayerOutput::Residual(output_kernel), SublayerTail::Residual) => {
                 output_kernel
-                    .call(attention_output::Args {
+                    .call_scoped(attention_output::Args {
                         hidden: &residual,
                         inject: &inject,
                         gated,
@@ -363,7 +363,7 @@ pub(super) fn qualify_post_norm(
     )?;
     let projected = kernels
         .project
-        .call(project_rows::Args {
+        .call_scoped(project_rows::Args {
             source,
             weight,
             weight_scale: &weight_scale,
@@ -375,7 +375,7 @@ pub(super) fn qualify_post_norm(
     let out_rows = semantic_i32(device, &[1], &[0], "post_norm_residual", label)?;
     Ok(kernels
         .residual
-        .call(post_norm_residual::Args {
+        .call_scoped(post_norm_residual::Args {
             residual,
             projected: &projected,
             norm: &norm,

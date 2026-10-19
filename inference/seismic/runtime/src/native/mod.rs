@@ -1854,6 +1854,16 @@ impl NativePrepared {
         self.call_with(args, None, || {})
     }
 
+    pub(crate) fn call_scoped(self: &Arc<Self>, args: EncodedArgs) -> Result<DecodedResults, CallError> {
+        // Keep the scalar-result exclusion while using a separate scratch
+        // owner. Cached scratch of an ordinary caller is neither used nor
+        // released by this invocation.
+        let _serial = self.standalone.lock()
+            .expect("native standalone-call lock poisoned");
+        let mut temporary = Standalone::default();
+        self.call_using(&mut temporary, args, None, || {})
+    }
+
     pub(crate) fn call_into(
         self: &Arc<Self>,
         args: EncodedArgs,
@@ -1990,7 +2000,17 @@ impl NativePrepared {
             .standalone
             .lock()
             .expect("native standalone-call lock poisoned");
-        let call = self.prepare_call(&mut standalone, args, outputs)?;
+        self.call_using(&mut standalone, args, outputs, commit)
+    }
+
+    fn call_using(
+        self: &Arc<Self>,
+        standalone: &mut Standalone,
+        args: EncodedArgs,
+        outputs: Option<EncodedOutputs>,
+        commit: impl FnOnce(),
+    ) -> Result<DecodedResults, CallError> {
+        let call = self.prepare_call(standalone, args, outputs)?;
         let scalars = &self.scalars;
         {
             let _host = scalars.acquire(true);

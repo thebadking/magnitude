@@ -24,7 +24,7 @@ impl<'a> QualificationView<'a> {
         self.programs
             .state
             .feature_copy
-            .call(feature_copy::Args {
+            .call_scoped(feature_copy::Args {
                 input: &source,
                 out: &mut slice,
             })
@@ -65,7 +65,7 @@ impl<'a> QualificationView<'a> {
         self.programs
             .target
             .shape
-            .call(shape_rows::Args {
+            .call_scoped(shape_rows::Args {
                 logits: &mut logits,
                 mask: &mask,
                 constrained: &constrained,
@@ -119,7 +119,7 @@ impl<'a> QualificationView<'a> {
         self.programs
             .target
             .sample
-            .call(sample_rows::Args {
+            .call_scoped(sample_rows::Args {
                 logits: &logits,
                 mask: &mask,
                 constrained: &constrained,
@@ -165,7 +165,7 @@ impl<'a> QualificationView<'a> {
             .conditioning
             .as_ref()
             .expect("attested conditioning slot")
-            .call(conditioning_overlay::Args {
+            .call_scoped(conditioning_overlay::Args {
                 input: &input,
                 out: &mut out,
             })
@@ -232,7 +232,7 @@ impl<'a> QualificationView<'a> {
             .iter()
             .find(|(available, _)| *available == element)
             .expect("attested copy slot");
-        copy.call(copy_rows::Args {
+        copy.call_scoped(copy_rows::Args {
             rows: &mut rows,
             from: &from,
             to: &to,
