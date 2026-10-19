@@ -1689,6 +1689,8 @@ impl AttestedPrograms {
             load,
         )
         .qualify(device)?;
+        let unused = device.release_native_handoffs();
+        eprintln!("magnitude-engine: released {unused} unused native preparation handoffs");
         let retained = Self::sum_invocation_workspace_bytes(&prepared)?;
         if retained != planned_bytes {
             return Err(CatalogFailure::Qualification {

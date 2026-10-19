@@ -397,6 +397,19 @@ pub mod device {
         pub fn programs_formed(&self) -> usize {
             self.programs.formed()
         }
+
+        /// Discard unconsumed formation handoffs after their consumers have
+        /// prepared. Live kernels and submissions hold their own resources.
+        pub fn release_native_handoffs(&self) -> usize {
+            let pending = {
+                let mut chosen = self.chosen.lock()
+                    .expect("chosen-kernel lock is never poisoned");
+                std::mem::take(&mut *chosen)
+            };
+            let count = pending.len();
+            drop(pending);
+            count
+        }
         pub fn capabilities(&self) -> &[String] {
             self.capabilities
                 .get_or_init(|| self.kind.capabilities())
