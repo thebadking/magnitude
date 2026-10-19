@@ -83,6 +83,14 @@ pub struct Arena {
     mapped: HashMap<Key, usize>,
 }
 impl Arena {
+    /// Current readable identities, under the directory owner's exclusion.
+    /// Observing them supplies policy hints, never a device read lease.
+    pub(crate) fn ready_slots(&self) -> impl Iterator<Item = (usize, Key)> + '_ {
+        self.slots.iter().enumerate().filter_map(|(index, slot)| {
+            if let Content::Ready(key) = slot.content { Some((index, key)) } else { None }
+        })
+    }
+
     pub fn new(capacity: usize, layers: &[(LayerId, u32)]) -> Result<Self, Error> {
         if capacity == 0 || layers.is_empty() || layers.iter().any(|(_, n)| *n == 0) {
             return Err(Error::OutOfBounds);

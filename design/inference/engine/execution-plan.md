@@ -913,6 +913,16 @@ seeding respects the layer's share after protecting both current hits and kept
 resident experts; pinned hits cannot authorize taking another layer's share.
 Seed boundaries expire with the group's progress, independently of the last
 member that keeps its conveyor records alive.
+An explicit decode-reuse seed policy may rank those seeds by observed small-row
+expert reuse before prompt frequency. Its bounded per-expert history counts each
+observed device step once, halves counts every 64 bank sequences and does not
+count scratch scans. Fenced completion observes all-hit steps as well as demand
+requests, using only readable directory identities. In-flight row classes live
+through their physical completion; cache history may retain completed lookahead
+effects without changing accepted sequence state. Resident useful experts outside
+the prompt union can remain without new reads. With no history, prompt ranking
+is unchanged. This policy changes neither LRU victim selection nor reader/fill
+leases, conversion publication, source transfers or memory admission.
 Startup sizes each local shared cache against that owner's assessed device
 weight budget. It enumerates exact local inventories from full local expert
 capacity downward, excluding host-shared staging from dedicated

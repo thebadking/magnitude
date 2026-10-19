@@ -60,6 +60,18 @@ pub(crate) struct SharedDirectory {
     frames: Vec<Frame>,
 }
 impl SharedDirectory {
+    /// Visit each bank group's readable slots once. Its layers share one GPU
+    /// stamp array; the representative is only that array's binding owner.
+    pub(crate) fn visit_ready(&self, mut visit: impl FnMut(usize, usize, Key)) {
+        for (group, arena) in self.groups.iter().enumerate() {
+            let layer = self.group_of_layer.iter().position(|&owner| owner == group)
+                .expect("a bank group has a member");
+            for (slot, key) in arena.ready_slots() {
+                visit(layer, slot, key);
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn controlled() -> Self {
         Self::from_parts(vec![8], vec![0], 256).unwrap()

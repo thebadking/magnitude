@@ -84,6 +84,46 @@ and an actual 260,137-input + 37-output retrieval request. That result predates
 the cache work. Requalify affected state/memory paths when a stage warrants it;
 do not repeat a full maximum-context run for every unrelated change.
 
+### RAM occupancy and actual disk traffic
+
+The machine already uses most spare RAM for cached model pages. During the
+Stage 2a tool qualification, `free` showed approximately 3.2 GiB actually free
+and 54 GiB in buffers/cache. These are system totals, not the engine's RSS.
+The roughly 54 GiB reported as **available** includes reclaimable file cache;
+allocating it to an explicit cache would reclaim existing cached pages.
+[Linux documents this distinction](https://docs.kernel.org/filesystems/proc.html#meminfo).
+
+A read-only `mincore` inventory after that job found **52.580 GiB of the
+103.688 GiB GGUF shards resident in RAM**. The probe mapped files with
+`PROT_NONE`, queried page residency and unmapped them; it read no model payloads
+and neither warmed nor dropped file pages. This is a changing, post-run snapshot,
+not an expert hot-set inventory or a timed comparison. It establishes that model
+bytes already occupy substantial RAM even with the managed cache disabled.
+The model alone exceeds host RAM; useful selection matters more than allocating
+another anonymous copy of the same records. GPU-native representations and
+runtime reserves also prevent treating RAM plus VRAM as one simple capacity sum.
+
+Disk remains relevant when requested pages are absent, especially during loading
+and broad prompt scans. During the controlled Stage 2a measured generation
+windows, however, original-policy logical reads were about 12.963–12.981 GB
+while process-attributed physical reads were only 3.064–22.544 MB. Candidate
+windows read about 6.928–6.934 GB logically and 2.957–271.303 MB physically.
+These delivery windows may include lookahead and are not exact device-step
+boundaries. They show why a file-read byte counter alone must not be labeled SSD
+traffic, and why warm generation can still benefit from avoiding RAM copies,
+host-to-device uploads and conversions.
+
+Retain the managed cache as opt-in after its historical comparison above.
+Any later RAM-cache revision must reduce physical misses or source service time
+without losing more useful Linux cache or adding costly copies. Record file
+residency, logical/physical reads, swap activity and latency together. High
+`MemAvailable` alone is not evidence of an unused RAM opportunity.
+
+Local evidence: `20261019T075917Z-stage2a-comparison-b3e32b/` contains
+`ram-residency.json`, its reproduction script, measured I/O windows and
+`memory-summary.json`. The residency snapshot was taken after qualification;
+it did not interfere with timed A/B/B/A requests.
+
 ### Confirmed code observations
 
 - [CUDA upload](inference/seismic/backends/cuda/src/driver.rs) calls
@@ -194,7 +234,7 @@ against a reference require that reference to pass its sanity gate.
 | --- | --- | --- | --- |
 | 0 | Current baseline and critical-path measurement | Baseline established; attribution limits recorded | Current checkout |
 | 1 | Batched asynchronous expert transfers | Disposed: prompt candidate failed; decode candidate not promoted | 0 |
-| 2 | Trace-informed GPU expert retention | Ready: protect useful decode residency during prompt seeding | 1 decision |
+| 2 | Trace-informed GPU expert retention | 2a generation bar passed; tool gate and optional-profile decision next | 1 decision |
 | 3 | Confidence-limited expert prefetch | Pending | 2 decision |
 | 4 | MTP across the two owners | Pending | 3 decision |
 | 5 | SM86 packed-kernel and representation improvements | Pending | 4 decision |
@@ -402,6 +442,7 @@ before running it; fill measured fields only from saved artifacts.
 | Current baseline and attribution | 0 | `5cac0a6f`, verified executable `d5fff37c0b29…` | `20261019T063546Z-stage0-transfer-profile-92e02a`, 758 + 64 | Exact output; measured prefill 12.994 s, generation 8.509 s; native counters below | Preserve control; implement and compare Stage 1; no full GPU breakdown claimed |
 | Full prompt + decode transfer batching | 1 | Control `d5fff37c0b29…`; candidate `5cac0a6f` + `f888a58f…` | Build `20261019T065412Z-stage1-build-c35edb`; short lifecycle and A/B/B/A next | Build/provenance passed; first cold request failed with `BackwardClock` | Reject prompt batching; qualify decode-only revision before timing |
 | Decode-only transfer batching | 1 | `5cac0a6f` + `09325a64…`; preserved control unchanged | Build `20261019T072428Z-stage1-build-a8119e`; lifecycle `20261019T072541Z-stage1-lifecycle-72e4ea` | Lifecycle and all 12 comparison outputs passed; mean difference below control spread | Not promoted; preserve synchronous control and candidate patch |
+| Decode reuse during prompt seeding | 2a | `801a56be` + `60459c8a…` | Build `20261019T075226Z-stage2a-build-75b7e4`; lifecycle `20261019T075554Z-stage2a-lifecycle-2c4074`; comparison `20261019T075917Z-stage2a-comparison-b3e32b`; tools `20261019T081041Z-stage2a-tools-99971b` | All lifecycle and semantic gates passed; generation time −26.585%, logical generation reads −46.570%; prefill +28.945% | Retain optional decode-reuse profile for repeated requests; preserve original default |
 
 
 ### Stage 0 progress — baseline and diagnostic correction
@@ -639,10 +680,104 @@ and hardware and are not forecasts for this system.
 8. [FlashInfer GEMM interfaces](https://docs.flashinfer.ai/api/gemm.html)
    — grouped execution interfaces and architecture-specific backend selection.
 
+### Stage 2a implementation declaration
+
+Candidate `reuse-seeding` starts from the accepted branch and changes prompt
+seeding only. The experimental `MAGNITUDE_EXPERT_SEED_POLICY=decode-reuse`
+selects decayed observed decode-step counts before prompt frequency; unset or
+`prompt` preserves the existing ranking. Counts halve every 64 bank sequences.
+Each admitted (layer, expert) has one 8-byte counter. Active per-layer row-class
+metadata expires at completion, including unfenced abandonment. Readable bank
+identities are observed once per group at progress and physical completion, so
+all-hit uses are included; repeated observations of one expert/step deduplicate.
+Scratch scans do not increment these counts. No weight payload cache, CUDA kernel,
+transfer protocol or LRU victim rule changes. Qualification and performance
+remain pending. Stale debug build output is cleaned before the new release build;
+the verified release control is preserved.
+
+### Stage 2a qualification — passed
+
+Release build `20261019T075226Z-stage2a-build-75b7e4` verified both candidate and
+control executables. Candidate dirty digest is
+`60459c8aebe9e84585b6247f5d77f8628d82b96b1b98287e3af6327efd65513f`.
+The accepted control source and binary are unchanged. The build cleaned 8 GB of
+stale debug artifacts while retaining the release control.
+
+Lifecycle `20261019T075554Z-stage2a-lifecycle-2c4074`, with decode-reuse selected,
+passed all five checks. Completed responses were the same exact 308-character /
+64-token prefix; hit and recovery reused 757 prompt tokens. Cancellation closed
+after four content events (15 exact characters) before terminal delivery, and
+recovery was healthy. The log confirms 98,304 bytes of expert counters per owner,
+with existing expert source/streaming diagnostics enabled. These timings are not
+performance comparisons.
+
+The next run keeps the Stage 1 comparison controls: two fixed warmups per launch,
+A/B/B/A, 758 + 64 tokens, context 1,024, plain/lookahead/group-8, 24 + 24 placement,
+managed cache off, prefix reuse off and tracing off. A selects the original prompt
+policy/control binary; B selects decode-reuse in the candidate. Identical rendered
+tokens, template and generated work remain required. Promotion still needs at
+least 3% generation improvement beyond observed spread and a useful source-byte
+reduction; a positive result must then pass code/tool coverage.
+
+### Stage 2a controlled result — generation benefit with a prefill tradeoff
+
+`20261019T075917Z-stage2a-comparison-b3e32b` completed under one lock and a
+passing thermal gate, with all 12 responses exact and identical rendered tokens.
+
+| Condition / order | Prefill | Generation | Model total |
+| --- | ---: | ---: | ---: |
+| A / original prompt seeds | 5.396 s | 4.574 s | 9.969 s |
+| B / decode reuse | 8.833 s | 3.578 s | 12.411 s |
+| B / decode reuse | 4.943 s | 3.154 s | 8.097 s |
+| A / original prompt seeds | 5.288 s | 4.596 s | 9.884 s |
+
+Mean generation fell from 4.584820 s to 3.365956 s (26.585% lower time).
+The 1.218864 s difference exceeds both observed spreads: 0.022477 s for A and
+0.424655 s for B. Mean logical reads after first token fell from about 12.972 GB to
+6.931 GB (about 46.6%); this supports the intended reduction in expert movement.
+Delivery windows still include possible lookahead. Both harnesses rendered the
+same chat template and tokens, and all requests generated the same 64-token text.
+
+Mean prefill increased from 5.341716 s to 6.887876 s (28.9%); mean model total
+increased from 9.926536 s to 10.253832 s (3.3%). The slower B prefill also had
+more physical reads (4.441 GB, versus 0.324 GB on the other B pass), but the
+observations do not establish a generally safe prefill default. Keep the original
+policy as default. Artifacts include raw timings, I/O windows, allocations,
+identities and reproduction scripts; `decision.json` records the final decision.
+
+### Stage 2a held-out gate and disposition
+
+`20261019T081041Z-stage2a-tools-99971b` passed for both original and candidate
+builds. Each engine first generated the exact 64-token prose prefix, then served
+the canonical `tools/bfcl/simple_python_0` fixture in the same process with prefix
+reuse disabled. Both rendered identical 366-token tool requests and generated
+53 tokens ending in the expected `calculate_triangle_area` call with exactly
+`base=10`, `height=5`, `unit="units"`. The canonical validator matched the full
+call and arguments. This is a bounded semantic/topic-transition gate, not a
+tool-speed or distributional-quality measurement.
+
+Peak process RSS across the controlled comparison was 6.841–6.846 GiB for A
+and 6.817–6.818 GiB for B. Classified host allocations were unchanged at
+2,725,803,264 bytes; additional Rust policy counters are separately documented
+above. Observed host availability stayed above 57.8 GB, including reclaimable
+cache. Minimum device headroom was 2,825,519,104 and 2,297,167,872 bytes;
+no reserve or allocation failure occurred. RSS excludes additional Linux file
+cache, and the similar RSS does not establish identical total memory traffic.
+
+**Retain the implementation as an optional profile**, enabled with
+`MAGNITUDE_EXPERT_SEED_POLICY=decode-reuse`. Unset or `prompt` keeps the original
+default. Its measured benefit applies to this repeated-prose workload after two
+warmups per process. No cold-request, tool/code speed, single-GPU or llama.cpp
+win is established. The measured prefill regression exceeds the secondary
+acceptance bar, so this evidence does not justify a default change.
+
 ## Immediate next action
 
-Begin **Stage 2a: prompt seeding informed by decode reuse**, from the accepted
-synchronous-transfer baseline. Preserve the rejected transfer patches and their
-measurements. Complete and qualify the new policy, then benchmark it before
-trying a separate replacement-policy change. Full CUDA graph attribution remains
-unavailable; do not imply a complete wait/arithmetic breakdown.
+Complete **Stage 2b: independent replacement-policy evaluation** against the
+frozen Stage 2a optional profile. Declare its victim ranking before implementation;
+preserve the directory's eligibility, reader/fill leases and rollback rules.
+Keep source transfers and managed host cache unchanged. A policy change needs its
+own lifecycle gate and alternating comparison; it cannot inherit Stage 2a's win.
+Then advance through Stages 3–8 with a measured or justified disposition for each.
+Full CUDA graph attribution remains unavailable; do not imply a complete
+wait/arithmetic breakdown.

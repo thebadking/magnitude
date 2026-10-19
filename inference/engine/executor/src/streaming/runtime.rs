@@ -377,6 +377,53 @@ struct StepTrace {
     scratch_misses: usize,
 }
 
+/// A count of decode steps using an expert, halved every 64 bank sequences.
+/// GPU stamps expose the last use, so repeated observations count it once.
+#[derive(Clone, Copy, Default)]
+struct DecodeReuse {
+    last_sequence: i32,
+    uses: u32,
+}
+
+impl DecodeReuse {
+    fn score(self, sequence: i32) -> u32 {
+        let elapsed = (sequence.max(0) as u32 / 64)
+            .saturating_sub(self.last_sequence.max(0) as u32 / 64);
+        self.uses.checked_shr(elapsed).unwrap_or(0)
+    }
+
+    fn observe(&mut self, sequence: i32) {
+        if sequence > self.last_sequence {
+            self.uses = self.score(sequence).saturating_add(1);
+            self.last_sequence = sequence;
+        }
+    }
+}
+
+struct ReuseHistory {
+    /// Bounded by the admitted layer/expert inventory; no weight payloads.
+    experts: Vec<Vec<DecodeReuse>>,
+    /// Small-row members after each layer's last scratch member. Entries
+    /// live only through their physical completion, including lookahead.
+    steps: std::collections::BTreeMap<i32, Vec<bool>>,
+}
+
+impl ReuseHistory {
+    fn new(layers: &[StreamedLayer]) -> Self {
+        Self {
+            experts: layers.iter().map(|layer|
+                vec![DecodeReuse::default(); layer.slot_of.len()]).collect(),
+            steps: Default::default(),
+        }
+    }
+
+    fn observe(&mut self, layer: usize, expert: usize, sequence: i32) {
+        if self.steps.get(&sequence).is_some_and(|classes| classes[layer]) {
+            self.experts[layer][expert].observe(sequence);
+        }
+    }
+}
+
 struct State {
     directory: SharedDirectory,
     /// Steps a shared-cache invalidation failed.
@@ -410,9 +457,20 @@ struct State {
     prompt: i32,
     /// Diagnostic observations only; absent on the ordinary serving path.
     trace: Option<HashMap<i32, StepTrace>>,
+    reuse: Option<ReuseHistory>,
 }
 
 impl State {
+    fn observe_reuse(&mut self) {
+        let Self { directory, layers, reuse, .. } = self;
+        if let Some(history) = reuse {
+            directory.visit_ready(|representative, slot, key| {
+                history.observe(key.layer.0 as usize, key.expert.0 as usize,
+                    layers[representative].stamps.load(slot));
+            });
+        }
+    }
+
     fn device_staging(&self) -> bool {
         self.pools.first().is_some_and(|pool| pool.device.is_some())
     }
@@ -463,6 +521,16 @@ impl StreamingRuntime {
     ) -> Result<Self, String> {
         let sizes = layers.iter().map(|l| (l.stamps.len(), l.commits.len())).collect::<Vec<_>>();
         directory.validate_ports(&sizes).map_err(|e| format!("shared directory ports: {e:?}"))?;
+        let reuse = match std::env::var("MAGNITUDE_EXPERT_SEED_POLICY").as_deref() {
+            Err(std::env::VarError::NotPresent) | Ok("prompt") => None,
+            Ok("decode-reuse") => Some(ReuseHistory::new(&layers)),
+            _ => return Err("MAGNITUDE_EXPERT_SEED_POLICY must be prompt or decode-reuse".into()),
+        };
+        if let Some(history) = &reuse {
+            let bytes = history.experts.iter().map(|experts|
+                experts.len() * std::mem::size_of::<DecodeReuse>()).sum::<usize>();
+            eprintln!("expert seed policy=decode-reuse expert_counter_bytes={bytes} decay_sequences=64");
+        }
         let state = Arc::new(Mutex::new(State {
             directory,
             failed_steps: Default::default(),
@@ -485,6 +553,7 @@ impl StreamingRuntime {
             prompt: 0,
             trace: std::env::var_os("MAGNITUDE_TRACE_EXPERT_STREAMING")
                 .is_some().then(HashMap::new),
+            reuse,
         }));
         let source = Arc::new(source);
         let in_flight = Arc::new((AtomicUsize::new(0), Mutex::new(()), Condvar::new()));
@@ -531,6 +600,12 @@ impl StreamingRuntime {
             assert_eq!(
                 seeds.len(), state.layers.len(), "one seed boundary per local layer",
             );
+            if let Some(history) = &mut state.reuse {
+                for sequence in first..first + count {
+                    history.steps.insert(sequence, seeds.iter().map(|last|
+                        last.is_none_or(|last| sequence > last)).collect());
+                }
+            }
             for (layer, sequence) in seeds.into_iter().enumerate() {
                 if let Some(sequence) = sequence {
                     assert!((first..first + count).contains(&sequence));
@@ -550,6 +625,9 @@ impl StreamingRuntime {
         self.in_flight.0.fetch_sub(1, Ordering::AcqRel);
         let mut state = self.state.lock().expect("streaming state");
         if !fenced {
+            if let Some(history) = &mut state.reuse {
+                history.steps.remove(&sequence);
+            }
             return Err("shared-cache step dropped without a completion fence".into());
         }
         let invalid = {
@@ -559,6 +637,13 @@ impl StreamingRuntime {
                 .map_err(|e| format!("shared-cache completion: {e:?}"))?
         };
         invalidate(&mut state, &self.source, invalid);
+        // Include all-hit steps and the last layers after the final miss.
+        // Ready identities have conversion evidence; future observed uses
+        // remain cache effects even if their lookahead is later orphaned.
+        state.observe_reuse();
+        if let Some(history) = &mut state.reuse {
+            history.steps.remove(&sequence);
+        }
         let mut failed = state.failed_steps.remove(&sequence);
         let mut device_failures = Vec::new();
         for (layer, ports) in state.layers.iter().enumerate() {
@@ -695,6 +780,7 @@ fn advance(state: &mut State, point: Clock, source: &ExpertSource) {
                 .expect("device-published shared-cache progress")
         };
         invalidate(state, source, invalid);
+        state.observe_reuse();
         state.progress = point;
         release_past(state, source);
     }
@@ -1298,15 +1384,19 @@ fn serve(state: &mut State, source: &ExpertSource, layer: usize, sequence: i32) 
 /// those the bank lacks. To make room within the share it evicts the layer's
 /// least recently read other experts, never the step's `hits`, which the fill
 /// copies; a short prompt evicts no more than its seeds need.
-fn keep_routed(state: &mut State, source: &ExpertSource, layer: usize, routed: &[u32], hits: &[i32]) -> Vec<i32> {
+fn keep_routed(state: &mut State, source: &ExpertSource, layer: usize, sequence: i32, routed: &[u32], hits: &[i32]) -> Vec<i32> {
     let share = state
         .directory
         .share(layer)
         .expect("a streamed layer of the directory");
+    state.observe_reuse();
+    let score = |expert: usize| state.reuse.as_ref()
+        .map_or(0, |history| history.experts[layer][expert].score(sequence));
     let mut kept = (0..routed.len() as i32)
-        .filter(|&expert| routed[expert as usize] > 0)
+        .filter(|&expert| routed[expert as usize] > 0
+            || (state.layers[layer].slot_of[expert as usize] >= 0 && score(expert as usize) > 0))
         .collect::<Vec<_>>();
-    kept.sort_by_key(|&expert| std::cmp::Reverse(routed[expert as usize]));
+    kept.sort_by_key(|&expert| std::cmp::Reverse((score(expert as usize), routed[expert as usize])));
     kept.truncate(share);
     let slot_of = &state.layers[layer].slot_of;
     let mut seeded = kept
@@ -1399,7 +1489,7 @@ fn serve_scratch(state: &mut State, source: &ExpertSource, layer: usize, sequenc
         .map(|(&held, &flag)| held + flag.max(0) as u32)
         .collect::<Vec<_>>();
     let seeded = if state.seed_steps.contains(&(sequence, layer)) {
-        keep_routed(state, source, layer, &routed, &hits)
+        keep_routed(state, source, layer, sequence, &routed, &hits)
     } else {
         Vec::new()
     };
