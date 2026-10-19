@@ -148,6 +148,17 @@ impl Arena {
     /// Reserve after pinning all current hits. Pending fills and live readers
     /// are never victims. Future queued work must acquire its own leases.
     pub fn reserve(&mut self, key: Key, phase: Phase) -> Result<FillLease, Error> {
+        self.reserve_with_priority(key, phase, |_| 0)
+    }
+
+    /// Lower retention priority is evicted first; recency breaks ties. The
+    /// caller's ranking never changes which slots are eligible or their leases.
+    pub fn reserve_with_priority(
+        &mut self,
+        key: Key,
+        phase: Phase,
+        priority: impl Fn(Key) -> u128,
+    ) -> Result<FillLease, Error> {
         self.check_key(key)?;
         if self.mapped.contains_key(&key) {
             return Err(Error::AlreadyPresent);
@@ -163,7 +174,7 @@ impl Arena {
                         let Content::Ready(owner) = s.content else {
                             unreachable!()
                         };
-                        (s.phase.0, owner.layer.0, *index)
+                        (priority(owner), s.phase.0, owner.layer.0, *index)
                     })
                     .map(|(index, _)| index)
             })

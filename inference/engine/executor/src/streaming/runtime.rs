@@ -458,6 +458,8 @@ struct State {
     /// Diagnostic observations only; absent on the ordinary serving path.
     trace: Option<HashMap<i32, StepTrace>>,
     reuse: Option<ReuseHistory>,
+    reuse_seeds: bool,
+    reuse_replacement: bool,
 }
 
 impl State {
@@ -521,15 +523,21 @@ impl StreamingRuntime {
     ) -> Result<Self, String> {
         let sizes = layers.iter().map(|l| (l.stamps.len(), l.commits.len())).collect::<Vec<_>>();
         directory.validate_ports(&sizes).map_err(|e| format!("shared directory ports: {e:?}"))?;
-        let reuse = match std::env::var("MAGNITUDE_EXPERT_SEED_POLICY").as_deref() {
-            Err(std::env::VarError::NotPresent) | Ok("prompt") => None,
-            Ok("decode-reuse") => Some(ReuseHistory::new(&layers)),
+        let reuse_seeds = match std::env::var("MAGNITUDE_EXPERT_SEED_POLICY").as_deref() {
+            Err(std::env::VarError::NotPresent) | Ok("prompt") => false,
+            Ok("decode-reuse") => true,
             _ => return Err("MAGNITUDE_EXPERT_SEED_POLICY must be prompt or decode-reuse".into()),
         };
+        let reuse_replacement = match std::env::var("MAGNITUDE_EXPERT_REPLACEMENT_POLICY").as_deref() {
+            Err(std::env::VarError::NotPresent) | Ok("lru") => false,
+            Ok("decode-reuse") => true,
+            _ => return Err("MAGNITUDE_EXPERT_REPLACEMENT_POLICY must be lru or decode-reuse".into()),
+        };
+        let reuse = (reuse_seeds || reuse_replacement).then(|| ReuseHistory::new(&layers));
         if let Some(history) = &reuse {
             let bytes = history.experts.iter().map(|experts|
                 experts.len() * std::mem::size_of::<DecodeReuse>()).sum::<usize>();
-            eprintln!("expert seed policy=decode-reuse expert_counter_bytes={bytes} decay_sequences=64");
+            eprintln!("expert reuse seed={reuse_seeds} replacement={reuse_replacement} expert_counter_bytes={bytes} decay_sequences=64");
         }
         let state = Arc::new(Mutex::new(State {
             directory,
@@ -554,6 +562,8 @@ impl StreamingRuntime {
             trace: std::env::var_os("MAGNITUDE_TRACE_EXPERT_STREAMING")
                 .is_some().then(HashMap::new),
             reuse,
+            reuse_seeds,
+            reuse_replacement,
         }));
         let source = Arc::new(source);
         let in_flight = Arc::new((AtomicUsize::new(0), Mutex::new(()), Condvar::new()));
@@ -1192,10 +1202,22 @@ fn serve(state: &mut State, source: &ExpertSource, layer: usize, sequence: i32) 
             (0..state.layers[layer].stamps.len()).map(|s| state.layers[layer].stamps.load(s)),
         )
         .expect("shared GPU stamps");
-    let resolution = state
-        .directory
-        .begin(state.clock(sequence, layer), &routed)
-        .expect("validated shared route union");
+    let resolution = if state.reuse_replacement {
+        // Current hits are pinned by begin before any victim is ranked.
+        // The equal-sized compatible arena needs no resident-size divisor.
+        let history = state.reuse.as_ref().expect("enabled reuse replacement");
+        let layers = &state.layers;
+        let priority = |key: super::arena::Key| {
+            let layer = key.layer.0 as usize;
+            let uses = history.experts[layer][key.expert.0 as usize].score(sequence);
+            let source_bytes: u128 = layers[layer].stored.iter()
+                .map(|tensor| u128::from(tensor.bytes)).sum();
+            u128::from(uses) * source_bytes
+        };
+        state.directory.begin_with_priority(point, &routed, Some(&priority))
+    } else {
+        state.directory.begin(point, &routed)
+    }.expect("validated shared route union");
     if let Some(steps) = &mut state.trace {
         let trace = steps.entry(sequence).or_default();
         trace.requests += 1;
@@ -1390,7 +1412,7 @@ fn keep_routed(state: &mut State, source: &ExpertSource, layer: usize, sequence:
         .share(layer)
         .expect("a streamed layer of the directory");
     state.observe_reuse();
-    let score = |expert: usize| state.reuse.as_ref()
+    let score = |expert: usize| state.reuse.as_ref().filter(|_| state.reuse_seeds)
         .map_or(0, |history| history.experts[layer][expert].score(sequence));
     let mut kept = (0..routed.len() as i32)
         .filter(|&expert| routed[expert as usize] > 0

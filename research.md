@@ -443,6 +443,7 @@ before running it; fill measured fields only from saved artifacts.
 | Full prompt + decode transfer batching | 1 | Control `d5fff37c0b29…`; candidate `5cac0a6f` + `f888a58f…` | Build `20261019T065412Z-stage1-build-c35edb`; short lifecycle and A/B/B/A next | Build/provenance passed; first cold request failed with `BackwardClock` | Reject prompt batching; qualify decode-only revision before timing |
 | Decode-only transfer batching | 1 | `5cac0a6f` + `09325a64…`; preserved control unchanged | Build `20261019T072428Z-stage1-build-a8119e`; lifecycle `20261019T072541Z-stage1-lifecycle-72e4ea` | Lifecycle and all 12 comparison outputs passed; mean difference below control spread | Not promoted; preserve synchronous control and candidate patch |
 | Decode reuse during prompt seeding | 2a | `801a56be` + `60459c8a…` | Build `20261019T075226Z-stage2a-build-75b7e4`; lifecycle `20261019T075554Z-stage2a-lifecycle-2c4074`; comparison `20261019T075917Z-stage2a-comparison-b3e32b`; tools `20261019T081041Z-stage2a-tools-99971b` | All lifecycle and semantic gates passed; generation time −26.585%, logical generation reads −46.570%; prefill +28.945% | Retain optional decode-reuse profile for repeated requests; preserve original default |
+| Reuse-weighted decode victims | 2b | `c9cbfcbf` + `07b58952…`; control is frozen Stage 2a | Build `20261019T082201Z-stage2b-build-5a6f9f`; lifecycle `20261019T082536Z-stage2b-lifecycle-eed91a`; comparison `20261019T082747Z-stage2b-comparison-baab09`; tools `20261019T083547Z-stage2b-tools-4a56cc` | Lifecycle, all 12 comparison outputs and held-out tools passed; generation −16.496%, logical generation reads −30.102%, prefill +0.219%, total −6.319% | Retain optional replacement alongside Stage 2a seeds; preserve prompt/LRU defaults |
 
 
 ### Stage 0 progress — baseline and diagnostic correction
@@ -692,7 +693,7 @@ identities are observed once per group at progress and physical completion, so
 all-hit uses are included; repeated observations of one expert/step deduplicate.
 Scratch scans do not increment these counts. No weight payload cache, CUDA kernel,
 transfer protocol or LRU victim rule changes. Qualification and performance
-remain pending. Stale debug build output is cleaned before the new release build;
+results follow below. Stale debug build output was cleaned before the release build;
 the verified release control is preserved.
 
 ### Stage 2a qualification — passed
@@ -771,13 +772,127 @@ warmups per process. No cold-request, tool/code speed, single-GPU or llama.cpp
 win is established. The measured prefill regression exceeds the secondary
 acceptance bar, so this evidence does not justify a default change.
 
+### Stage 2b declaration — reuse-weighted decode victims
+
+Start from retained Stage 2a source `c9cbfcbf` in a separate `reuse-replacement`
+worktree. The control remains the frozen Stage 2a executable, selecting
+`MAGNITUDE_EXPERT_SEED_POLICY=decode-reuse` on both sides. The candidate adds
+`MAGNITUDE_EXPERT_REPLACEMENT_POLICY=decode-reuse`; unset or `lru` preserves
+recency-based replacement. The two policy selections remain independent.
+
+Only small-row demand placement changes its victim ranking. Empty slots remain
+first; among readable, unleased slots in the existing compatible arena, evict
+the lowest **decayed decode-use count × stored gate/up/down bytes**. Existing
+recency, layer and slot order break ties. Use the existing 64-sequence count
+decay and bounded expert history. Stored bytes are a static reload-cost proxy,
+not measured SSD time; compatible arena records have the same resident geometry,
+so no per-victim resident-size normalization is required. Prompt scratch seed
+placement keeps its existing ranking and quota. Do not change eligible victims,
+read/fill leases, conversion publication, rollback, transfers or source priority.
+
+Fully build the candidate, then run the short cold/retain/hit/cancel/recovery
+fixture gate. If it passes, use the existing 758 + 64, two-warmup A/B/B/A with
+managed host cache disabled and tracing off under one lock and thermal gate.
+Require exact matching rendered/generated work and at least 3% generation benefit
+beyond each side's observed spread. Compare logical and physical reads and memory
+as well. A promising result needs the held-out tool transition gate; a noisy or
+negative result leaves this policy unpromoted. Stage 2a's win is not evidence for
+this separate mechanism.
+
+Release build `20261019T082201Z-stage2b-build-5a6f9f` completed in 3m 07s and
+verified both candidate and frozen Stage 2a engine/harness executables. Candidate
+identity is `c9cbfcbf` plus
+`07b5895280587a26eb178bd8bb8f8f10a3dc011417d9b19dfc8997c2e1d5c7a4`.
+The candidate adds no weight cache or new per-expert counters; seed and victim
+policies share the existing history. An absent/`lru` replacement policy preserves
+the original victim path. The complete patch and build launcher are saved with
+the result. Lifecycle qualification follows with both reuse policies enabled.
+
+### Stage 2b lifecycle qualification — passed
+
+`20261019T082536Z-stage2b-lifecycle-eed91a` passed cold, retain, hit, cancellation
+and recovery checks with both reuse policies enabled. All four completed
+responses were the exact same 308-character / 64-token prefix. Hit and recovery
+reused 757 prompt tokens. Cancellation closed after four content events / 15
+exact characters before terminal delivery; the following recovery stayed healthy.
+Both owners reported the same 98,304-byte counter inventory as Stage 2a.
+
+Instrumented diagnostics across 63 decode sequences / two banks found 3,565
+misses and 11,135,283,200 demand bytes after the cold request's scratch steps;
+the corresponding retain window had 1,734 misses and 5,422,387,200 demand bytes.
+Both had zero prefetch bytes. These are priming observations from one candidate
+process, not matched A/B speed or miss reductions. Timed A/B/B/A follows with
+tracing disabled and the frozen Stage 2a profile as control.
+
+### Stage 2b controlled result — lower generation time and traffic
+
+`20261019T082747Z-stage2b-comparison-baab09` completed under one machine lock
+and a passing thermal gate. Both sides selected reuse-based prompt seeds; A
+kept LRU demand victims and B selected reuse-weighted demand victims. All 12
+responses were the same exact 64-token prefix; rendered tokens and template
+identities matched, with 758 input tokens and no retained-prefix reuse.
+
+| Condition / order | Prefill | Generation | Model total |
+| --- | ---: | ---: | ---: |
+| A / Stage 2a profile | 4.955 s | 3.141 s | 8.096 s |
+| B / reuse-weighted victims | 4.926 s | 2.623 s | 7.549 s |
+| B / reuse-weighted victims | 4.904 s | 2.639 s | 7.543 s |
+| A / Stage 2a profile | 4.854 s | 3.161 s | 8.014 s |
+
+Mean generation time fell from 3.150704 s to 2.630979 s, **16.496% lower**.
+The 0.519725 s improvement exceeds A's 0.019609 s and B's 0.016191 s observed
+spreads, passing the declared 3%/noise bar. Mean prefill changed from
+4.904444 s to 4.915186 s (+0.219%, within observed variation); mean model total
+fell from 8.055148 s to 7.546165 s (−6.319%). No secondary timing bar failed.
+
+Mean logical reads after first-token delivery fell from 6.927811 GB to
+4.842394 GB (−30.102%). Physical reads in these windows were only 3.072–6.144 MB
+for A and 6.144–6.148 MB for B. This supports reduced expert movement while
+showing that an SSD-byte reduction does not explain the win. Delivery windows
+can include lookahead. Peak process RSS was 6.816–6.847 GiB across all launches;
+classified host/device allocations were unchanged, and no reserve failure
+occurred. The result contains complete memory observations and provenance.
+
+The performance evidence is limited to the repeated-prose workload after two
+fixed warmups per launch, compared with Stage 2a in the same session. Do not
+multiply improvements from different sessions into a combined speedup. Preserve
+both existing defaults. `analysis.json` records calculated timings, I/O and
+memory; `decision.json` records the final disposition after the semantic gate.
+
+### Stage 2b held-out gate and disposition
+
+`20261019T083547Z-stage2b-tools-4a56cc` passed both builds through prose priming
+and the canonical BFCL tool fixture in the same process. Both tool requests
+rendered to 366 tokens and produced the expected 53-token
+`calculate_triangle_area(base=10, height=5, unit="units")` call. The canonical
+validator matched the complete function and arguments. Both prose prefixes were
+also exact. This is a semantic/topic-transition check, not tool-speed evidence.
+
+**Retain Stage 2b as an optional extension to the measured Stage 2a profile:**
+
+```sh
+export MAGNITUDE_EXPERT_SEED_POLICY=decode-reuse
+export MAGNITUDE_EXPERT_REPLACEMENT_POLICY=decode-reuse
+export MAGNITUDE_HOST_EXPERT_CACHE_BYTES=0
+```
+
+Unset policies still select prompt-frequency seeds and LRU victims. The new
+replacement setting alone is not the measured profile. This result establishes
+an additional benefit against Stage 2a on the repeated-prose fixture; broad
+workload, cold-request, single-GPU, combined-original-baseline and llama.cpp
+claims remain unestablished. The source/design patch is retained, and both
+candidate and control worktrees/executables remain frozen for the next stage.
+Stage 2 evaluation is complete: useful prompt seeding and demand replacement are retained
+as explicit options, without a new RAM payload cache or changed CUDA kernels.
+
 ## Immediate next action
 
-Complete **Stage 2b: independent replacement-policy evaluation** against the
-frozen Stage 2a optional profile. Declare its victim ranking before implementation;
-preserve the directory's eligibility, reader/fill leases and rollback rules.
-Keep source transfers and managed host cache unchanged. A policy change needs its
-own lifecycle gate and alternating comparison; it cannot inherit Stage 2a's win.
-Then advance through Stages 3–8 with a measured or justified disposition for each.
-Full CUDA graph attribution remains unavailable; do not imply a complete
-wait/arithmetic breakdown.
+Begin **Stage 3: bounded-confidence expert prefetch** against the frozen Stage 2b
+profile. Use valid activation history for the mixed-residual model; retain the
+existing rejection of its inaccurate future-router predictor. Declare the
+confidence rule, byte/window budget and physical source-lifetime ownership before
+implementation. Keep demand priority and native routing authoritative. Qualify
+the candidate, then compare latency together with useful, late and wasted bytes.
+Advance through Stages 4–8 after that measured or justified disposition. Full CUDA
+graph attribution remains unavailable; do not imply a complete wait/arithmetic
+breakdown.

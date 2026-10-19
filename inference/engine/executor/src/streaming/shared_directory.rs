@@ -280,6 +280,17 @@ impl SharedDirectory {
     /// Pin every hit before reserving ANY miss. Repeated choices share one
     /// lease and conversion identity, while their original order is retained.
     pub fn begin(&mut self, clock: Clock, routes: &[i32]) -> Result<Resolution, Error> {
+        self.begin_with_priority(clock, routes, None)
+    }
+
+    /// Optional retention ranking is advisory only. Eligibility, publication
+    /// and rollback remain the same as the recency-based path.
+    pub fn begin_with_priority(
+        &mut self,
+        clock: Clock,
+        routes: &[i32],
+        priority: Option<&dyn Fn(Key) -> u128>,
+    ) -> Result<Resolution, Error> {
         self.valid_clock(clock)?;
         if self.observed != Some(clock) {
             return Err(Error::BackwardClock);
@@ -328,7 +339,11 @@ impl SharedDirectory {
                 }
             }
             for (expert, key) in missing {
-                let fill = arena.reserve(key, Phase(clock.sequence as u64))?;
+                let phase = Phase(clock.sequence as u64);
+                let fill = match priority {
+                    Some(priority) => arena.reserve_with_priority(key, phase, priority)?,
+                    None => arena.reserve(key, phase)?,
+                };
                 if let Some(victim) = fill.evicted() {
                     evicted.push(victim);
                 }

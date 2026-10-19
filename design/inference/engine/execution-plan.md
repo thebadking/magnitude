@@ -923,6 +923,15 @@ effects without changing accepted sequence state. Resident useful experts outsid
 the prompt union can remain without new reads. With no history, prompt ranking
 is unchanged. This policy changes neither LRU victim selection nor reader/fill
 leases, conversion publication, source transfers or memory admission.
+An independent, explicit decode-reuse replacement policy may rank eligible
+small-row demand victims by decayed observed reuse times their stored source
+bytes, with ordinary recency as the tie breaker. Stored bytes are a reload-cost
+proxy, not a measured service duration. Empty slots remain first, and only
+readable, unleased records in the same compatible arena are victims. Scratch
+seeding retains its original replacement rule. This ranking shares bounded reuse
+history without enabling reuse-based seeds implicitly; it changes neither
+leases, unwritten-fill rollback, publication nor admission. Unset replacement
+policy retains ordinary recency.
 Startup sizes each local shared cache against that owner's assessed device
 weight budget. It enumerates exact local inventories from full local expert
 capacity downward, excluding host-shared staging from dedicated
