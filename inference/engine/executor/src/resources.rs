@@ -303,19 +303,69 @@ pub struct AllocatedResources {
     state_graph: NativeGraphPool,
 }
 
+/// Complete second-owner launch capacity, acquired during domain admission.
+pub(crate) struct TargetRangeLaunchResources {
+    pub(crate) workspace: NativeGraphWorkspaceLease,
+    pub(crate) outputs: [NativeGraphOutputLease; 2],
+    pub(crate) readout_workspace: NativeGraphWorkspaceLease,
+    pub(crate) readout_output: Option<NativeGraphOutputLease>,
+    pub(crate) boundary: Option<crate::programs::native_target::TargetBoundaryStorage>,
+    pub(crate) boundary_lease: TargetBoundaryLease,
+}
+
+/// Upload and transfer storage remains unavailable until physical completion.
+/// Residual scratch instead returns once all its readers have been queued.
+pub(crate) struct TargetRangeSubmissionResources {
+    _workspace: NativeGraphWorkspaceLease,
+    _readout_workspace: NativeGraphWorkspaceLease,
+    _readout_output: Option<NativeGraphOutputLease>,
+    _boundary: Option<crate::programs::native_target::TargetBoundaryStorage>,
+    _boundary_lease: TargetBoundaryLease,
+}
+
+impl TargetRangeLaunchResources {
+    pub(crate) fn into_submission_parts(self) -> TargetRangeSubmissionResources {
+        TargetRangeSubmissionResources {
+            _workspace: self.workspace,
+            _readout_workspace: self.readout_workspace,
+            _readout_output: self.readout_output,
+            _boundary: self.boundary,
+            _boundary_lease: self.boundary_lease,
+        }
+        // `outputs` drops here, like the first owner's residual pair. Every
+        // reader was queued before a later launch can reuse that storage.
+    }
+}
+
 impl AllocatedResources {
+    pub(crate) fn can_reserve_target_graphs(&self) -> Result<(), crate::CapacityError> {
+        self.target_graph.can_reserve(2)?;
+        self.target_readout_graph.can_reserve(1)
+    }
+
+    pub(crate) fn can_reserve_target_range(&self) -> Result<(), crate::CapacityError> {
+        self.can_reserve_target_graphs()?;
+        if self.boundary.as_ref().is_none_or(|pool| pool.free.borrow().is_empty()) {
+            return Err(crate::CapacityError {
+                resource: crate::ResourceKind::Workspace, required: 1, available: 0,
+            });
+        }
+        Ok(())
+    }
+
     /// Acquire a complete second-owner reservation without allocating. A
     /// partial acquisition rolls its leases back through their ordinary drops.
-    pub(crate) fn reserve_target_range(&self) -> Result<crate::programs::native_target::TargetRangeLaunchResources, crate::CapacityError> {
+    pub(crate) fn reserve_target_range(&self) -> Result<TargetRangeLaunchResources, crate::CapacityError> {
+        self.can_reserve_target_range()?;
         let lease = self.boundary.as_ref().ok_or(crate::CapacityError {
             resource: crate::ResourceKind::Workspace, required: 1, available: 0,
         })?.acquire()?;
-        Ok(crate::programs::native_target::TargetRangeLaunchResources {
+        Ok(TargetRangeLaunchResources {
             workspace: self.target_graph.acquire_workspace()?,
             outputs: [self.target_graph.acquire_output()?, self.target_graph.acquire_output()?],
             readout_workspace: self.target_readout_graph.acquire_workspace()?,
             readout_output: Some(self.target_readout_graph.acquire_output()?),
-            boundary: Some(lease.storage.clone()), _boundary_lease: lease,
+            boundary: Some(lease.storage.clone()), boundary_lease: lease,
         })
     }
 

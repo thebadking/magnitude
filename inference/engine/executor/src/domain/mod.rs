@@ -407,6 +407,7 @@ pub enum TargetGraphReservation {
 }
 
 pub struct TargetLaunchReservation {
+    peer: Option<crate::resources::TargetRangeLaunchResources>,
     boundary: Option<FeatureRef>,
     advances: Vec<OwnedStateAdvance>,
     graph_workspace: NativeGraphWorkspaceLease,
@@ -1228,31 +1229,10 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
         };
         match requirements.lane {
             ReservationLane::Target => {
-                let graph = self.resources.target_graph();
-                if graph.available_workspace() == 0 || graph.available_output() < 2 {
-                    return Err(CapacityError {
-                        resource: if graph.available_workspace() == 0 {
-                            ResourceKind::Workspace
-                        } else {
-                            ResourceKind::Output
-                        },
-                        required: if graph.available_workspace() == 0 {
-                            1
-                        } else {
-                            2
-                        },
-                        available: if graph.available_workspace() == 0 {
-                            0
-                        } else {
-                            graph.available_output() as u64
-                        },
-                    });
+                self.resources.can_reserve_target_graphs()?;
+                if let Some(peer) = &self.peer {
+                    peer.resources.borrow().can_reserve_target_range()?;
                 }
-                let readout = self.resources.target_readout_graph();
-                available(
-                    Some(readout.available_workspace()),
-                    Some(readout.available_output()),
-                )?;
             }
             ReservationLane::Head => {
                 let graph = self.resources.head_graph().ok_or(CapacityError {
@@ -1425,6 +1405,10 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
         };
         let resources = match requirements.lane {
             ReservationLane::Target => {
+                let peer = self.peer.as_ref().map(|peer| {
+                    peer.resources.borrow().reserve_target_range()
+                        .map_err(|error| invariant("second-owner target leases", error))
+                }).transpose()?;
                 let graph = self.resources.target_graph();
                 let graph_workspace = graph
                     .acquire_workspace()
@@ -1445,6 +1429,7 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
                     .acquire_output()
                     .map_err(|error| invariant("target readout output", error))?;
                 ReservedResources::Target(TargetGraphReservation::Launch(TargetLaunchReservation {
+                    peer,
                     advances: Vec::with_capacity(operations.len()),
                     graph_workspace,
                     graph_outputs,

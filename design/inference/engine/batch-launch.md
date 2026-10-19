@@ -27,6 +27,10 @@ Execution joins a validated batch with owned state advances, conditioning, works
 leases into one opaque launch. Its constructor checks only cross-domain facts: resource identity,
 slot-to-advance cardinality and row alignment, conditioning references, and planned lease class.
 Programs accept the launch as one value and retain it in their submission until completion.
+Placed launches acquire every owner's graph and transfer leases during admission;
+ordinary launches and speculative successors use the same availability checks.
+Each prompt-group member owns its complete reservation before the next is built.
+Submission consumes those leases and never acquires missing peer capacity.
 A layer-major prompt group derives every chunk's preceding-token window from
 a private history extended by the known earlier chunks. The first chunk has not
 yet been submitted while the group is constructed; its tokens cannot be obtained

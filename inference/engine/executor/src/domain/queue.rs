@@ -739,10 +739,9 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
         };
         let graph = self.resources.target_graph();
         let readout = self.resources.target_readout_graph();
-        if graph.available_workspace() == 0
-            || graph.available_output() < 2
-            || readout.available_workspace() == 0
-            || readout.available_output() == 0
+        if self.resources.can_reserve_target_graphs().is_err()
+            || self.peer.as_ref().is_some_and(|peer|
+                peer.resources.borrow().can_reserve_target_range().is_err())
         {
             if self.trace_lookahead {
                 eprintln!("lookahead skipped after={after}: no free launch leases");
@@ -752,6 +751,9 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
         let invariant = |error: CapacityError| {
             DomainError::invariant(format!("lookahead lease changed after its check: {error}"))
         };
+        let peer = self.peer.as_ref().map(|peer|
+            peer.resources.borrow().reserve_target_range().map_err(invariant)
+        ).transpose()?;
         let graph_workspace = graph.acquire_workspace().map_err(invariant)?;
         let graph_outputs = [
             graph.acquire_output().map_err(invariant)?,
@@ -789,6 +791,7 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
             readout_output,
         )
         .with_boundary(boundary)
+        .with_peer(peer)
         .with_preceding(preceding);
         match ValidatedTargetLaunch::new(
             inputs,

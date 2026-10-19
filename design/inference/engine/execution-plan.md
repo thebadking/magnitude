@@ -712,6 +712,10 @@ host's tokens is named when it is queued. Workflow activations cover
 submitted concurrency, and retained outputs cover submitted and live request owners. The target's
 residual stream between block graphs is one device pair, returned at the end of each submission:
 every reader of it is queued in that submission and the device runs the next launch after it.
+Every physical owner follows this same lifetime. A layer-major group holds one
+pair per member until all readers are queued; ordered later launches reuse those
+pairs without waiting for completion. Upload, transfer and retained-output leases
+keep their separate completion or last-consumer lifetimes.
 The target's stateless tail is the longest run of trailing blocks that publish no state:
 attention blocks that read another layer's history (a Shared domain, which they never append
 to) and write no draft taps. Preparation derives it from the plan, never from the family; a
@@ -759,6 +763,9 @@ weights; runs write only per-step controls.
 Before submission, the service resolves exact typed requirements against read-only availability,
 applies retention eviction or live preemption while selection remains provisional, and takes one
 owned reservation. That reservation contains every workspace, output, and state successor claim;
+for a placed target it includes every owner's graph leases and transfer slot.
+Prompt-group members reserve them as they are constructed, and an optional
+successor is skipped when any owner's complete reservation is unavailable.
 the service also holds exact publication-ring permits for the result. Launch construction consumes
 those claims and performs no allocation. A capacity result after reservation is an invariant
 failure. Device and invariant submission failures terminate the domain. Recurrent repair retains

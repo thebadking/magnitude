@@ -95,6 +95,23 @@ impl NativeGraphPool {
         self.output.borrow().len()
     }
 
+    /// Read-only admission for one launch and its exact output count.
+    pub(crate) fn can_reserve(&self, outputs: usize) -> Result<(), CapacityError> {
+        if self.available_workspace() == 0 {
+            return Err(CapacityError {
+                resource: ResourceKind::Workspace, required: 1, available: 0,
+            });
+        }
+        let available = self.available_output();
+        if available < outputs {
+            return Err(CapacityError {
+                resource: ResourceKind::Output,
+                required: outputs as u64, available: available as u64,
+            });
+        }
+        Ok(())
+    }
+
     /// Allocate one more output slot. The caller holds a heap claim for
     /// [`Self::output_slot_bytes`] across this call.
     pub(crate) fn grow_output(&mut self) -> Result<(), seismic::TensorError> {

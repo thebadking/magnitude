@@ -327,6 +327,7 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
         reservation: TargetLaunchReservation,
     ) -> Result<(ValidatedTargetLaunch, TargetRequests), Unsubmitted> {
         let TargetLaunchReservation {
+            peer,
             advances,
             graph_workspace,
             graph_outputs,
@@ -465,6 +466,7 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
             readout_output,
         )
         .with_boundary(boundary)
+        .with_peer(peer)
         .with_preceding(preceding);
         let launch = match ValidatedTargetLaunch::new(
             inputs,

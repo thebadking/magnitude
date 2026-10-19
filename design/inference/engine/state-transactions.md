@@ -62,11 +62,13 @@ preserves the global block and recurrent-component cursors and copies all carrie
 activation and token tensors into storage reserved on the next owner. The source
 work completes before copying or recycling its outputs. Each owner's streamed
 expert bank supplies its own sequence; sequence numbers are never transferred
-between banks. A logical submission retains every owner's bank step and graph
-leases through physical completion. Stored-table failures are attributed to the
+between banks. A logical submission retains every owner's bank step, upload and
+readout workspaces, and transfer leases through physical completion. Stored-table failures are attributed to the
 logical launch that queued each read, including reads on earlier owners. Every
-owner's bank outcome is completed before state reconciliation. Physical state
-maintenance dispatches each pinned plane through that plane's opened device and
+owner's bank outcome is completed before state reconciliation. Residual scratch
+is separately reusable after all of its readers are queued on its owner, as in
+single-device execution. Physical state maintenance dispatches each pinned plane
+through that plane's opened device and
 its local graph workspace; an unknown owner is refused before copying any plane.
 All plane copies finish before the logical maintenance result is returned. A
 failed handoff aborts the logical advance across all owners.

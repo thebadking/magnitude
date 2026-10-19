@@ -276,21 +276,27 @@ impl ProgramFamily for NativeFamily {
 
     fn submit_target(
         &mut self,
-        chain: Vec<ValidatedTargetLaunch>,
+        mut chain: Vec<ValidatedTargetLaunch>,
     ) -> Result<Vec<Self::TargetSubmission>, (SubmitError, Vec<ValidatedTargetLaunch>)> {
         use crate::programs::native_target::NativeTargetSubmission;
-        if let Some((peer, resources)) = &self.peer {
-            let reserved = (0..chain.len()).map(|_| resources.borrow().reserve_target_range())
-                .collect::<Result<Vec<_>, _>>();
-            let reserved = match reserved {
-                Ok(reserved) => reserved,
-                Err(error) => return Err((SubmitError::Invariant(crate::InvariantError {
-                    context: "distributed target reservation", detail: error.to_string(),
-                }), chain)),
-            };
+        if let Some((peer, _)) = &self.peer {
+            if chain.iter().any(|launch| !launch.has_peer()) {
+                return Err((SubmitError::Invariant(crate::InvariantError {
+                    context: "distributed target reservation",
+                    detail: "launch lacks its admitted second-owner leases".into(),
+                }), chain));
+            }
+            let reserved = chain.iter_mut().map(|launch|
+                launch.take_peer().expect("all second-owner leases checked above")
+            ).collect();
             self.target.submit_pair(&peer.target, chain, reserved)
                 .map(|submissions| submissions.into_iter().map(NativeTargetSubmission::placed).collect())
         } else {
+            if chain.iter().any(ValidatedTargetLaunch::has_peer) {
+                return Err((SubmitError::Invariant(crate::InvariantError {
+                    context: "target reservation", detail: "single owner received peer leases".into(),
+                }), chain));
+            }
             self.target.submit(chain)
                 .map(|submissions| submissions.into_iter().map(NativeTargetSubmission::single).collect())
         }

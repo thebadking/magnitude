@@ -1,6 +1,7 @@
 //! The sole join of target row semantics, owned state, conditioning, and
 //! planned device leases.
 
+use crate::resources::TargetRangeLaunchResources;
 use crate::{
     ConditioningRef, FeatureRef, FeatureSpan, GraphOutputTensor, InvariantError,
     NativeGraphOutputLease, NativeGraphWorkspaceLease, PoolClass, ResourceDomainId,
@@ -21,6 +22,7 @@ pub enum TargetTokens {
 }
 
 pub struct TargetLaunchInputs {
+    peer: Option<TargetRangeLaunchResources>,
     batch: ValidatedTargetBatch,
     tokens: TargetTokens,
     advances: Vec<TentativeAdvance>,
@@ -58,6 +60,7 @@ impl TargetLaunchInputs {
         readout_output: NativeGraphOutputLease,
     ) -> Self {
         Self {
+            peer: None,
             batch,
             tokens,
             advances,
@@ -74,6 +77,11 @@ impl TargetLaunchInputs {
 
     pub(crate) fn with_boundary(mut self, boundary: Option<FeatureRef>) -> Self {
         self.boundary = boundary;
+        self
+    }
+
+    pub(crate) fn with_peer(mut self, peer: Option<TargetRangeLaunchResources>) -> Self {
+        self.peer = peer;
         self
     }
 
@@ -164,6 +172,17 @@ impl TargetLaunchInputs {
             return Err(invalid(
                 "workspace or output lease differs from batch domain/class".into(),
             ));
+        }
+        if let Some(peer) = &self.peer {
+            let peer_domain = peer.workspace.domain();
+            if peer_domain == domain
+                || peer.outputs.iter().any(|lease| lease.domain() != peer_domain)
+                || peer.readout_workspace.domain() != peer_domain
+                || peer.readout_output.as_ref().is_none_or(|lease| lease.domain() != peer_domain)
+                || peer.boundary.is_none()
+            {
+                return Err(invalid("second-owner leases differ from their resource domain".into()));
+            }
         }
         for (index, (((slot, advance), conditioning), slices)) in self
             .batch
@@ -358,6 +377,7 @@ impl TargetLaunchInputs {
 /// Opaque checked launch. Construction returns unconsumed inputs if its
 /// ownership or batch invariants fail.
 pub struct ValidatedTargetLaunch {
+    peer: Option<TargetRangeLaunchResources>,
     core: TargetLaunchCore,
     graph_workspace: TargetGraphWorkspaceLease,
     graph_outputs: [TargetGraphOutputLease; 2],
@@ -377,6 +397,7 @@ impl ValidatedTargetLaunch {
             return Err((inputs, error));
         }
         let TargetLaunchInputs {
+            peer,
             batch,
             tokens,
             advances,
@@ -390,6 +411,7 @@ impl ValidatedTargetLaunch {
             readout_output,
         } = inputs;
         Ok(Self {
+            peer,
             core: TargetLaunchCore {
                 batch,
                 tokens,
@@ -410,6 +432,14 @@ impl ValidatedTargetLaunch {
 
     pub fn class(&self) -> PoolClass {
         PoolClass::Target(self.core.batch.class())
+    }
+
+    pub(crate) fn take_peer(&mut self) -> Option<TargetRangeLaunchResources> {
+        self.peer.take()
+    }
+
+    pub(crate) fn has_peer(&self) -> bool {
+        self.peer.is_some()
     }
 
     pub fn domain(&self) -> &ResourceDomainId {

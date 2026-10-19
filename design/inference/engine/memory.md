@@ -420,7 +420,12 @@ checks the selected device and owned decoder range against that admission. Trans
 are derived from sealed producer and consumer tensor descriptors, charged to the
 destination owner, and allocated before submission. Each logical launch reserves
 one complete slot with its graph leases; smaller row classes use views of that
-slot. The slot returns to its pool only after the launch's physical work finishes. The
+slot. Admission checks and acquires every owner's leases before launch construction,
+including for each group member and optional lookahead. A shortage is resolved
+before submission through ordinary capacity handling. The transfer slot returns
+to its pool only after the launch's physical work finishes. Residual scratch
+pairs return after their readers are queued on each owner, for reuse by later
+ordered submissions. The
 logical resource domain registers the final owner's device for graph-produced
 features and logits. Owned tensors and conditioning retain their original
 allocation-device checks; admitting a graph producer does not admit arbitrary

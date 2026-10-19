@@ -11,6 +11,7 @@ use super::{
 };
 use crate::device_table::SelectedRead;
 use crate::host_tables::HostTableError;
+use crate::resources::{TargetRangeLaunchResources, TargetRangeSubmissionResources};
 use crate::stored_table::{NoticeStep, StepRows, StoredTable};
 use crate::operators::block::{BlockControlPorts, BlockStatePorts};
 use crate::{
@@ -1314,7 +1315,7 @@ impl NativeTargetProgram {
                 DeviceSubmission::new(
                     next.waiter.completion(runs),
                     core,
-                    (workspace, resources),
+                    (workspace, resources.into_submission_parts()),
                     TargetOutput {
                         boundary: None,
                         readout: step.readout,
@@ -2050,20 +2051,9 @@ pub(crate) struct TargetBoundaryStorage {
     pub(crate) per_layer_rows: Option<Tensor>,
 }
 
-/// All second-owner resources are reserved before the first command is
-/// submitted. They remain owned by the logical submission through completion.
-pub(crate) struct TargetRangeLaunchResources {
-    pub(crate) workspace: TargetGraphWorkspaceLease,
-    pub(crate) outputs: [TargetGraphOutputLease; 2],
-    pub(crate) readout_workspace: NativeGraphWorkspaceLease,
-    pub(crate) readout_output: Option<NativeGraphOutputLease>,
-    pub(crate) boundary: Option<TargetBoundaryStorage>,
-    pub(crate) _boundary_lease: crate::resources::TargetBoundaryLease,
-}
-
 pub(crate) type PlacedTargetSubmission = DeviceSubmission<
     TargetLaunchCore,
-    (TargetLaunchWorkspace, TargetRangeLaunchResources),
+    (TargetLaunchWorkspace, TargetRangeSubmissionResources),
     TargetOutput,
 >;
 
