@@ -150,6 +150,20 @@ The managed-cache historical comparison above remains the reason it is opt-in.
 Fresh snapshot and its non-warming reproduction script are under
 `inference/evaluation/results/20261019T092219Z-idle-ram-diagnostic/`.
 
+A running observation at **2026-10-19 10:34:27 UTC**, during the untimed
+four-position main-engine probe, found **55.886 GiB `Cached`, 0.454 GiB actually
+free, and 54.013 GiB `MemAvailable`**. The harness RSS was about 6.48 GiB and
+its `VmSwap` was zero. This is a single sample, not peak host occupancy; Linux
+`Cached` also includes non-model files. Its process I/O showed 9.24 GB of
+cumulative physical reads, including loading/setup; that counter must not be
+presented as a warm-generation window. The earlier controlled warm
+measurements remain the evidence for low physical generation traffic. Cache
+warmth and phase must accompany any claim that disk is the bottleneck.
+
+Snapshot and read-only observer:
+`20261019T103247Z-stage4-main-features-3ebbf3/ram-103427.json` and
+`ram-observer.py` under the local results directory.
+
 ### Confirmed code observations
 
 - [CUDA upload](inference/seismic/backends/cuda/src/driver.rs) calls
@@ -262,7 +276,7 @@ against a reference require that reference to pass its sanity gate.
 | 1 | Batched asynchronous expert transfers | Disposed: prompt candidate failed; decode candidate not promoted | 0 |
 | 2 | Trace-informed GPU expert retention | 2a and 2b retained as opt-in; controlled timing and tool gates passed | 1 decision |
 | 3 | Confidence-limited expert prefetch | Repeated-miss candidate rejected after no actionable predictions; other conditioning deferred | 2 decision |
-| 4 | MTP across the two owners | Full-acceptance lifecycle passed; ordinary continuation diverged with rejections; diagnosis before timing | 3 decision |
+| 4 | MTP across the two owners | Full-acceptance lifecycle passed; ordinary parity failed; target batching differences reproduced on plain main; diagnosis before timing | 3 decision |
 | 5 | SM86 packed-kernel and representation improvements | Pending | 4 decision |
 | 6 | Selective CPU expert execution | Exploratory | Measured transfer/compute crossover |
 | 7 | Adaptive placement and prompt grouping | Pending | Accepted earlier stages |
@@ -1097,6 +1111,86 @@ published by acceptance. This does not establish whether prior state resolution
 or two-row target numerics caused the changed selection. `analysis.json` retains
 the exact trace line and the compared outputs.
 
+### Stage 4 target-only batching diagnostic
+
+The evaluation harness now accepts explicit decoder ownership for model loads,
+a bound on leading scored positions, and optional exact feature exports. A
+width comparison keeps the model context fixed. Placed timing/attribution paths
+that currently observe only one owner's trace fail before loading instead of
+reporting partial device time. The six harness/design changes are qualified
+independently of promoting the MTP implementation.
+
+The canonical `prose-continue/moby-dick/0` probe retained its original scored
+assistant answer. Its first 396 rendered tokens and template match the failed
+serving request exactly; the full fixture contains 580 tokens. Both widths use
+context 581, the same two ranges, prompt group 8 and accepted reuse policies,
+with no drafter, lookahead or rejected suffix. Each two-row teacher-forced input
+is committed whole. These are bounded diagnostics, not reference-quality or
+speed claims; no thermal timing comparison was attempted.
+
+| Diagnostic | Scored positions | Mean / maximum KL, width 1 to 2 | Argmax agreement |
+| --- | --- | --- | --- |
+| Default affine KV | 395–418 (24 rows) | 0.005291 / 0.042224 nats | 23/24 |
+| Dense KV | 395–398 (4 rows) | 0.009330 / 0.022439 nats | 3/4 |
+
+Both changed the argmax at position 397 from token 3896 to 34565. The single-row
+winning margin was 0.128477 logits with affine KV and 0.192133 with dense KV.
+No measured row exceeded 0.5 nats. The differing row counts prevent comparing
+the two means as a codec-quality verdict. Target batching therefore changes
+outputs without drafting or rejected-suffix repair, and compressed KV storage
+is not required. This does not yet establish the cause of the serving difference
+at position 412 or exclude an additional repair problem.
+
+The corrected affine feature probe retained four exact BF16 rows, width 2,560.
+All four differ across widths, with RMS differences of 0.077298–0.163667 and
+maximum absolute differences of 1.0–1.75. Its logits are bit-identical to the
+same four rows of the earlier logits-only probe on both widths. The difference
+thus extends to the exported feature path. Packed vocabulary projection also
+prepares its own features from final hidden rows, so this export alone does not
+identify its internal operands or the first differing decoder operation.
+
+The first feature observer incorrectly read the first row of a request-wide
+aggregate for every result, duplicating odd rows of two-row forwards. Its
+`observer-issue.json` supersedes those feature measurements. The corrected
+observer checks aggregate row count and slices each row at its actual offset;
+the original logits were unaffected.
+
+Local evidence under `inference/evaluation/results/`:
+
+- `20261019T100507Z-stage4-build-2a65d7`: target-only probe build, base
+  `47f852f5`, dirty digest
+  `08bcf307134fb2f0c9bdafd1845390a7eb38afd7737939d48862c280bf24d0fc`.
+- `20261019T100640Z-stage4-logits-f180a4`: 24-row affine diagnostic.
+- `20261019T101057Z-stage4-dense-2b839c`: four-row dense diagnostic.
+- `20261019T101612Z-stage4-features-27eccd`: superseded feature observer.
+- `20261019T101823Z-stage4-build-bb2707`: corrected feature build, base
+  `47f852f5`, dirty digest
+  `059ae8ba8afc817b4511db837b8b884509eea0cda84742fbf3513ded98e5784e`.
+- `20261019T101854Z-stage4-features-49cb0b`: corrected feature diagnostic.
+
+Build results retain complete candidate patches. Successful probes retain exact
+commands, rendered inputs, logits, analyses, driver and launcher; launchers pin
+their own build proof rather than choosing the latest build. These ignored local
+artifacts are not bundled with a clone. The initial launcher syntax failure
+`20261019T100618Z-stage4-logits-bcc69b` happened before any model work.
+
+The main branch, without the candidate's MTP core, compiled and passed provenance
+in `20261019T103223Z-placed-harness-build-ae00bb`: base `6d395edc`, dirty digest
+`1f2b4eb3849930817b54e7cd72e126683b1a77aa04bc4473b3f99e99946f0a92`.
+`20261019T103247Z-stage4-main-features-3ebbf3` then reproduced all four logits
+and exported features byte-for-byte against the corrected candidate probe at
+both widths (`main-vs-candidate.json`). This batching difference therefore also
+exists without the candidate's MTP implementation. It remains necessary to
+localize it and qualify the actual failing serving continuation after correction.
+
+Two earlier main builds compiled successfully but failed provenance because
+registry dependencies' generated files under the repository target directory
+were classified as synchronized sources without workspace compilation records.
+Cleaning release output did not resolve that classification. Moving release
+output into the external evaluation cache, retaining its original path through
+a symlink, allowed the same unmodified audit to verify it. Both failed records
+and controller logs are retained. No provenance or numerical gate was relaxed.
+
 ## Immediate next action
 
 Continue **Stage 4 qualification**, preserving the frozen Stage 2b plain control.
@@ -1105,15 +1199,18 @@ target-reading heads, vision and separate block drafters need other placement
 contracts. Real proposals, full-acceptance prefix reuse and cancellation/recovery
 now work; the ordinary-continuation parity gate remains failed.
 
-Carry decoder placement through the evaluation harness's engine configuration,
-then compare canonical teacher-forced target logits at verification widths 1
-and 2, without a drafter or rejected suffix. The harness already supports those
-widths but does not yet pass decoder ranges into its model load. This comparison
-will separate a target batching difference from rejection-dependent state
-handling before changing numerical kernels or repair. Keep inputs identical and
-inspect both argmax changes and logit differences. Requalify the failed serving
-case after a justified correction, then benchmark total time per committed token
-with all head, verification and repair costs. Work through Stages 5–8 after the
-Stage 4 decision.
+Localize the earliest decoder/readout difference on the same bounded canonical
+input at verification widths 1 and 2. The harness now carries decoder ranges,
+keeps context fixed, and retains exact exported feature rows. The target-only
+difference reproduces on plain main and with dense KV, so do not attribute it
+solely to drafting, rejected-suffix repair or compression. Exported features
+also differ, but packed projection has a separate preparation path; capture
+completed raw block outputs if needed to locate the first changing operation.
+Preserve graph/state leases and every owner's completion, keep diagnostics
+opt-in, and make no timing claim from an instrumented run. Do not serialize
+verification or relax precision/greedy parity to obtain a pass. Requalify the
+failed serving case after a justified correction, then benchmark total time per
+committed token with all head, verification and repair costs. Work through
+Stages 5–8 after the Stage 4 decision.
 Stage 3's repeated-miss candidate is rejected; a differently conditioned predictor
 remains deferred. Full CUDA graph attribution is still unavailable.

@@ -41,6 +41,9 @@ pub fn run(
     rendered: &[Rendered],
     records: &Path,
 ) -> Result<(Value, String), String> {
+    if draft.attribute && !options.decoder_ranges.is_empty() {
+        return Err("placed draft attribution requires submission traces from every decoder owner".into());
+    }
     let longest = rendered
         .iter()
         .map(|fixture| fixture.tokens.len())

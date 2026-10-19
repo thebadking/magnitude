@@ -31,6 +31,7 @@ pub const PREFILL_ROWS: usize = 512;
 /// How every load of one run is made.
 pub struct EngineOptions {
     pub cache_dir: Option<PathBuf>,
+    pub decoder_ranges: Vec<magnitude_executor::DecoderRange>,
     pub device: DeviceRequest,
     pub kv_codec: KvCodec,
     pub numerical_profile: Option<NumericalProfile>,
@@ -125,6 +126,15 @@ pub fn configuration(
     }
     .resolve()
     .map_err(|error| error.to_string())?;
+    if !options.decoder_ranges.is_empty() {
+        let placement = magnitude_executor::DecoderPlacement::new(
+            resolved.manifest.definition.decoder.blocks.len(), options.decoder_ranges.clone())
+            .map_err(|error| format!("--decoder-ranges: {error}"))?;
+        if placement.ranges().len() != 2 {
+            return Err("--decoder-ranges currently requires two owners".into());
+        }
+        resolved.manifest.decoder_ranges = placement.ranges().to_vec();
+    }
     resolved.manifest.tuning = options.tuning();
     resolved.manifest.tuning_trace = Some(options.tuning_trace.clone());
     Ok(resolved)

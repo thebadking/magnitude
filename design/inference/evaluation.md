@@ -58,6 +58,22 @@ Rules for every measurement:
 - Execution parity requires matched rendered input and generated work. Different generated prose or tool encodings are real serving differences, not evidence of slower execution.
 - No time or token count is fabricated from text or client latency. Engine counters and terminal usage must agree.
 - A correctness gate is never relaxed to make a timing admissible. Unsupported batching or capabilities fail explicitly rather than being measured as something else.
+- Harness model loads may select the engine's explicit decoder ranges; the
+  recorded command preserves their stable device identities and block ranges.
+  Distribution probes retain identical rendered inputs and model context limits
+  across verification widths. Device timing or attribution across owners requires every owner's
+  trace; a path collecting only one owner's trace refuses placed timing before
+  loading the model.
+  A bounded distribution diagnostic may select the leading scored positions of
+  each fixture while keeping all rendered tokens unchanged. Its command records
+  the bound and its logits metadata records exactly the positions produced;
+  such a probe does not establish quality over unmeasured positions.
+  A distribution diagnostic may also retain the exact exported feature rows
+  beside its logits, with their element, width, row mapping and
+  rendered-input identity. This observes completed feature leases without
+  converting their representation or changing sampling or acceptance. A packed
+  projection may prepare its own features from the final hidden rows; exported
+  features alone do not establish that its internal staging is identical.
 - **Tuning:** first-load tuning runs under an explicit budget. Fresh tuning ignores stored tuning results and keeps compiled kernels. The tuning trace and outcome are part of every measured run.
 
 ## Comparison

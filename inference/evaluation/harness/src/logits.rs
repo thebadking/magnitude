@@ -25,6 +25,9 @@ pub struct LogitsOptions {
     /// Scored rows per teacher-forced forward; above one they run as one
     /// verification forward.
     pub verify_width: usize,
+    /// A diagnostic prefix of each fixture's scored positions, when bounded.
+    pub scored_rows: Option<usize>,
+    pub feature_rows: bool,
 }
 
 /// One fixture's walk through its tokens: its sequence, its tokens, its
@@ -35,6 +38,7 @@ struct Walk<'a> {
     tokens: Vec<TokenId>,
     /// The first output row of this fixture.
     base: usize,
+    score_end: usize,
 }
 
 /// The positions whose rows predict the tokens of `span`.
@@ -50,6 +54,7 @@ impl Walk<'_> {
             .scored_spans
             .iter()
             .map(predicting)
+            .map(|span| span.start..span.end.min(self.score_end))
             .find(|rows| rows.end > self.sequence.position && !rows.is_empty())
     }
 
@@ -89,7 +94,9 @@ pub fn run(
         &Load {
             drafter: false,
             proposals: None,
-            context_tokens: longest + logits.verify_width,
+            // Every forward stays inside these known fixture tokens. Keep
+            // the same context reservation across verification widths.
+            context_tokens: longest + 1,
             decode_rows: rows_per_step,
             exported_logits_rows: rows_per_step.max(PREFILL_ROWS),
             lookahead: false,
@@ -98,8 +105,11 @@ pub fn run(
     let vocabulary = engine.vocabulary;
     let mut rows = Vec::new();
     let mut bases = Vec::with_capacity(rendered.len());
+    let mut score_ends = Vec::with_capacity(rendered.len());
     for fixture in rendered {
         bases.push(rows.len());
+        let mut remaining = logits.scored_rows.unwrap_or(usize::MAX);
+        let mut score_end = 0;
         for span in &fixture.scored_spans {
             if span.start == 0 || span.end > fixture.tokens.len() {
                 return Err(format!(
@@ -107,17 +117,26 @@ pub fn run(
                     fixture.fixture_id
                 ));
             }
+            let predicting = predicting(span);
+            let count = predicting.len().min(remaining);
+            if count > 0 { score_end = predicting.start + count; }
+            remaining -= count;
             rows.extend(
-                predicting(span).map(
+                (predicting.start..predicting.start + count).map(
                     |position| json!({ "fixture_id": fixture.fixture_id, "position": position }),
                 ),
             );
         }
+        score_ends.push(score_end);
     }
     let data = stem.with_extension("f32");
     let mut file = File::create(&data).map_err(|error| format!("{}: {error}", data.display()))?;
     file.set_len((rows.len() * vocabulary * 4) as u64)
         .map_err(|error| format!("{}: {error}", data.display()))?;
+    let mut features = if logits.feature_rows {
+        Some(FeatureOutput { file: File::create(stem.with_file_name("features.bin"))
+            .map_err(|error| error.to_string())?, descriptor: None })
+    } else { None };
     let indices = (0..rendered.len()).collect::<Vec<_>>();
     for (group, chunk) in indices.chunks(batch).enumerate() {
         let mut walks = Vec::with_capacity(chunk.len());
@@ -127,6 +146,7 @@ pub fn run(
                 rendered: &rendered[index],
                 tokens: engine::tokens(&rendered[index].tokens),
                 base: bases[index],
+                score_end: score_ends[index],
             });
         }
         score(
@@ -135,6 +155,7 @@ pub fn run(
             logits.verify_width,
             vocabulary,
             &mut file,
+            &mut features,
         )?;
         for walk in walks {
             engine.close(walk.sequence)?;
@@ -147,6 +168,15 @@ pub fn run(
     }
     file.flush()
         .map_err(|error| format!("{}: {error}", data.display()))?;
+    if let Some(features) = &mut features {
+        features.file.flush().map_err(|error| error.to_string())?;
+        let (element, width, row_bytes) = features.descriptor.as_ref()
+            .ok_or("feature probe produced no rows")?;
+        std::fs::write(stem.with_file_name("features.json"), serde_json::to_vec(&json!({
+            "rendered_digest": rendered_digest, "rows": rows,
+            "element": element, "width": width, "row_bytes": row_bytes,
+        })).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
+    }
     let metadata = json!({
         "producer": "harness",
         "model": artifacts.model,
@@ -172,6 +202,7 @@ fn score(
     width: usize,
     vocabulary: usize,
     file: &mut File,
+    features: &mut Option<FeatureOutput>,
 ) -> Result<(), String> {
     loop {
         let prefilling = walks.iter().any(|walk| {
@@ -211,6 +242,7 @@ fn score(
                 operations.push(scored(
                     &walk.sequence,
                     walk.tokens[position..position + rows].to_vec(),
+                    features.is_some(),
                 ));
                 advancing.push(walk);
             }
@@ -263,6 +295,30 @@ fn score(
                     .flat_map(|value| value.to_le_bytes())
                     .collect::<Vec<_>>();
                 let row = walk.row(start + offset);
+                if let Some(output) = features {
+                    let reference = result.features.as_ref().ok_or("feature probe returned no features")?;
+                    if reference.rows() != rows.len() {
+                        return Err("feature aggregate differs from the request's scored rows".into());
+                    }
+                    let tensor = engine.domain.resources().feature_span(&magnitude_executor::FeatureSpan {
+                        features: reference.clone(), start: offset, count: 1,
+                    }).map_err(|error| error.to_string())?;
+                    let element = match tensor.element().dtype() {
+                        Some(seismic::DType::BF16) => "bf16",
+                        Some(seismic::DType::F16) => "f16",
+                        Some(seismic::DType::F32) => "f32",
+                        _ => return Err("feature probe requires a dense feature representation".into()),
+                    };
+                    let [1, width] = tensor.extents() else { return Err("feature probe requires one feature row".into()); };
+                    let bytes = tensor.read_to_host().map_err(|error| error.to_string())?;
+                    let descriptor = (element.to_owned(), *width, bytes.len());
+                    if output.descriptor.as_ref().is_some_and(|old| old != &descriptor) {
+                        return Err("feature representation changed during the probe".into());
+                    }
+                    output.descriptor = Some(descriptor);
+                    output.file.seek(SeekFrom::Start((row * bytes.len()) as u64))
+                        .and_then(|_| output.file.write_all(&bytes)).map_err(|error| error.to_string())?;
+                }
                 file.seek(SeekFrom::Start((row * vocabulary * 4) as u64))
                     .and_then(|_| file.write_all(&bytes))
                     .map_err(|error| error.to_string())?;
@@ -273,16 +329,22 @@ fn score(
 
 /// The teacher-forced step of `forced` rows: a single-row decode, or above
 /// one row a verification forward (the drafting verify shapes).
-fn scored(sequence: &Sequence, forced: Vec<TokenId>) -> Operation {
+struct FeatureOutput {
+    file: File,
+    descriptor: Option<(String, u64, usize)>,
+}
+
+fn scored(sequence: &Sequence, forced: Vec<TokenId>, features: bool) -> Operation {
+    let demand = if features { Demand::LOGITS | Demand::FEATURES } else { Demand::LOGITS };
     if forced.len() == 1 {
-        return Engine::forward(sequence, WorkKind::Decode, forced, Demand::LOGITS);
+        return Engine::forward(sequence, WorkKind::Decode, forced, demand);
     }
     Operation::Forward {
         request: sequence.request,
         kind: WorkKind::Verify,
         position: sequence.position,
         conditioning: None,
-        demand: Demand::LOGITS | Demand::SELECT,
+        demand: demand | Demand::SELECT,
         select: (0..forced.len())
             .map(|offset| Engine::greedy(sequence.position + offset))
             .collect(),

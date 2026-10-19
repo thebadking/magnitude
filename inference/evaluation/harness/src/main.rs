@@ -142,6 +142,12 @@ enum Command {
         /// verification forward.
         #[arg(long, default_value_t = 1)]
         verify_width: usize,
+        /// Probe only the leading scored rows of each fixture.
+        #[arg(long)]
+        scored_rows: Option<std::num::NonZeroUsize>,
+        /// Also retain the exact exported feature rows beside the logits.
+        #[arg(long)]
+        feature_rows: bool,
     },
     /// The catalog drafter's proposals at anchors in the scored spans.
     Draft {
@@ -271,6 +277,9 @@ struct EngineArgs {
     /// auto, metal, cuda, vulkan, cpu or an exact device selector.
     #[arg(long, default_value = "auto")]
     device: String,
+    /// Explicit decoder ownership, in the engine's DecoderRange JSON form.
+    #[arg(long, value_name = "JSON")]
+    decoder_ranges: Option<String>,
     /// The target history codec.
     #[arg(long, default_value = "affine-k8v4")]
     kv_codec: String,
@@ -420,6 +429,10 @@ fn engine_options(
     Ok((
         EngineOptions {
             cache_dir: engine.cache_dir.clone(),
+            decoder_ranges: engine.decoder_ranges.as_deref()
+                .map(serde_json::from_str).transpose()
+                .map_err(|error| format!("--decoder-ranges: {error}"))?
+                .unwrap_or_default(),
             device: engine
                 .device
                 .parse()
@@ -593,6 +606,8 @@ fn run(command: Command) -> Result<(), String> {
             rendered,
             batch,
             verify_width,
+            scored_rows,
+            feature_rows,
         } => {
             if batch == 0 || verify_width == 0 {
                 return Err("--batch and --verify-width must be positive".into());
@@ -625,6 +640,8 @@ fn run(command: Command) -> Result<(), String> {
                 &logits::LogitsOptions {
                     batch,
                     verify_width,
+                    scored_rows: scored_rows.map(std::num::NonZeroUsize::get),
+                    feature_rows,
                 },
                 &rendered,
                 &digest,

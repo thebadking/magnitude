@@ -67,6 +67,9 @@ pub fn run(
     options: &EngineOptions,
     time: &TimeOptions,
 ) -> Result<Timed, String> {
+    if !options.decoder_ranges.is_empty() {
+        return Err("placed timing requires submission traces from every decoder owner".into());
+    }
     let mut by_context = Vec::with_capacity(time.contexts.len());
     for &context in &time.contexts {
         let rendered = set
