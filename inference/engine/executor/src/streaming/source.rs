@@ -16,9 +16,12 @@ use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use std::sync::atomic::{AtomicU64, Ordering};
 use super::cache::{Access, HostExpertCache};
+
+#[cfg(target_os = "linux")]
+mod page_trace;
 
 /// Persistent workers. More did not raise bandwidth on any machine measured
 /// (theory §2).
@@ -216,6 +219,32 @@ pub(crate) struct Ticket {
     changed: Condvar,
 }
 
+/// Diagnostic host time only. Worker service sums can overlap, and a ticket
+/// may have started as prefetch work before the step that consumes it.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct SourceTiming {
+    pub ranges: usize,
+    pub first_start_delay: Duration,
+    pub worker_service: Duration,
+    pub completion_span: Duration,
+}
+
+impl SourceTiming {
+    pub(crate) fn add(&mut self, other: Self) {
+        self.ranges += other.ranges;
+        self.first_start_delay += other.first_start_delay;
+        self.worker_service += other.worker_service;
+        self.completion_span += other.completion_span;
+    }
+}
+
+struct TicketTrace {
+    submitted: Instant,
+    first_started: Option<Instant>,
+    ranges: usize,
+    worker_service: Duration,
+}
+
 struct TicketState {
     /// Ranges still queued.
     queued: usize,
@@ -226,6 +255,7 @@ struct TicketState {
     cancelled: bool,
     priority: Priority,
     progress_at: Instant,
+    trace: Option<TicketTrace>,
 }
 
 impl Ticket {
@@ -263,6 +293,7 @@ impl Ticket {
                 cancelled: false,
                 priority,
                 progress_at: Instant::now(),
+                trace: None,
             }),
             changed: Condvar::new(),
         })
@@ -287,6 +318,22 @@ impl Ticket {
     /// Latest range start or completion, independent of its queue priority.
     pub(crate) fn progress_at(&self) -> Instant {
         self.state.lock().expect("ticket lock").progress_at
+    }
+
+    /// Consume a completed ticket's diagnostic once, even when multiple
+    /// scratch experts share it or a later decode adopts a bulk prefetch.
+    /// Already-staged synthetic tickets have no source service to report.
+    pub(crate) fn take_timing(&self) -> Option<SourceTiming> {
+        let mut state = self.state.lock().expect("ticket lock");
+        if Self::outcome(&state) != Some(Outcome::Done) { return None; }
+        let trace = state.trace.take()?;
+        Some(SourceTiming {
+            ranges: trace.ranges,
+            first_start_delay: trace.first_started.unwrap_or(trace.submitted)
+                .saturating_duration_since(trace.submitted),
+            worker_service: trace.worker_service,
+            completion_span: state.progress_at.saturating_duration_since(trace.submitted),
+        })
     }
 
     /// Snapshot for an unsuccessful fetch, including outstanding work.
@@ -339,6 +386,9 @@ struct Shared {
     work: Condvar,
     cache_hit_bytes: AtomicU64,
     file_read_bytes: AtomicU64,
+    trace: bool,
+    #[cfg(target_os = "linux")]
+    pages: Option<page_trace::Trace>,
 }
 
 pub(crate) struct ExpertSource {
@@ -348,7 +398,11 @@ pub(crate) struct ExpertSource {
 
 impl ExpertSource {
     pub(crate) fn new(files: Vec<ModelFile>) -> Result<Self, String> {
+        let pages = cfg!(target_os = "linux")
+            && std::env::var_os("MAGNITUDE_TRACE_EXPERT_SOURCE_PAGES").is_some();
         let shared = Arc::new(Shared {
+            #[cfg(target_os = "linux")]
+            pages: pages.then(|| page_trace::Trace::new(&files)),
             files,
             queues: Mutex::new(Queues {
                 demand: VecDeque::new(),
@@ -358,6 +412,7 @@ impl ExpertSource {
             work: Condvar::new(),
             cache_hit_bytes: AtomicU64::new(0),
             file_read_bytes: AtomicU64::new(0),
+            trace: pages || std::env::var_os("MAGNITUDE_TRACE_EXPERT_STREAMING").is_some(),
         });
         let workers = (0..WORKERS)
             .map(|index| {
@@ -369,6 +424,14 @@ impl ExpertSource {
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self { shared, workers })
+    }
+
+    /// Diagnostic source identity only; never used for placement or policy.
+    pub(crate) fn page_trace_id(&self) -> Option<u64> {
+        #[cfg(target_os = "linux")]
+        { self.shared.pages.as_ref().map(|trace| trace.id) }
+        #[cfg(not(target_os = "linux"))]
+        { None }
     }
 
     /// Queue a record's ranges.
@@ -392,6 +455,7 @@ impl ExpertSource {
     }
 
     fn submit_with_access(&self, ranges: Vec<Range>, priority: Priority, access: Access) -> Arc<Ticket> {
+        let submitted = Instant::now();
         let ticket = Arc::new(Ticket {
             state: Mutex::new(TicketState {
                 queued: ranges.len(),
@@ -400,7 +464,13 @@ impl ExpertSource {
                 error: None,
                 cancelled: false,
                 priority,
-                progress_at: Instant::now(),
+                progress_at: submitted,
+                trace: self.shared.trace.then_some(TicketTrace {
+                    submitted,
+                    first_started: None,
+                    ranges: 0,
+                    worker_service: Duration::ZERO,
+                }),
             }),
             changed: Condvar::new(),
         });
@@ -471,7 +541,7 @@ fn work(shared: &Shared) {
     #[cfg(target_os = "macos")]
     let mut buffer = AlignedBuffer::new();
     loop {
-        let job = {
+        let (job, began) = {
             let mut queues = shared.queues.lock().expect("source queues");
             loop {
                 if let Some(job) = queues.demand.pop_front().or_else(|| queues.prefetch.pop_front()) {
@@ -479,8 +549,13 @@ fn work(shared: &Shared) {
                     state.queued -= 1;
                     state.running += 1;
                     state.progress_at = Instant::now();
+                    let began = state.progress_at;
+                    let began = state.trace.as_mut().map(|trace| {
+                        trace.first_started.get_or_insert(began);
+                        began
+                    });
                     drop(state);
-                    break job;
+                    break (job, began);
                 }
                 if queues.stopping {
                     return;
@@ -489,8 +564,18 @@ fn work(shared: &Shared) {
             }
         };
         let file = &shared.files[job.range.file];
+        #[cfg(target_os = "linux")]
+        let page_before = shared.pages.as_ref().map(|trace| {
+            let (priority, submitted) = {
+                let state = job.ticket.state.lock().expect("ticket lock");
+                (state.priority, state.trace.as_ref().map(|trace| trace.submitted))
+            };
+            trace.before(&file.0, &job.range, priority, job.access, submitted)
+        });
         let cached = file.1.as_ref().and_then(|(cache, id)|
             cache.get(*id, job.range.offset, job.range.bytes, job.access));
+        #[cfg(target_os = "linux")]
+        let host_cache_hit = cached.is_some();
         let result = if let Some(record) = cached {
             // The ticket still exclusively owns the destination. The Arc
             // keeps these immutable bytes alive across eviction and copying.
@@ -516,9 +601,17 @@ fn work(shared: &Shared) {
             }
             result
         };
+        #[cfg(target_os = "linux")]
+        let page_event = shared.pages.as_ref().zip(page_before)
+            .map(|(trace, before)| trace.finish(before, &job.range, result.is_ok(), host_cache_hit));
+        let service = began.map(|began| began.elapsed());
         let mut state = job.ticket.state.lock().expect("ticket lock");
         state.running -= 1;
         state.progress_at = Instant::now();
+        if let Some(trace) = &mut state.trace {
+            trace.ranges += 1;
+            trace.worker_service += service.expect("a traced range has a start");
+        }
         if let Err(error) = result {
             state.failed = true;
             state.error.get_or_insert_with(|| format!(
@@ -527,6 +620,9 @@ fn work(shared: &Shared) {
         }
         drop(state);
         job.ticket.changed.notify_all();
+        // Publish completion before logging; the event contains metadata only.
+        #[cfg(target_os = "linux")]
+        if let Some(event) = page_event { eprintln!("expert source pages {event}"); }
     }
 }
 

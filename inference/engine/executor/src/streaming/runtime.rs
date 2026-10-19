@@ -15,7 +15,7 @@
 //! every earlier step) has run, including their converts.
 
 use super::shared_directory::{Clock, SharedDirectory};
-use super::source::{ExpertSource, Outcome, Priority, Range, Ticket};
+use super::source::{ExpertSource, Outcome, Priority, Range, SourceTiming, Ticket};
 use super::words::{SharedBytes, SharedWords};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering, fence};
@@ -362,6 +362,16 @@ struct Staged {
     sequence: i32,
 }
 
+#[derive(Clone, Copy)]
+enum SourcePath { Bank = 0, Scratch = 1 }
+
+#[derive(Clone, Copy, Default)]
+struct UploadTrace {
+    calls: u64,
+    requested_bytes: u64,
+    host_service: Duration,
+}
+
 #[derive(Default)]
 struct StepTrace {
     requests: usize,
@@ -375,6 +385,11 @@ struct StepTrace {
     scratch_requests: usize,
     scratch_held: usize,
     scratch_misses: usize,
+    source_tickets: [usize; 2],
+    source_timing: [SourceTiming; 2],
+    uploads: [[UploadTrace; KINDS]; 2],
+    bank_poll_sleep: Duration,
+    scratch_ticket_wait: Duration,
 }
 
 /// A count of decode steps using an expert, halved every 64 bank sequences.
@@ -475,6 +490,35 @@ impl State {
 
     fn device_staging(&self) -> bool {
         self.pools.first().is_some_and(|pool| pool.device.is_some())
+    }
+
+    /// Observe the existing blocking upload without changing its publication
+    /// or completion edge. The timer is host wall time, not CUDA device time.
+    fn upload_source(&mut self, layer: usize, sequence: i32, path: SourcePath,
+        kind: usize, source: u32, destination: usize) -> Result<(), String>
+    {
+        let tensor = self.layers[layer].stored[kind];
+        let began = self.trace.as_ref().map(|_| Instant::now());
+        let result = self.pools[tensor.pool].copy_to_device(source, destination, tensor.bytes);
+        let elapsed = began.map(|began| began.elapsed());
+        if let Some(elapsed) = elapsed {
+            let sample = &mut self.trace.as_mut().expect("enabled trace")
+                .entry(sequence).or_default().uploads[path as usize][kind];
+            sample.calls += 1;
+            sample.requested_bytes += tensor.bytes;
+            sample.host_service += elapsed;
+        }
+        result
+    }
+
+    fn record_source(&mut self, sequence: i32, path: SourcePath, ticket: &Ticket) {
+        if let Some(steps) = &mut self.trace {
+            if let Some(timing) = ticket.take_timing() {
+                let trace = steps.entry(sequence).or_default();
+                trace.source_tickets[path as usize] += 1;
+                trace.source_timing[path as usize].add(timing);
+            }
+        }
     }
     /// The device point of step `sequence` at `layer`.
     fn clock(&self, sequence: i32, layer: usize) -> Clock {
@@ -683,6 +727,26 @@ impl StreamingRuntime {
                 trace.revived, trace.host_service.as_secs_f64() * 1000.0,
                 trace.scratch_requests, trace.scratch_held, trace.scratch_misses,
             );
+            for (path, name) in ["bank", "scratch"].into_iter().enumerate() {
+                let source = trace.source_timing[path];
+                let uploads = &trace.uploads[path];
+                let calls = uploads.iter().map(|sample| sample.calls).sum::<u64>();
+                let bytes = uploads.iter().map(|sample| sample.requested_bytes).sum::<u64>();
+                let service = uploads.iter().map(|sample| sample.host_service).sum::<Duration>();
+                eprintln!(
+                    "expert service bank={:p} sequence={sequence} path={name} source_tickets={} source_ranges={} source_first_start_ms_sum={:.3} source_worker_ms_sum={:.3} source_span_ms_sum={:.3} upload_calls={calls} upload_requested_bytes={bytes} upload_host_ms={:.3} gate_upload_ms={:.3} up_upload_ms={:.3} down_upload_ms={:.3} bank_poll_sleep_ms={:.3} scratch_ticket_wait_ms={:.3}",
+                    Arc::as_ptr(&self.source), trace.source_tickets[path], source.ranges,
+                    source.first_start_delay.as_secs_f64() * 1000.0,
+                    source.worker_service.as_secs_f64() * 1000.0,
+                    source.completion_span.as_secs_f64() * 1000.0,
+                    service.as_secs_f64() * 1000.0,
+                    uploads[0].host_service.as_secs_f64() * 1000.0,
+                    uploads[1].host_service.as_secs_f64() * 1000.0,
+                    uploads[2].host_service.as_secs_f64() * 1000.0,
+                    if path == 0 { trace.bank_poll_sleep.as_secs_f64() * 1000.0 } else { 0.0 },
+                    if path == 1 { trace.scratch_ticket_wait.as_secs_f64() * 1000.0 } else { 0.0 },
+                );
+            }
         }
         let detail = state.fetch_failures.remove(&sequence);
         if failed {
@@ -1356,13 +1420,13 @@ fn serve(state: &mut State, source: &ExpertSource, layer: usize, sequence: i32) 
                 }
             }
             if device_staging {
-                let staged = &state.staged[&(layer, expert)];
+                let records = state.staged[&(layer, expert)].records;
                 let destination = pending.iter().position(|&pending| pending == expert)
                     .expect("a pending conversion");
-                for (kind, tensor) in state.layers[layer].stored.iter().enumerate() {
+                for kind in 0..KINDS {
                     state.heartbeat.beat();
-                    if let Err(error) = state.pools[tensor.pool]
-                        .copy_to_device(staged.records[kind], destination, tensor.bytes)
+                    if let Err(error) = state.upload_source(layer, sequence, SourcePath::Bank,
+                        kind, records[kind], destination)
                     {
                         state.fetch_failures.entry(sequence).or_insert_with(||
                             format!("layer {layer}, expert {expert}: device source transfer: {error}"));
@@ -1375,6 +1439,7 @@ fn serve(state: &mut State, source: &ExpertSource, layer: usize, sequence: i32) 
                 .staged
                 .remove(&(layer, expert))
                 .expect("completed source record");
+            state.record_source(sequence, SourcePath::Bank, &staged.ticket);
             state
                 .converted
                 .push((sequence, layer, staged.records, expert));
@@ -1392,7 +1457,13 @@ fn serve(state: &mut State, source: &ExpertSource, layer: usize, sequence: i32) 
             arrived = true;
         }
         if !arrived {
+            let began = state.trace.as_ref().map(|_| Instant::now());
             std::thread::sleep(IDLE);
+            let elapsed = began.map(|began| began.elapsed());
+            if let Some(elapsed) = elapsed {
+                state.trace.as_mut().expect("enabled trace").entry(sequence).or_default()
+                    .bank_poll_sleep += elapsed;
+            }
         }
     }
     state.layers[layer].served = sequence;
@@ -1676,11 +1747,20 @@ fn serve_scratch(state: &mut State, source: &ExpertSource, layer: usize, sequenc
             }
         }
         for ticket in round_tickets.values() {
-            if wait_ticket(ticket, &mut state.heartbeat) != Some(Outcome::Done) {
+            let began = state.trace.as_ref().map(|_| Instant::now());
+            let outcome = wait_ticket(ticket, &mut state.heartbeat);
+            let elapsed = began.map(|began| began.elapsed());
+            if let Some(elapsed) = elapsed {
+                state.trace.as_mut().expect("enabled trace").entry(sequence).or_default()
+                    .scratch_ticket_wait += elapsed;
+            }
+            if outcome != Some(Outcome::Done) {
                 failed = true;
                 state.fetch_failures.entry(sequence).or_insert_with(|| format!(
                     "layer {layer}, scratch round {round}: fetch made no progress for {PARK_BOUND:?}: {}",
                     ticket.diagnostic()));
+            } else {
+                state.record_source(sequence, SourcePath::Scratch, ticket);
             }
         }
         if failed {
@@ -1702,10 +1782,10 @@ fn serve_scratch(state: &mut State, source: &ExpertSource, layer: usize, sequenc
         if device_staging {
             for (index, &(_, record)) in records.iter().enumerate() {
                 let destination = (round % 2) * state.scratch.round_records + index;
-                for (kind, tensor) in state.layers[layer].stored.iter().enumerate() {
+                for kind in 0..KINDS {
                     state.heartbeat.beat();
-                    if let Err(error) = state.pools[tensor.pool]
-                        .copy_to_device(record[kind], destination, tensor.bytes)
+                    if let Err(error) = state.upload_source(layer, sequence, SourcePath::Scratch,
+                        kind, record[kind], destination)
                     {
                         state.fetch_failures.entry(sequence).or_insert_with(|| format!(
                             "layer {layer}, scratch round {round}: device source transfer: {error}"));

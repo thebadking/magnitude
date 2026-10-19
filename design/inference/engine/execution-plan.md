@@ -863,6 +863,13 @@ A parent cache's capacities or lender cannot implicitly become another GPU's
 allocation authority. Physical admission must account for each resulting cache,
 including any additional staging or scratch allocation introduced by the split.
 Each physical cache needs its own directory, watcher and completion clock.
+Opt-in expert-streaming diagnostics distinguish source-worker service, a ticket's
+queue-to-completion span, and host time inside blocking device uploads. A completed
+source ticket is counted once at its first consumer, including shared bulk tickets
+and adopted prefetches; its work may precede that consumer's step. Worker and ticket
+times can overlap across ranges and owners and do not partition generation latency.
+Upload counters distinguish scratch and bank service and report requested bytes;
+logical source bytes remain separate from process-attributed physical disk reads.
 Dedicated CUDA owners of one loaded target may opt into a shared host cache of
 immutable compressed expert records. Its key includes the source file and
 complete record geometry; cached bytes use the same staging and conversion
@@ -892,7 +899,13 @@ use a block-aligned cover buffer before copying the exact record into staging.
 The current Linux buffered path uses random-access advice and reads the exact
 record directly into its ticket-owned staging region; it does not need an
 alignment buffer or an extra host copy. Neither path publishes a record before
-all of its reads complete successfully. A fetch timeout does not cancel an
+all of its reads complete successfully. The opt-in Linux source-page diagnostic
+observes page residency through mappings that never fault payloads, per-worker
+physical-read deltas, and queue/service spans keyed to the source tensor ranges.
+Probe errors remain unknown residency, never cache hits. It changes no routing,
+retention, read policy, or readiness condition, and publishes ticket completion
+before logging metadata. Instrumented spans are diagnostic observations, not
+serving-speed evidence. A fetch timeout does not cancel an
 in-progress file write: failed scratch rounds retain their staging through ticket
 completion before reuse, and shutdown joins source workers before releasing
 staging. Fetch failures preserve the layer and source error or outstanding read

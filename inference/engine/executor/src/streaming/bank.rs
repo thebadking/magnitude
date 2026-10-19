@@ -192,6 +192,19 @@ impl ResidentBank {
             }))
             .collect::<Result<Vec<_>, _>>()?;
         let source = ExpertSource::new(files)?;
+        if let Some(source_id) = source.page_trace_id() {
+            for (local, (planned, layer)) in plan.layers.iter().zip(&layers).enumerate() {
+                for (kind, stored) in layer.stored.iter().enumerate() {
+                    eprintln!("expert source pages {}", serde_json::json!({
+                        "schema": 1, "kind": "tensor", "source": source_id,
+                        "owner": format!("{:?}", device.info().selector),
+                        "local_layer": local, "scope": format!("{:?}", planned.scope),
+                        "tensor_kind": kind, "file": stored.file, "base": stored.base,
+                        "record_bytes": stored.bytes, "experts": plan.experts,
+                    }));
+                }
+            }
+        }
         let words = |tensor: &seismic::Tensor| SharedWords::new(tensor.clone());
         let list_words = |tensor: &seismic::Tensor, mirror: Option<&seismic::Tensor>| {
             let host = words(tensor)?;
