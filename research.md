@@ -119,6 +119,25 @@ without losing more useful Linux cache or adding costly copies. Record file
 residency, logical/physical reads, swap activity and latency together. High
 `MemAvailable` alone is not evidence of an unused RAM opportunity.
 
+For the current CPU-cache experiment, the active **18:00:04 UTC** sample below
+has only **0.379 GiB actually free**, with **53.150 GiB `Cached`**. Increasing
+the native CPU cache therefore competes with existing file-cache contents.
+The incomplete same-source comparison observes `Cached` falling from
+55.908 to 51.821 GiB and physical reads rising from 50.618 to 1,400.558 MB
+in its one completed repeat pair. That is not a causal performance result,
+but it prevents treating the 4 GiB allocation as previously unused capacity.
+Earlier accepted warm windows have zero physical reads despite gigabytes of
+logical reads. A larger cache can help only where it improves useful residency
+or avoids source service, conversion or uploads without a larger displacement
+cost; simply allocating all reported available memory is not an established fix.
+
+A fresh **2026-10-19 19:11:02 UTC** idle snapshot finds **62.696 GiB total,
+55.576 GiB `Cached`, 4.545 GiB actually free and 60.531 GiB `MemAvailable`**,
+with no Magnitude/harness process running. This is not inference peak occupancy
+or an inventory of model pages; `Cached` includes other files. The snapshot and
+read-only reproduction script are retained in
+`20261019T191102Z-idle-ram-diagnostic/`.
+
 Local evidence: `20261019T075917Z-stage2a-comparison-b3e32b/` contains
 `ram-residency.json`, its reproduction script, measured I/O windows and
 `memory-summary.json`. The residency snapshot was taken after qualification;
@@ -549,6 +568,7 @@ before running it; fill measured fields only from saved artifacts.
 | CUDA/CPU activation and contribution exchange | 6 prototype | `29c77cf2` + `bc9e3058…`; same real weights and fixture readout operands | Build `20261019T163127Z-stage6-cpu-exchange-build-f2b8fc`; qualification `20261019T163154Z-stage6-cpu-exchange-qualification-b4ed4a` | 32 exact activation/contribution round trips across both GPUs, concurrent requests sharing one CPU cache, and failure/withdrawal/watchdog paths pass | Retain on `two-gpu-selective-cpu-experimental`. Production route selection, CPU program admission, full host accounting and serving performance remain pending |
 | Shared CPU expert dispatch in serving | 6 prototype | `d92f10c0` + `dd6fb7aa…`; retained as `d7958b29` on `two-gpu-cpu-dispatch-experimental` | Build `20261019T174442Z-stage6-cpu-dispatch-build-84bb82`; operators `20261019T174618Z-stage6-cpu-dispatch-operators-23bcae`; isolation `20261019T175458Z-stage6-cpu-dispatch-isolation-a505ab`; lifecycle `20261019T180054Z-stage6-cpu-dispatch-lifecycle-df0535`; incomplete comparison `20261019T180314Z-stage6-cpu-dispatch-comparison-ea41aa` | Shared native cache reaches about 3.93 GiB; 49 CPU dispatches in the isolated six-response qualification. Initial exact prose/ordinary/tool and lifecycle checks pass, but warmed ordinary continuation fails exact parity on response 12 of the alternating run, with identical GPU choices | No promotion or accepted speed result. Preserve the failed run; diagnose actual routed arithmetic and retention/handoff before another comparison |
 | Actual routed CPU operands and fresh-import replay | 6 diagnostic | `d7958b29` + `861acb77…`; retained as `59b27255` on `two-gpu-cpu-dispatch-diagnostic` | Build `20261019T182107Z-stage6-cpu-capture-build-8581d3`; capture `20261019T182609Z-stage6-cpu-routed-capture-51ed05`; derived replay `20261019T183204Z-stage6-cpu-routed-replay-c98a62` | 53 consumed records across 18 blocks: all retained native weights match fresh source imports and all CPU outputs match fresh CPU execution. CPU/GPU products match in 31/53, contributions in 25/53; down projections with the same GPU product match in 32/53. The instrumented six-request run does not reproduce the warmed output failure | No corruption observed in these records; arithmetic compatibility needs work. Preserve the failed original range check and the verified ordinary subset. No model-quality, numerical-admission or speed claim |
+| Grouped CPU arithmetic on actual routed operands | 6 numerical proof of concept | `59b27255` + `9b0ba2cf…`; retained as `67a7a69a` on `two-gpu-cpu-grouped-experimental` | Build `20261019T184915Z-stage6-cpu-grouped-build-cbaf1b`; replay `20261019T185406Z-stage6-cpu-grouped-replay-54fe61` | Grouped scalar product agreement improves to 50/53, contribution agreement to 43/53, and down on the same GPU product to 44/53. All finite BF16 inputs have identical CPU/CUDA BF16 SiLU publication on this system; substituting GPU SiLU does not change replay results | Remaining projection differences require diagnosis before serving integration. No timing, numerical admission or serving-speed claim |
 
 
 ### Stage 0 progress — baseline and diagnostic correction
@@ -2275,18 +2295,54 @@ integer-code products by coefficient group and folds the scale and bias into
 the F32 accumulator; the CPU decodes each weight and uses lane-wise F32 dots.
 Matching BF16 publication points alone does not make these recipes identical.
 
-Next, evaluate a grouped CPU projection recipe on these actual operands before
-changing serving. It must retain original activation publications and the GPU
-parent's selected reduction policy. No tolerance widening, copied qualification
-evidence or additional tuning budget can replace that work. Payload capacity
-and file-cache displacement remain separate performance problems.
-
 The measured diagnostic source is `d7958b29` plus
 `861acb7765188adc1dd1d800f25bde81a4dc7e5062f6dcabc0ab3e5c7c0cba40`.
 Published **`59b27255f9fa59160e83c9712e5c2d03b835dca0`** preserves all 2,944
 inference files and the gitlink byte-for-byte. Build/source manifests, original
 and derived captures, route matches, per-record comparisons and reproduction
 scripts remain with the run directories. No unit or integration tests were run.
+
+The subsequent scalar proof of concept exposes each native format's authoritative
+32-value integer codes, scale and bias. It accumulates each code dot and input
+sum in F64, rounds each partial once to F32, then folds scale and bias using
+separate F32 FMAs in group order. Its one-part replay matches the captured GPU
+parent's partition count and preserves all original BF16 publication points.
+This studies the grouped recipe; it does not establish exact MMA accumulation
+agreement or replace the serving CPU implementation.
+
+Build **`20261019T184915Z-stage6-cpu-grouped-build-cbaf1b`** and replay
+**`20261019T185406Z-stage6-cpu-grouped-replay-54fe61`** complete on the same
+53 verified records. Fresh-import and original CPU replay checks remain exact:
+
+| Grouped CPU comparison | Byte-exact records / 53 | Maximum absolute difference | Maximum per-record relative RMS |
+| --- | ---: | ---: | ---: |
+| Gate/up product | 50 | 0.000000476837158203125 | 0.000000404398 |
+| Contribution | 43 | 0.0001220703125 | 0.000066641 |
+| Down, both given the GPU product | 44 | 0.0001220703125 | 0.000066641 |
+
+An independent pointwise diagnostic evaluates CUDA BF16 SiLU publication over
+all 65,536 BF16 input codes, using the existing `draft_gated_rows` entry with
+unit up values. Every finite input matches CPU BF16 SiLU publication on this
+SM86/NVRTC 12.9/driver 13030 configuration. The GPU table SHA-256 is
+`5f48cf06e46dc6cfd0977367a6a09d01eb4794c3b6c1fcd9338f52a8859ab5e2`.
+Using that table in the grouped replay makes no further difference. This
+rules out a pointwise SiLU-publication discrepancy for these finite inputs
+on this configuration; it does not establish projection equivalence.
+
+Remaining differences need projection-accumulator inspection before BF16
+publication, using a CUDA path verified against the actual routed operations
+and parent partition policy. The earlier warmed serving failure is still
+unreproduced, and the scalar recipe has no timing or serving qualification.
+No tolerance widening, copied qualification evidence or additional tuning
+budget can replace that work. Payload capacity and file-cache displacement
+remain separate performance problems.
+
+The grouped measured source is `59b27255` plus
+`9b0ba2cf801722a00efc3b21e766737b2838047b08284c6e2a3f9395cd6044b4`.
+Published **`67a7a69aef67cdf6ff39e39678134d5980658bb1`** preserves all 2,945
+inference files and the gitlink byte-for-byte. Its independent retained harness
+binary, original build identity, source manifests and comparisons remain with
+the build/replay records. No unit or integration tests were added or run.
 
 ## Immediate next action
 
@@ -2296,8 +2352,10 @@ cache using eligible demand records. The physical storage/lease component and
 dual-GPU activation/contribution exchange now pass their scoped qualifications.
 The serving prototype is connected but fails warmed exact parity. Actual-operand
 replay finds no retained-byte or CPU execution discrepancy in its 53 records,
-while cross-backend arithmetic differs. Evaluate a grouped CPU recipe against
-these operands, then repair and qualify affected serving behavior. The earlier
+while cross-backend arithmetic differs. A scalar grouped recipe improves product
+agreement to 50/53 and contribution agreement to 43/53, with matching finite
+BF16 SiLU publication on this system. Inspect the remaining projection
+differences before integrating or qualifying affected serving behavior. The earlier
 failure still needs reproduction or a separately verified cause. Repeat
 affected semantic checks before restarting timing.
 Account for
