@@ -182,6 +182,7 @@ pub(super) fn build_placed(
             programs.state_graphs().unwrap(),
         )
         .map_err(|error| internal(error.to_string()))?;
+        report_load_memory(&format!("range {:?} graph buffers allocated", range.range().blocks), &device);
         startup.hold_host_tables(range.physical_load().host_table_bytes().map_err(internal)?)?;
         let shared = if platform::shared_role(device.info())
             .map_err(|error| internal(error.to_string()))?
@@ -204,6 +205,7 @@ pub(super) fn build_placed(
             .checked_add(shared)
             .ok_or_else(|| internal("range staging overflow"))?;
         startup.claim("range target import", peak, staged)?;
+        report_load_memory(&format!("range {:?} before import", range.range().blocks), &device);
         let mut residency =
             ResidencyStore::new_range(device.clone(), programs.clone(), &range, identity)
                 .map_err(|error| internal(error.to_string()))?;
@@ -233,6 +235,7 @@ pub(super) fn build_placed(
                 }),
             )
             .map_err(|error| internal(error.to_string()))?;
+        report_load_memory(&format!("range {:?} imported", range.range().blocks), &device);
         owners.push(Owner {
             execution,
             device,
@@ -253,6 +256,10 @@ pub(super) fn build_placed(
     let target_state = state
         .allocate_target_state_placed(&devices)
         .map_err(internal)?;
+    for owner in &owners {
+        report_load_memory(&format!("range {:?} initial state allocated",
+            owner.execution.resources().decoder_range().unwrap().blocks), &owner.device);
+    }
     for owner in &mut owners {
         let constants = owner
             .programs

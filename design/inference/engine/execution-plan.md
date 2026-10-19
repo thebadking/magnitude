@@ -328,7 +328,16 @@ The resource plan authorizes persistent weights and startup state slabs, includi
 pristine recurrent zero seed, the device's one workspace arena, outputs that outlive launches,
 structural retention slots, optional component residency, and the
 qualification/startup peak. Persistent allocation follows planning. Qualification scratch is
-released before readiness. Execution receives plan-issued leases and cannot allocate general
+released before physical model import. A placed load bounds preparation,
+import, initial-state allocation and serving separately and takes their maximum
+per physical allocation domain. Preparation retains native invocation buffers
+and the recorded-graph allowance, but no model weights or graph pools. Its
+qualification bound uses the complete graph inventory the factory prepares,
+including metadata outside the owner's physical block range. Import retains
+prepared resources and physical weights with the largest selected source
+window; initial state is allocated only after import releases that window.
+Host-shared holdings are subtracted only in phases that actually contain them.
+Execution receives plan-issued leases and cannot allocate general
 scratch outside the plan.
 Per-request state and feature tensors require fitting heap claims. Retained checkpoints release
 their physical charge when their final owner drops them.
@@ -985,8 +994,9 @@ metadata; the full metadata slice is not a per-device resident weight inventory.
 
 A decoder range load plan exposes its graph metadata and physical inventory
 separately. Its physical weight charge includes local expert groups and their
-staging/scratch holdings, and its import peak covers local source staging and
-qualification. Range residency consumes the physical inventory; retaining
+staging/scratch holdings. Its import peak covers local source staging, while
+qualification belongs to the separate pre-import preparation bound. Range
+residency consumes the physical inventory; retaining
 outside roles for graph derivation never authorizes importing those roles. Draft projection
 checks the original inventory, model extent and selected device before deriving
 local program bindings. Final range admission stores physical holdings in the

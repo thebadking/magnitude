@@ -259,9 +259,12 @@ fn plan_on_device(
         .map_err(|error| internal(format!("program preparation workspace: {error:?}")))?;
     let qualification =
         AttestedPrograms::qualification_peak_bytes(draft.load()).map_err(internal)?;
-    let preparation_peak = workspace
-        .checked_add(qualification)
-        .ok_or_else(|| internal("program preparation peak byte count overflows"))?;
+    let preparation_peak = match &range {
+        Some(range) => range.preparation_peak_bytes(&manifest.definition, draft.policy().codec(), backend)
+            .map_err(internal)?,
+        None => workspace.checked_add(qualification)
+            .ok_or_else(|| internal("program preparation peak byte count overflows"))?,
+    };
     startup.claim("program preparation", preparation_peak, 0)?;
     Ok(PlannedModel {
         startup,

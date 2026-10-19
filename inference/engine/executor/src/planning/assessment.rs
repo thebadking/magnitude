@@ -416,13 +416,24 @@ impl AssessmentGraphResourceBounds {
 
 /// Complete allocation bound for one physical decoder owner. Graph metadata
 /// retains global topology; physical imports and state are charged locally.
+pub(super) struct RangeMemoryCharge {
+    pub memory: AssessmentMemoryCharge,
+    pub preparation_bytes: u64,
+}
+
+impl RangeMemoryCharge {
+    pub fn device_allocation_bytes(&self, shared_in_host: bool) -> Result<u64, String> {
+        Ok(self.memory.device_allocation_bytes(shared_in_host)?.max(self.preparation_bytes))
+    }
+}
+
 pub(super) fn range_memory_charge(
     definition: &ModelDefinition,
     draft: &super::ExecutionPlanDraft,
     range: &super::DecoderRangeLoadPlan,
     state: &super::StateResourcePlan,
     owner: usize,
-) -> Result<AssessmentMemoryCharge, String> {
+) -> Result<RangeMemoryCharge, String> {
     let policy = draft.policy();
     let terms = AssessmentMemoryTerms::derive(
         definition,
@@ -465,11 +476,23 @@ pub(super) fn range_memory_charge(
     .map_err(|error| error.to_string())?;
     let fit = state.fit_state_bytes_by_owner(terms.fit_depth, terms.recurrent_banks)?;
     let startup = state.startup_state_bytes_by_owner()?;
-    terms.charge(
+    // Import ends before the initial state is allocated. Preparation has
+    // neither the model's physical weights nor its graph pools and is
+    // bounded independently, without subtracting later host-shared holdings.
+    let loading_peak = range.import_peak_bytes().max(
+        *startup.get(owner).ok_or("unknown startup state owner")?,
+    );
+    let memory = terms.charge_loading_peak(
         header.with_graph_resource_bound(&graph)?,
         *fit.get(owner).ok_or("unknown fit state owner")?,
-        *startup.get(owner).ok_or("unknown startup state owner")?,
-    )
+        loading_peak,
+    )?;
+    Ok(RangeMemoryCharge {
+        memory,
+        preparation_bytes: range.preparation_peak_bytes(
+            definition, policy.codec(), draft.device().backend(),
+        )?,
+    })
 }
 
 impl AssessmentHeaderBounds {
@@ -635,10 +658,21 @@ impl AssessmentMemoryTerms {
         state_slab_bytes: u64,
         startup_state_bytes: u64,
     ) -> Result<AssessmentMemoryCharge, String> {
-        let exact_resident_bytes = self.exact_resident_bytes(state_slab_bytes)?;
         let loading_bytes = startup_state_bytes
             .checked_add(bounds.startup_additional_bytes)
             .ok_or("assessment startup charge overflow")?;
+        self.charge_loading_peak(bounds, state_slab_bytes, loading_bytes)
+    }
+
+    /// Compose persistent holdings with an explicitly derived loading peak.
+    /// Callers decide which transient and state phases actually overlap.
+    fn charge_loading_peak(
+        self,
+        bounds: AssessmentMemoryBounds,
+        state_slab_bytes: u64,
+        loading_bytes: u64,
+    ) -> Result<AssessmentMemoryCharge, String> {
+        let exact_resident_bytes = self.exact_resident_bytes(state_slab_bytes)?;
         let prepared_bytes = self
             .exact_resident_bytes(0)?
             .checked_add(bounds.prepared_resource_bytes)

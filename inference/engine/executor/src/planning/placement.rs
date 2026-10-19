@@ -68,6 +68,25 @@ impl DecoderRangeLoadPlan {
     pub fn import_peak_bytes(&self) -> u64 {
         self.import_peak_bytes
     }
+
+    /// Preparation finishes before graph pools or physical model weights
+    /// exist. Use the graph inventory the factory actually prepares, which
+    /// retains outside-block metadata, rather than the import inventory.
+    pub fn preparation_peak_bytes(
+        &self,
+        definition: &magnitude_family_contracts::ModelDefinition,
+        codec: magnitude_state::KvCodec,
+        backend: seismic::BackendName,
+    ) -> Result<u64, String> {
+        let programs = self.graph_load.program_plan(definition, codec)
+            .map_err(|error| error.to_string())?;
+        let invocation = crate::AttestedPrograms::planned_invocation_workspace_bytes(&programs, backend)
+            .map_err(|error| error.to_string())?;
+        invocation
+            .checked_add(crate::AttestedPrograms::qualification_peak_bytes(&self.graph_load)?)
+            .and_then(|bytes| bytes.checked_add(seismic::recorded_graph_device_bytes(backend)))
+            .ok_or_else(|| "range preparation peak overflows".into())
+    }
 }
 
 impl DecoderPlacement {
@@ -148,17 +167,26 @@ impl DecoderPlacement {
             )?;
             let allocation = charge.device_allocation_bytes(shared_in_host)?;
             if allocation <= capacity {
+                let memory = &charge.memory;
+                let source = candidate.physical_load().target().iter()
+                    .max_by_key(|weight| weight.source_bytes);
                 eprintln!(
                     "magnitude-engine: range cache assessment {}",
                     serde_json::json!({
                         "blocks":candidate.range.blocks,"slots_per_layer":slots,
                         "physical_weight_bytes":candidate.weight_bytes(),"source_device_weight_budget":source_budget,
                         "device_allocation_bound_bytes":allocation,"device_capacity_bytes":capacity,
-                        "prepared_resource_bound_bytes":charge.bounds.prepared_resource_bytes,
-                        "startup_additional_bound_bytes":charge.bounds.startup_additional_bytes,
-                        "fit_state_bytes":charge.exact_resident_bytes.checked_sub(candidate.weight_bytes()).ok_or("range resident charge differs from weights")?,
-                        "host_shared_weight_bytes":charge.shared_weight_bytes,
-                        "host_shared_graph_upload_bytes":charge.bounds.shared_upload_bytes,
+                        "prepared_resource_bound_bytes":memory.bounds.prepared_resource_bytes,
+                        "startup_additional_bound_bytes":memory.bounds.startup_additional_bytes,
+                        "preparation_allocation_bound_bytes":charge.preparation_bytes,
+                        "qualification_peak_bytes":crate::AttestedPrograms::qualification_peak_bytes(candidate.graph_load())?,
+                        "largest_import_source":source.map(|weight|serde_json::json!({
+                            "name":weight.descriptor.name,"source_bytes":weight.source_bytes,
+                            "resident_bytes":weight.resident_bytes,"shape":weight.shape,
+                        })),
+                        "fit_state_bytes":memory.exact_resident_bytes.checked_sub(candidate.weight_bytes()).ok_or("range resident charge differs from weights")?,
+                        "host_shared_weight_bytes":memory.shared_weight_bytes,
+                        "host_shared_graph_upload_bytes":memory.bounds.shared_upload_bytes,
                         "fit_depth":definition.decoder.context_limit.min(100_000),"weight_cap":weight_cap,
                     })
                 );
@@ -239,17 +267,9 @@ impl DecoderPlacement {
             .unplaced_output
             .retain(|weight| owns(weight.role.scope));
         let weight_bytes = super::weight_bytes_by_component(&physical_load)?[0];
-        let source_peak = super::source_import_peak_bytes(
-            physical_load
-                .target
-                .iter()
-                .map(|weight| weight.source_bytes)
-                .max()
-                .unwrap_or(0),
-        )?;
-        let import_peak_bytes = source_peak.max(crate::AttestedPrograms::qualification_peak_bytes(
-            &physical_load,
-        )?);
+        // Qualification belongs to preparation, before persistent weights.
+        // The importer authorizes only its actual selected source windows.
+        let import_peak_bytes = physical_load.target_upload_peak_bytes()?;
         Ok(DecoderRangeLoadPlan {
             range,
             decoder_blocks: self.ranges.last().unwrap().blocks.end,

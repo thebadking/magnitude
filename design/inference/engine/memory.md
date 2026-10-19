@@ -153,6 +153,15 @@ charge, which includes host-shared storage and may exceed a dedicated device poo
 The heap validates available headroom against that pool capacity; physical domain readings,
 not the aggregate charge, bound new allocations.
 
+Placed-load assessment and sealed resource admission bound the maximum of
+preparation, import, initial state and serving on each owner. Qualification
+fixtures leave before persistent model import; the source window leaves before
+initial-state allocation. Native invocation and recorded-graph holdings survive
+preparation and remain charged in later phases. Only later phases contain
+host-shared model and graph-upload storage, so those bytes cannot be subtracted
+from the preparation bound. Every actual phase still takes a fresh heap claim;
+a lower static maximum grants no authority to bypass a refused live claim.
+
 Beside the charge, Seismic reports what each opened device holds of its memory domain (`held`): the
 charge plus the device memory its backend holds beyond its allocations, so nothing the engine's
 work takes from the device grows outside it. CUDA and Vulkan take device memory from the driver in

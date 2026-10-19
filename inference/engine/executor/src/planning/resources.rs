@@ -1029,6 +1029,9 @@ pub struct ResourcePlan {
     retained_entry_bytes: u64,
     bytes: ResourceBytes,
     pub(super) qualification_peak_bytes: u64,
+    /// Independent pre-import phase of a placed load. Ordinary plans keep
+    /// their existing conservative combined startup bound.
+    preparation_peak_bytes: u64,
     target_graph: NativeGraphCharge,
     target_readout_graph: NativeGraphCharge,
     head_graph: Option<NativeGraphCharge>,
@@ -1122,14 +1125,21 @@ impl ResourcePlan {
             );
         }
         self.steady_committed_bytes = self.bytes.total()?;
-        self.startup_peak_bytes = self
-            .steady_committed_bytes
-            .checked_add(self.qualification_peak_bytes)
-            .ok_or("startup peak byte count overflow")?;
-        let allocation_peak = self
-            .startup_peak_bytes
+        let loading_peak = if self.decoder_range.is_some() {
+            let state = self.bytes.history.checked_add(self.bytes.recurrent_banks)
+                .ok_or("range initial state bytes overflow")?;
+            self.steady_committed_bytes.checked_sub(state)
+                .and_then(|bytes| bytes.checked_add(state.max(self.qualification_peak_bytes)))
+                .ok_or("range loading peak byte count overflow")?
+        } else {
+            self.steady_committed_bytes.checked_add(self.qualification_peak_bytes)
+                .ok_or("startup peak byte count overflow")?
+        };
+        self.startup_peak_bytes = loading_peak.max(self.preparation_peak_bytes);
+        let allocation_peak = loading_peak
             .checked_sub(self.host_shared_bytes)
-            .ok_or("shared storage exceeds startup charge")?;
+            .ok_or("shared storage exceeds startup charge")?
+            .max(self.preparation_peak_bytes);
         if allocation_peak > self.domain_capacity_bytes {
             return Err(format!(
                 "resource plan startup peak {allocation_peak} exceeds {} bytes",
@@ -1817,6 +1827,9 @@ impl ResourcePlanner {
             retained_entry_bytes: state.retained_entry_bytes,
             bytes,
             qualification_peak_bytes: load.import_peak_bytes(),
+            preparation_peak_bytes: load.preparation_peak_bytes(
+                &state.definition, state.codec, backend,
+            )?,
             target_graph,
             target_readout_graph,
             head_graph: None,
@@ -1975,6 +1988,7 @@ impl ResourcePlanner {
             retained_entry_bytes: state.retained_entry_bytes,
             bytes,
             qualification_peak_bytes,
+            preparation_peak_bytes: 0,
             target_graph,
             target_readout_graph,
             head_graph,
