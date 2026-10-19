@@ -98,6 +98,13 @@ Rules for every measurement:
   fills, and recovery. Native-payload capacity is distinct from control and
   staging memory; these checks do not establish full-model host admission or
   a serving speedup.
+  An activation-exchange qualification publishes actual fixture operand bytes
+  from a running GPU graph and returns a real CPU expert contribution before
+  that graph completes. It verifies exact transport, independent device owners,
+  concurrent request ownership, increasing sequences, failed response withdrawal
+  and stalled-host termination. Reusing feature rows as operands does not make
+  them captured routed activations, and protocol qualification grants no model
+  quality, production admission or generation-speed claim.
 - **Tuning:** first-load tuning runs under an explicit budget. Fresh tuning ignores stored tuning results and keeps compiled kernels. The tuning trace and outcome are part of every measured run.
 
 ## Comparison

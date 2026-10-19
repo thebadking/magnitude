@@ -1,0 +1,23 @@
+# A one-row BF16 activation published before a CPU-served expert is awaited.
+# The host writes an already activation-rounded F32 expert contribution and
+# releases control[1]. Control[2] permanently poisons the channel on any failure.
+# This entry neither chooses an expert nor applies its router coefficient.
+fn routed_cpu_exchange[H](normalized: &tensor[1, H] bf16,
+    activation: &mut tensor[1, H] bf16, contribution: &tensor[1, H] f32,
+    step: &tensor[1] i32, control: &mut tensor[3] i32,
+    heartbeat: &tensor[1] i32) -> tensor[1, H] f32 where H > 0:
+    let mut value = tensor[1, H] f32
+    for column in 0..H:
+        value[0, column] = 0.0
+        if control[2] == 0:
+            activation[0, column] = normalized[0, column]
+            value[0, column] = contribution[0, column]
+    if control[2] == 0:
+        control[0] = step[0]
+    return value
+
+native routed_cpu_exchange for cuda from "cuda/routed_cpu_exchange.cu":
+    static (H)
+    launch routed_cpu_exchange:
+        threadgroups (1, 1, 1)
+        threads_per_threadgroup (256, 1, 1)

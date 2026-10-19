@@ -546,6 +546,7 @@ before running it; fill measured fields only from saved artifacts.
 | Canonical expert operator crossover | 6 diagnostic | `513376a8` + `3ccacadb…`; fresh native feature export, real block 1 weights | Capture `20261019T144558Z-stage6-feature-capture-a916e2`; build `20261019T150219Z-stage6-crossover-build-7d6fd6`; timed comparison `20261019T150238Z-stage6-crossover-bd17b2` | All 32 groups pass per-backend path equality; 384 complete traced samples. CPU-ready one-expert pipeline 0.182 ms versus 0.811 ms GPU miss; CPU import 0.781 ms versus 0.799 ms with overlapping pass means | Retain harness. Prototype bounded CPU-ready retention and selective execution next; no CPU dispatch or serving speedup yet |
 | Actual miss/victim identities and bounded retention replay | 6 diagnostic | `2f7fbcc1` + `6186426f…`; same accepted plain profile | Build `20261019T152721Z-stage6-request-build-553dbd`; trace `20261019T152836Z-stage6-request-trace-26f7b0`; trace-disabled lifecycle `20261019T153420Z-stage6-request-lifecycle-fe37ac` | Six exact responses and unchanged configurations. 4 GiB payload-only demand replay hits 269/916 eligible completed repeat frames and 121/599 ordinary; victim replay hits 92/916 and 116/599 | Prefer demand retention for the prototype. Replay does not establish CPU execution, RAM admission or serving gain |
 | Physical CPU-ready cache and lease qualification | 6 prototype | `e2d68773` + `cf63e7ff…`; real block 1 weights and retained native fixture vectors | Build `20261019T160306Z-stage6-native-cache-build-d8953f`; qualification `20261019T160525Z-stage6-native-cache-qualification-10411b` | All 32 retained triples and CPU contributions exact; shared capacity, alias charges, pending/failed/withdrawn fills and owner lifetime pass | Retain on `two-gpu-native-cpu-cache-experimental`. Serving handoff, multi-layer integration, host admission at the modeled 4 GiB capacity and latency remain unmeasured |
+| CUDA/CPU activation and contribution exchange | 6 prototype | `29c77cf2` + `bc9e3058…`; same real weights and fixture readout operands | Build `20261019T163127Z-stage6-cpu-exchange-build-f2b8fc`; qualification `20261019T163154Z-stage6-cpu-exchange-qualification-b4ed4a` | 32 exact activation/contribution round trips across both GPUs, concurrent requests sharing one CPU cache, and failure/withdrawal/watchdog paths pass | Retain on `two-gpu-selective-cpu-experimental`. Production route selection, CPU program admission, full host accounting and serving performance remain pending |
 
 
 ### Stage 0 progress — baseline and diagnostic correction
@@ -2013,6 +2014,9 @@ The experimental branch **`two-gpu-native-cpu-cache-experimental`** now contains
 the physical cache component and the harness's
 `expert-crossover --qualify-only --misses 1 --cpu-cache-prototype` path.
 Serving does not construct this cache or dispatch CPU experts.
+Published as **`29c77cf2b7f3c0df320eb6c0b1fbfdaf6b8e2700`**; all 2,919
+inference source files and the native dependency pointer match the qualified
+build. Publication does not change the measured source identity below.
 
 The cache shares one native-payload limit and host surplus-claim authority among
 its clients. A source inventory fixes identity, representations, geometry and
@@ -2076,13 +2080,74 @@ Evidence includes the exact source patches/build identities, fixture and feature
 provenance, all per-expert differences, cache lifecycle snapshots and
 `cpu-cache-qualification.json` / `checks.json` in the qualification directory.
 
+### Stage 6 CUDA/CPU activation and contribution exchange
+
+The experimental branch **`two-gpu-selective-cpu-experimental`** adds the
+single-row BF16 activation exchange and its CUDA checked entry. The GPU copies
+the activation into mapped host storage, every producer thread fences its own
+writes, and one thread publishes the positive sequence. A CPU consumer acquires
+that publication, copies the activation without synchronized GPU readback,
+computes the real cached expert contribution, and releases the complete F32
+response. The parked GPU reads the response before completing its invocation.
+The response is the expert's activation-rounded contribution before router
+weighting; the exchange chooses no expert and performs no accumulation.
+
+Only one host consumer can claim a sequence. Sequences strictly increase on
+one ordered device queue. A bad response, withdrawal, repeated sequence or
+stalled host permanently poisons the channel. Failed GPU work publishes defined
+zero output storage, which the host must reject as a failed computation. Later
+queued invocations return without overwriting the channel's activation or
+reading a stale response. An unanswered request retains its owner and fails
+the channel on drop. This avoids a late host consumer racing reused storage;
+there is no reset that reauthorizes a failed channel.
+
+Measured source is **`29c77cf2` + dirty digest
+`bc9e305831d0fac56ce6e536f063529b83735912c3c867b5ae396d072b351a81`**.
+Build/provenance **`20261019T163127Z-stage6-cpu-exchange-build-f2b8fc`** and
+qualification **`20261019T163154Z-stage6-cpu-exchange-qualification-b4ed4a`**
+pass. The harness command adds `--cpu-exchange-prototype` and an explicit
+second stable CUDA selector to the existing untimed cache qualification.
+Both UUIDs match the system's two 3090 Ti owners. The original four-path
+operator checks and physical-cache lifecycle qualification also pass again.
+
+The rotation visits **32 real block 1 experts**, alternating GPUs, **16 per
+owner**. Every published BF16 activation exactly matches its retained fixture
+operand, and every returned F32 contribution is byte-identical to the resident
+CPU control. The same two-record CPU cache serves both owners. A separate
+concurrent pair holds the final two retained expert leases: both GPUs must
+publish their requests before either host consumer computes its response.
+Both results match. The shared CPU native worker pool serializes its submitted
+work; this is concurrent ownership coverage, not parallel CPU throughput.
+
+Each GPU also passes invalid-response rejection, poisoned-successor rejection,
+preservation of the earlier activation payload, withdrawal after publication,
+withdrawal before publication, repeated-sequence rejection and dead-host
+watchdog termination. These are actual device executions with the normal
+publication fences and watchdog, not a simulation of the control words.
+
+The final cache snapshot holds exactly **6,184,960 native bytes**, two records,
+zero pending reservations and 3,417 reported cache-control bytes. The process
+peak is **994,553,856 bytes**, including the independent operator controls,
+CPU allocations and backend storage. It is not full-model host admission or
+a peak for serving. No 4 GiB cache is allocated.
+
+This qualification is **untimed** and uses the same four retained readout
+vectors as operator operands, not captured routed-layer activations. It covers
+one quantization triple and no complete routed graph. The serving path does
+not construct the channel, choose CPU experts or prepare their programs. There
+is no generation-speed, model-quality, full-load budget or production admission
+claim. No unit or integration tests were added or run. The source patches,
+build identities, command, per-expert publications, both device identities and
+failure checks are retained in the local build and qualification directories.
+
 ## Immediate next action
 
 Continue **Stage 6** using the frozen Stage 2b plain serving control. The
 canonical CPU-ready crossover and retention replay justify a bounded CPU-format
-cache using eligible demand records. The physical storage/lease component now
-passes its scoped qualification; connect explicit activation/result publication
-and selective execution for one-expert misses next. Account for
+cache using eligible demand records. The physical storage/lease component and
+dual-GPU activation/contribution exchange now pass their scoped qualifications.
+Connect selective execution for one-expert misses to the planned routed graph
+and shared full-model inventory next. Account for
 cache hit rate, import cost, file-cache displacement, worker contention and
 activation/result publication; retaining another copy of raw GGUF bytes alone
 does not obtain the measured CPU-ready cost. Keep original router choices,
@@ -2101,11 +2166,14 @@ triples and bypass insertion when retained leases leave no capacity. Packing
 and source-storage ownership need a bounded handoff after ordinary readiness,
 with its overlap measured rather than assumed.
 
-CPU dispatch also needs explicit activation publication before the GPU parks.
-Ordinary tensor readback waits for the queued graph and cannot supply that
-handoff safely. Return each expert's already activation-rounded contribution
-before the original GPU slot-order fold, preserving routing and failure
-semantics. Canonical CPU preparation and any further tuning must fit the
+The experimental exchange supplies activation publication without waiting for
+the whole queued graph. Serving must make eligibility explicit, look up CPU
+retention before reserving GPU slots, and bypass GPU conversion/computation for
+the CPU-served choice. Keep all original expert IDs, router coefficients and
+the original GPU slot-order fold, including shared and residual-stream joins.
+Do not add a CPU contribution after the completed routed sum. Include mapped
+exchange buffers, CPU programs and bounded import staging in the load plan and
+host census. Canonical CPU preparation and any further tuning must fit the
 existing load allowance; no second CPU tuning budget is permitted.
 
 Keep Stage 4's causal-head MTP and Stage 5's fragment-packing sources as separate

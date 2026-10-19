@@ -9,7 +9,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
-fn fill(cpu: &Backend, expert: usize, outputs: &mut [Tensor; 3]) -> Result<(), String> {
+pub(super) fn fill(cpu: &Backend, expert: usize, outputs: &mut [Tensor; 3]) -> Result<(), String> {
     for kind in 0..3 {
         let source = cpu.raw[kind]
             .slice_leading(expert as u64, expert as u64 + 1)
@@ -38,11 +38,22 @@ fn require_bound(cache: &CpuExpertCache) -> Result<Value, String> {
     serde_json::to_value(snapshot).map_err(why)
 }
 
-fn contribution(
+pub(super) fn contribution(
     cpu: &Backend,
     weights: &[Tensor; 3],
     expert: usize,
     input: usize,
+    h: u64,
+    f: u64,
+) -> Result<Output, String> {
+    contribution_from(cpu, weights, expert, &cpu.normalized[input], h, f)
+}
+
+pub(super) fn contribution_from(
+    cpu: &Backend,
+    weights: &[Tensor; 3],
+    expert: usize,
+    normalized: &Tensor,
     h: u64,
     f: u64,
 ) -> Result<Output, String> {
@@ -51,7 +62,7 @@ fn contribution(
     let product = cpu
         .up
         .call(routed_gate_up::Args {
-            normalized: &cpu.normalized[input],
+            normalized,
             routes: &routes,
             expert_gate: &weights[0],
             expert_up: &weights[1],

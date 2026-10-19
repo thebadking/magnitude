@@ -1,5 +1,6 @@
 //! An operator/storage diagnostic. It never dispatches experts for serving.
 mod cache;
+mod exchange;
 use crate::{Inputs, Rendered, digest::sha256_hex, render::RenderedFile};
 use clap::Args;
 use magnitude_artifacts::gguf::Encoding;
@@ -44,6 +45,12 @@ pub struct Options {
     /// Qualify the physical CPU-ready cache with real weights and fixture vectors.
     #[arg(long)]
     cpu_cache_prototype: bool,
+    /// Qualify the parked CUDA/CPU activation and contribution protocol.
+    #[arg(long)]
+    cpu_exchange_prototype: bool,
+    /// Exact second CUDA selector for the dual-owner exchange qualification.
+    #[arg(long)]
+    cpu_exchange_peer_selector: Option<String>,
 }
 
 fn why(error: impl Display) -> String {
@@ -945,8 +952,13 @@ pub fn run(
     digest: &str,
 ) -> Result<(Value, Vec<String>), String> {
     require(
-        !options.cpu_cache_prototype || (options.qualify_only && options.misses == 1),
-        "CPU cache prototype qualification requires --qualify-only and --misses 1",
+        !(options.cpu_cache_prototype || options.cpu_exchange_prototype)
+            || (options.qualify_only && options.misses == 1),
+        "CPU prototypes require --qualify-only and --misses 1",
+    )?;
+    require(
+        options.cpu_exchange_prototype == options.cpu_exchange_peer_selector.is_some(),
+        "CPU exchange qualification requires its explicit second GPU selector",
     )?;
     require(
         options.experts >= 32
@@ -992,7 +1004,10 @@ pub fn run(
         )
         .map_err(why)?;
     let gpu_device = catalog
-        .open_with(catalog.resolve(selector).map_err(why)?, device_options)
+        .open_with(
+            catalog.resolve(selector).map_err(why)?,
+            device_options.clone(),
+        )
         .map_err(why)?;
     cpu_device.set_memory_limit(Some(1 << 30));
     gpu_device.set_memory_limit(Some(1 << 30));
@@ -1123,6 +1138,24 @@ pub fn run(
     } else {
         None
     };
+    let exchange_qualification = if options.cpu_exchange_prototype {
+        let result = exchange::qualify(
+            &cpu,
+            &gpu,
+            &weights,
+            &catalog,
+            options.cpu_exchange_peer_selector.as_deref().unwrap(),
+            device_options,
+        )?;
+        std::fs::write(
+            inputs.run.path("cpu-exchange-qualification.json"),
+            serde_json::to_vec_pretty(&result).map_err(why)?,
+        )
+        .map_err(why)?;
+        Some(result)
+    } else {
+        None
+    };
     let mut rounds = Vec::new();
     if !options.qualify_only {
         let cpu_trace = cpu
@@ -1238,7 +1271,8 @@ pub fn run(
             "cpu_memory_usage": format!("{:?}", cpu.device.memory_usage()),
             "gpu_memory_usage": format!("{:?}", gpu.device.memory_usage())},
         "backends": {"cpu": backend_identity(&cpu), "gpu": backend_identity(&gpu)},
-        "qualification": qualification, "cpu_cache_qualification": cache_qualification, "rounds": rounds,
+        "qualification": qualification, "cpu_cache_qualification": cache_qualification,
+        "cpu_exchange_qualification": exchange_qualification, "rounds": rounds,
         "boundary": "Complete expert contribution from RAM: resident graphs, or CPU imports / GPU blocking uploads and bank conversion; CPU includes activation and result transport. File service, routing, serving and contention excluded.",
         "limitations": ["Readout vectors are not actual routed-layer activation captures", "Canonical implementations only; no tuning or exclusion of other qualified CPU configurations", "GPU is otherwise idle during CPU work; no overlap or model contention is represented", "Traced operator intervals are diagnostic and do not establish a generation speedup"]});
     std::fs::write(

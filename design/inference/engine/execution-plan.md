@@ -439,6 +439,16 @@ graph and a specialization only when their scale extents agree. A decode project
 included, is one launch: each workgroup reduces its few rows' norms while staging them. Larger classes
 normalize once per row into entry scratch, never per output tile. A monolithic entry that recomputes normalization,
 projection, routing, or softmax for each output coordinate is not an admissible production program.
+A CPU-served expert needs activation publication before its device graph parks.
+An exchange copies one BF16 row into mapped host storage, releases its positive
+sequence, then waits for the host's activation-rounded F32 contribution. Host
+consumers acquire the publication and release the complete result; no synchronized
+readback of the parked queue participates. Sequences strictly increase on one
+ordered queue. Failure, withdrawal or a stalled host poisons the channel: the
+failed invocation publishes defined zero storage, the host reports failure, and
+later invocations cannot overwrite payloads a late consumer could retain. A new
+channel requires separate allocation and ownership. This protocol alone grants
+neither CPU numerical admission nor authority to alter routing or accumulation.
 Target readout preserves every demanded feature row, and projects only rows it selects: the
 feature and head entries each gather their hidden rows through a row table in their own
 normalization prologue, so no copy or gather node precedes them. Logits are graph locals of the

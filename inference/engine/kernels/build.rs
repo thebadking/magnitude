@@ -19,6 +19,11 @@ const BACKENDS: [BackendName; 4] = [
 /// stale; its assets are exempt from `tree_parity` alike.
 const ENTRY_EXCEPTIONS: &[(&str, &[BackendName], &str)] = &[
     (
+        "routed_cpu_exchange",
+        &[BackendName::Cuda],
+        "one-row BF16 CPU expert activation/contribution publication on CUDA mapped host memory; other backends have no selective CPU dispatcher",
+    ),
+    (
         "routed_route_shared",
         &[BackendName::Metal],
         "decode routing that also expands the shared expert in the router launch; the other backends run `routed_route`, then `routed_expand`, until the form is measured there",

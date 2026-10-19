@@ -122,7 +122,10 @@ physical release, including after eviction. Insufficient unleased capacity
 bypasses an optional fill without running its builder. Cache controls are
 claimed and reported separately from native payloads; caller-owned import
 staging and programs remain their owners' holdings. Retention alone neither
-enables CPU dispatch nor grants numerical admission.
+enables CPU dispatch nor grants numerical admission. Activation exchanges have
+separate claimed mapped payload/control storage, retained by pending host
+consumers through response publication or failure. A poisoned exchange is not
+reset or reused; queued successors cannot overwrite a late reader's storage.
 
 The device reserve is sized by measurement on the smallest supported devices. With every byte of
 the engine's device usage charged or held (Standing and claims), what remains is the residual: the

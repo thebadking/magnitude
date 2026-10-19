@@ -8,6 +8,7 @@ pub(crate) mod runtime;
 pub(crate) mod source;
 pub(crate) mod cache;
 pub(crate) mod cpu_cache;
+pub(crate) mod cpu_exchange;
 pub(crate) mod words;
 
 pub(crate) mod shared_bank;
