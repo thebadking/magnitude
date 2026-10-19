@@ -375,10 +375,6 @@ placement, scalar-result exclusion, native execution and result decoding as a
 cached invocation. Releasing its scratch cannot release or reuse another call's
 cached workspace. One-shot qualification uses this scope so its temporary
 arenas do not become persistent resources of the prepared kernel.
-After all intended consumers have prepared, their owner may release unconsumed
-native formation handoffs. This discards unused intermediate formed resources,
-without changing prepared kernels, submitted work, selected artifacts or stored
-numerical evidence. Released entry counts are not memory credit.
 Every non-empty scratch arena (the standalone arena and every graph workspace that places
 anything) reserves a fixed range at its start for `sync` scratch. Nothing else is placed there;
 within one graph each node's sync buffers are disjoint from every other node's, and never

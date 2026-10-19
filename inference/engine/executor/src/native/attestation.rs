@@ -16,20 +16,44 @@ use magnitude_kernels::{
     attention_append_dense, cluster_token_rows, draft_convolve_input, draft_convolve_residual,
     draft_gated_rows, draft_path_step, draft_top_k, feature_rows, import_dense, indexer_select,
     ngram_gate, ngram_inject, ngram_rows, packing_bound, place_logits_rows, post_norm_residual,
-    project_rows, readout_project_rows, repack_weight, repeat_rows, selection_notice, stored_rows,
+    project_rows, readout_project_rows, repack_weight, repeat_rows, routed_bank_fill,
+    routed_convert_wide, routed_copy, routed_route_streamed, routed_scratch_request,
+    routed_scratch_wait, routed_seed_commit, routed_step, selection_notice, stored_rows,
     stream_mix_down, stream_mix_up, tap_rows, widen_rows,
 };
 use std::{collections::HashSet, rc::Rc};
 
-/// Invocation workspace of the fused routed form's decode kernels.
-fn routed_decode_bytes(decode: &RoutedDecodeKernels) -> u128 {
-    match decode {
-        RoutedDecodeKernels::Expand(expand) => u128::from(expand.invocation_workspace_bytes()),
-        RoutedDecodeKernels::SharedRoute { route, choices } => {
-            u128::from(route.invocation_workspace_bytes())
-                + u128::from(choices.invocation_workspace_bytes())
+/// Every separately prepared resident and streamed routed entry. Streamed
+/// choices are prepared independently, including on shared-route backends.
+fn routed_invocation_bytes(handles: &RoutedKernels) -> u128 {
+    let mut bytes = u128::from(handles.route.invocation_workspace_bytes())
+        + match &handles.decode {
+            RoutedDecodeKernels::Expand(expand) => u128::from(expand.invocation_workspace_bytes()),
+            RoutedDecodeKernels::SharedRoute { route, choices } => {
+                u128::from(route.invocation_workspace_bytes())
+                    + u128::from(choices.invocation_workspace_bytes())
+            }
+        }
+        + u128::from(handles.output.invocation_workspace_bytes())
+        + u128::from(handles.group.invocation_workspace_bytes())
+        + u128::from(handles.experts.invocation_workspace_bytes())
+        + u128::from(handles.combine.invocation_workspace_bytes());
+    if let Some(streamed) = &handles.streamed {
+        bytes += u128::from(streamed.choices.invocation_workspace_bytes())
+            + u128::from(streamed.step.invocation_workspace_bytes())
+            + u128::from(streamed.route.invocation_workspace_bytes())
+            + u128::from(streamed.fill.invocation_workspace_bytes())
+            + u128::from(streamed.scratch_request.invocation_workspace_bytes())
+            + u128::from(streamed.scratch_wait.invocation_workspace_bytes())
+            + u128::from(streamed.seed_commit.invocation_workspace_bytes());
+        for copy in &streamed.copy {
+            bytes += u128::from(copy.invocation_workspace_bytes());
+        }
+        for convert in &streamed.convert_wide {
+            bytes += u128::from(convert.invocation_workspace_bytes());
         }
     }
+    bytes
 }
 
 /// Invocation workspace of the recurrent step row classes' kernels.
@@ -612,7 +636,15 @@ impl AttestedPrograms {
             return Err("target range kernels belong to another opened device".into());
         }
         crate::programs::native_target_graph::PreparedTargetGraphs::prepare_range(
-            device, &self.target, load, geometry, state, plan, limits, workers, owned,
+            device,
+            &self.target,
+            load,
+            geometry,
+            state,
+            plan,
+            limits,
+            workers,
+            owned,
         )
     }
 
@@ -631,15 +663,31 @@ impl AttestedPrograms {
         }
         // The fused routed form's entries: the decode ones by the backend's
         // form.
-        let routed_bytes = bytes!(routed_route)
-            + match DecodeForm::of(backend).map_err(PlanError::ResourcePlanning)? {
-                DecodeForm::Expand => bytes!(routed_expand),
-                DecodeForm::SharedRoute => bytes!(routed_route_shared) + bytes!(routed_gate_up),
-            }
-            + bytes!(routed_output)
-            + bytes!(routed_group)
-            + bytes!(routed_experts)
-            + bytes!(routed_combine);
+        let decode_form = DecodeForm::of(backend).map_err(PlanError::ResourcePlanning)?;
+        let routed_bytes = |binding: crate::RoutedBinding| {
+            bytes!(routed_route)
+                + match decode_form {
+                    DecodeForm::Expand => bytes!(routed_expand),
+                    DecodeForm::SharedRoute => bytes!(routed_route_shared) + bytes!(routed_gate_up),
+                }
+                + bytes!(routed_output)
+                + bytes!(routed_group)
+                + bytes!(routed_experts)
+                + bytes!(routed_combine)
+                + if binding.bank.is_some() {
+                    bytes!(routed_gate_up)
+                        + bytes!(routed_step)
+                        + bytes!(routed_route_streamed)
+                        + bytes!(routed_bank_fill)
+                        + bytes!(routed_scratch_request)
+                        + bytes!(routed_scratch_wait)
+                        + 3 * bytes!(routed_copy)
+                        + bytes!(routed_seed_commit)
+                        + 3 * bytes!(routed_convert_wide)
+                } else {
+                    0
+                }
+        };
         fn general_routed_bytes(shape: crate::GeneralRoutedShape) -> u128 {
             let mut bytes = bytes!(routed_select)
                 + bytes!(routed_down)
@@ -812,7 +860,7 @@ impl AttestedPrograms {
                 Some(FeedForwardProgramSlot::Routed(binding))
                     if charged_feed_forward.insert(FeedForwardProgramSlot::Routed(binding)) =>
                 {
-                    bytes += routed_bytes
+                    bytes += routed_bytes(binding)
                 }
                 Some(FeedForwardProgramSlot::GeneralRouted(binding))
                     if charged_feed_forward
@@ -919,7 +967,7 @@ impl AttestedPrograms {
                         FeedForwardProgramSlot::Dense(_) => {
                             bytes += bytes!(dense_expand) + bytes!(dense_output)
                         }
-                        FeedForwardProgramSlot::Routed(_) => bytes += routed_bytes,
+                        FeedForwardProgramSlot::Routed(binding) => bytes += routed_bytes(binding),
                         // `operators::admit` keeps draft heads on the fused
                         // form.
                         FeedForwardProgramSlot::GeneralRouted(_)
@@ -1689,8 +1737,6 @@ impl AttestedPrograms {
             load,
         )
         .qualify(device)?;
-        let unused = device.release_native_handoffs();
-        eprintln!("magnitude-engine: released {unused} unused native preparation handoffs");
         let retained = Self::sum_invocation_workspace_bytes(&prepared)?;
         if retained != planned_bytes {
             return Err(CatalogFailure::Qualification {
@@ -1701,6 +1747,31 @@ impl AttestedPrograms {
                 ),
             });
         }
+        let owned =
+            attested
+                .device_storage_bytes()
+                .map_err(|outcome| CatalogFailure::Preparation {
+                    entry: "program_factory",
+                    bindings: "retained program inventory".into(),
+                    outcome: outcome.into(),
+                })?;
+        if owned != planned_bytes {
+            return Err(CatalogFailure::Qualification {
+                entry: "program_factory",
+                bindings: "retained program inventory".into(),
+                outcome: format!(
+                    "retained program owners charge {owned} bytes; plan charged {planned_bytes}"
+                ),
+            });
+        }
+        eprintln!(
+            "magnitude-engine: native invocation inventory {}",
+            serde_json::json!({
+                "planned_bytes": planned_bytes,
+                "retained_bytes": owned,
+                "device_charged_bytes": device.memory_usage().charged,
+            }),
+        );
         Ok(attested)
     }
 
@@ -1830,12 +1901,7 @@ impl AttestedPrograms {
             }
         }
         for handles in prepared.target.routed.values() {
-            bytes += u128::from(handles.route.invocation_workspace_bytes())
-                + routed_decode_bytes(&handles.decode)
-                + u128::from(handles.output.invocation_workspace_bytes())
-                + u128::from(handles.group.invocation_workspace_bytes())
-                + u128::from(handles.experts.invocation_workspace_bytes())
-                + u128::from(handles.combine.invocation_workspace_bytes());
+            bytes += routed_invocation_bytes(handles);
         }
         for handles in prepared.target.readout.values() {
             bytes += u128::from(handles.features.invocation_workspace_bytes())
@@ -1869,12 +1935,7 @@ impl AttestedPrograms {
                     + u128::from(handles.output.invocation_workspace_bytes());
             }
             for handles in head.routed.values() {
-                bytes += u128::from(handles.route.invocation_workspace_bytes())
-                    + routed_decode_bytes(&handles.decode)
-                    + u128::from(handles.output.invocation_workspace_bytes())
-                    + u128::from(handles.group.invocation_workspace_bytes())
-                    + u128::from(handles.experts.invocation_workspace_bytes())
-                    + u128::from(handles.combine.invocation_workspace_bytes());
+                bytes += routed_invocation_bytes(handles);
             }
             charge!(head.features.values());
             for logits in head.logits.values() {
@@ -2425,6 +2486,21 @@ impl AttestedPrograms {
                         charge!(&handles.group);
                         charge!(&handles.experts);
                         charge!(&handles.combine);
+                        if let Some(streamed) = &handles.streamed {
+                            charge!(&streamed.choices);
+                            charge!(&streamed.step);
+                            charge!(&streamed.route);
+                            charge!(&streamed.fill);
+                            charge!(&streamed.scratch_request);
+                            charge!(&streamed.scratch_wait);
+                            charge!(&streamed.seed_commit);
+                            for copy in &streamed.copy {
+                                charge!(copy);
+                            }
+                            for convert in &streamed.convert_wide {
+                                charge!(convert);
+                            }
+                        }
                     }
                     AttestedFeedForward::GeneralRouted(handles) => general_routed!(handles),
                     AttestedFeedForward::Parallel(handles) => {
@@ -2472,6 +2548,21 @@ impl AttestedPrograms {
                 charge!(&per_layer.gate);
                 charge!(&per_layer.output.project);
                 charge!(&per_layer.output.residual);
+            }
+            if let Some(streams) = &block.streams {
+                charge!(&streams.down);
+                charge!(&streams.exit);
+                charge!(&streams.up);
+                charge!(&streams.repeat);
+            }
+            if let Some(ngram) = &block.ngram {
+                charge!(&ngram.rows);
+                charge!(&ngram.stored);
+                charge!(&ngram.key);
+                charge!(&ngram.value);
+                charge!(&ngram.gate);
+                charge!(&ngram.inject);
+                charge!(&ngram.notice);
             }
         }
         if let Some(entry) = &self.target.per_layer {

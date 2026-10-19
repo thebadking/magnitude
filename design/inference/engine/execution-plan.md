@@ -332,8 +332,11 @@ released before physical model import.
 One-shot entry qualification owns scratch per call, through completion, and
 verifies the planned fixed invocation charge again after qualification; a
 temporary standalone arena cannot escape into the prepared program inventory.
-After every required kernel has prepared, unconsumed formation handoffs are
-released; selected kernels and submitted work retain their own resources.
+Invocation planning and the retained-storage census include every separately
+prepared streamed-routing, fill, scratch-bank, copy, conversion and commit entry,
+as well as stream and n-gram helpers. Cloned program handles are counted once
+per physical owner. The retained inventory must agree with the fixed plan after
+qualification.
 A placed load bounds preparation, import, initial-state allocation and serving
 separately and takes their maximum
 per physical allocation domain. Preparation retains native invocation buffers

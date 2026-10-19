@@ -320,13 +320,6 @@ impl Device {
     pub fn programs_formed(&self) -> usize {
         self.inner.programs_formed()
     }
-
-    /// Release unconsumed native formation handoffs once all intended kernels
-    /// have prepared. Live kernels retain their resources. Returns the entry
-    /// count; memory observations remain the authority for released bytes.
-    pub fn release_native_handoffs(&self) -> usize {
-        self.inner.release_native_handoffs()
-    }
     /// Seismic-owned charges and limits for this device and its pool.
     pub fn memory_usage(&self) -> MemoryUsage {
         self.inner.memory_usage()
