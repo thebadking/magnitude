@@ -401,7 +401,7 @@ against a reference require that reference to pass its sanity gate.
 | 5 | SM86 packed-kernel and representation improvements | Packing experiment qualified; repeat improves, ordinary gain below bar; four-warp declaration deferred after a confounded gate | 4 decision |
 | 6 | Selective CPU expert execution | Isolated crossover established; serving fails warmed parity; grouped arithmetic follow-up remains experimental | Transfer profiling, then compute crossover |
 | 7 | Adaptive placement and prompt grouping | Accounting, paired reservations and startup phases qualified experimentally; keep group 8. Capacity helps ordinary generation but exposes repeat source-page misses. Derived-cap RAM retention fails warm speed bars; no overall promotion | Recorded earlier-stage decisions |
-| 8 | Consolidated qualification and reference comparison | In progress: full-context cache repair passes 260137+37 exact retrieval at 262K capacity. Fresh repaired-build serving/lifecycle and matched timing/reference checks remain | Selected candidates disposed |
+| 8 | Consolidated qualification and reference comparison | In progress: repaired 262K retrieval and fresh two-GPU serving/lifecycle pass. Matched timing, repaired-build smaller-model checks and initial/llama.cpp comparisons remain | Selected candidates disposed |
 
 A dependency on a decision permits a recorded revert or deferral. It does not
 require forcing an unsuccessful optimization into the code. Reorder remaining
@@ -629,6 +629,7 @@ before running it; fill measured fields only from saved artifacts.
 | Smaller dense model on one GPU | 8 qualification | Accepted Stage 2b versus `7a0a1f30`; catalog Qwen3.5 4B Q4, GPU0 | Acquisition `20261019T230015Z-stage8-acquire-small-e20ebb`; serving `20261019T230807Z-stage8-small-strict-104d5b`; lifecycle `20261019T230948Z-stage8-small-lifecycle-2f5e36` | Six exact responses and equal native choices/usage/stops; complete tool passes. Prefix reuse, cancellation, recovery and health pass; exactly one GPU in all censuses | Checked dense single-GPU behavior passes. No speed-regression bound or coverage of other smaller models yet |
 | Current 262K context request | 8 failure | Frozen `7a0a1f30`, group 8 and ordinary reserves | `20261019T231254Z-stage8-context-262144-d839b3` | Readiness and 2226+37 retrieval pass; 260137-input request fails without output, requiring 60,817,408 bytes with 31,689,933 available. Cache fit uses only 100000 tokens, admitting 216/217 slots | Preserve failure; isolated `82763130` accounts for full configured state before selecting cache capacity. Build and qualify before timing |
 | Full configured-context cache admission | 8 repair | Clean `82763130`, derived from failed `7a0a1f30` | Build `20261019T232622Z-stage8-context-capacity-build-8277bc`; replay `20261019T233141Z-stage8-context-capacity-max-qualification-eaa24c` | Source-verified build and independent hashes pass. Exact 2226+37 and 260137+37 retrievals pass at 262144 capacity, with zero reuse; full-depth fit selects 202/204 slots and both owner bounds fit | Maximum-context regression repaired for the checked profile. Qualify short serving/lifecycle and compare this exact build before performance promotion |
+| Repaired-build placed serving and lifecycle | 8 qualification | Accepted Stage 2b versus clean `82763130`, group 8/context 1024 | Serving `20261019T234759Z-stage8-repaired-placed-strict-823649`; lifecycle `20261019T235250Z-stage8-repaired-placed-lifecycle-699eb9` | Six exact valid responses, equal rendered tokens/native choices/usage/stops; complete tool passes. Prefix reuse, cancellation, recovery and health pass; B retains 223/224 slots | Short placed correctness gates pass. Measure the full consolidated source effect against Stage 2b with tracing disabled and alternating launches |
 
 
 ### Stage 0 progress — baseline and diagnostic correction
@@ -3147,7 +3148,8 @@ each placed owner's slab-rounded state at the **full configured context**,
 with the ordinary in-flight recurrent bank count. It keeps the metadata-only
 assessment capped, preserves startup-phase accounting and leaves actual slab
 growth under fresh heap claims. It changes no GPU arithmetic, token limit,
-tuning allowance or reserve. Its effectiveness is **pending model qualification**.
+tuning allowance or reserve. Its maximum-context and short placed-serving/lifecycle
+qualification now pass, as recorded below.
 Preserve the failed candidate and its independent binaries;
 do not mutate them or run its pending speed comparison as if maximum context
 had passed. [Local bug report and reproduction](bugs/26-10-19/context-capacity.md).
@@ -3168,8 +3170,8 @@ in **4m35s** from clean source
 `8276313087da8e1960342a03a93c44633c355612`. The release engine and harness both
 pass source provenance, then independent copies in `context-capacity-control`
 are checked against their exact verified hashes. The run preserves this mapping
-in `preserved-binaries.json`. This is build evidence; replay of the failed
-maximum-context fixture remains the next necessary model gate.
+in `preserved-binaries.json`. This build evidence is separate from the completed
+maximum-context replay below.
 
 ### Stage 8 full-context repair result — maximum-context retrieval passes
 
@@ -3204,8 +3206,41 @@ The long request reports **714.813 s prefill and 6.066 s generation**. These
 are qualification observations with no matched thermal-gated control; do not
 compare them with the older 971 s run to claim a speedup. The complete job
 finishes under the declared hold and request limits. The maximum-context memory
-regression is repaired for the tested profile; fresh short-context serving,
-lifecycle and timing checks of this exact build remain necessary.
+regression is repaired for the tested profile. The fresh short-context serving
+and lifecycle checks below also pass; matched timing remains necessary.
+
+### Stage 8 repaired-build placed serving and lifecycle — pass
+
+**`20261019T234759Z-stage8-repaired-placed-strict-823649`** compares fresh
+accepted Stage 2b and repaired `82763130` launches on both GPUs, context 1024,
+group 8, plain decoding, lookahead and decode-reuse seed/replacement, with host
+retention zero and the standard preparation allowance. All **six responses
+are valid and exactly equal** across builds, including complete tool arguments,
+usage and stop reason. Repeat is 758+64, ordinary continuation 396+60 with
+`stop`, and the tool 366+53 with `tool_calls`. Native rendered tokens and selected
+kernel configurations are identical.
+
+The repaired 1024-context cache plan remains **223/224 slots per layer**, with
+state fit depth 1024 and both physical allocation bounds within stable capacity.
+The full-context repair changes the larger declaration's fit, not this shorter
+case's capacity. Compared with Stage 2b, the two device model censuses increase
+by a combined **3,333,120,000 bytes**, while each classified compute charge falls
+**42,439,722 bytes** and context charges agree. These are memory-census findings,
+not a generation-speed or instantaneous peak-memory claim.
+
+**`20261019T235250Z-stage8-repaired-placed-lifecycle-699eb9`** passes cold,
+retain, prefix hit, cancellation, recovery and health on the exact repaired
+build. All four completed responses are the exact 308-character prefix;
+hit/recovery reuse **757 prompt tokens**. Cancellation closes after four
+content events / 15 exact characters before terminal delivery and recovery
+remains healthy. Both runs preserve source-proof links and independent binary
+hash verification. No precision gate, reserve or tuning allowance changes.
+
+The control's actual inference files match the published `d2b3b935` snapshot.
+The consolidated patch from that snapshot to `82763130` changes 37 source/design
+paths and no kernel declarations or `seismic-std` bodies. Preserve that complete
+inventory and patch with the next comparison. This is a consolidated source
+comparison, not an isolated test of the final state-depth repair.
 
 ### Stage 8 next gate — repaired-build serving and consolidated timing
 
@@ -3213,9 +3248,8 @@ The 32K and smaller dense-model checks pass. Inspection shows that the placed
 fit assessment caps its state-depth estimate at **100000**, so 32K coverage
 does not exercise a larger declaration. The changed capacity/accounting path
 therefore required the current maximum-context qualification above. The full
-repaired request now passes. Keep its source and binaries frozen and qualify
-short-context prose/tools and prefix reuse/cancellation/recovery on the exact
-repair before timing it. This repair changes placed-cache sizing; the separate
+repaired request and fresh placed serving/lifecycle gates now pass. Keep their
+source and binaries frozen for timing. This repair changes placed-cache sizing; the separate
 100000-token metadata assessment workload remains documented and unchanged.
 
 Then measure consolidated Stage 7c against accepted Stage 2b directly with
@@ -3261,9 +3295,8 @@ Use the existing upload/service evidence before proposing another transfer
 change, and retain the earlier asynchronous-batching rejection.
 
 **Stage 8** has a passing repaired 262K-capacity / 260137-input retrieval, in
-addition to earlier 32K and smaller-model evidence. Qualify short serving and
-lifecycle behavior on exact repaired build `82763130`, retaining the ordinary
-reserves and 30-second tuning allowance. Then compare the consolidated
+addition to fresh placed serving/lifecycle gates on exact repaired build
+`82763130`. Compare the consolidated
 candidate directly with accepted Stage 2b, quantify the smaller-model speed
 regression bound, and compare with initial/reference implementations in
 alternating sessions. Do not multiply separate-session improvements. Keep RAM
