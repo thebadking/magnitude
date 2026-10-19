@@ -138,7 +138,7 @@ or an inventory of model pages; `Cached` includes other files. The snapshot and
 read-only reproduction script are retained in
 `20261019T191102Z-idle-ram-diagnostic/`.
 
-Stage 7's controlled comparison provides another active example: all four
+Stage 7a's controlled comparison provides another active example: all four
 candidate generation-delivery windows have **zero physical read bytes**, with
 approximately **7.188 GB logical reads for repeat** and **3.878 GB for ordinary**.
 At delivery completion, Linux reports **56.432–56.569 GiB cached,
@@ -147,6 +147,13 @@ reclaimable cache rather than unused RAM. The candidate adds GPU expert storage,
 not an anonymous host payload cache. These are delivery windows with possible
 lookahead, not exact device-step boundaries. Raw I/O and RAM observations are in
 `20261019T194631Z-stage7-owner-budget-comparison-a0f388/analysis.json`.
+
+The later Stage 7b group 1 comparison records physical misses despite warming:
+**100.770/0 MB** in repeat and **385.081/0 MB** in ordinary generation-delivery
+windows. RAM remains occupied: **56.583–56.706 GiB cached** and only
+**0.378–0.486 GiB free**. Zero physical reads in Stage 7a therefore cannot be
+generalized to every profile or request. Retain the changed cache behavior with
+the grouping result, rather than treating available RAM as unoccupied space.
 
 Local evidence: `20261019T075917Z-stage2a-comparison-b3e32b/` contains
 `ram-residency.json`, its reproduction script, measured I/O windows and
@@ -362,7 +369,7 @@ against a reference require that reference to pass its sanity gate.
 | 4 | MTP across the two owners | Qualified experimental capability; repeat generation improves, ordinary primary bar fails and total time regresses | 3 decision |
 | 5 | SM86 packed-kernel and representation improvements | Packing experiment qualified; repeat improves, ordinary gain below bar; four-warp declaration deferred after a confounded gate | 4 decision |
 | 6 | Selective CPU expert execution | Isolated crossover established; serving fails warmed parity; grouped arithmetic follow-up remains experimental | Transfer profiling, then compute crossover |
-| 7 | Adaptive placement and prompt grouping | Owner allocation bound qualified; capacity increases, speed bar fails; prompt grouping next | Recorded earlier-stage decisions |
+| 7 | Adaptive placement and prompt grouping | Owner allocation bound and paired reservation repair qualified; group 1 comparison fails the speed bar and increases total time; keep group 8, audit startup phases next | Recorded earlier-stage decisions |
 | 8 | Consolidated qualification and reference comparison | Pending | Selected candidates disposed |
 
 A dependency on a decision permits a recorded revert or deferral. It does not
@@ -582,6 +589,8 @@ before running it; fill measured fields only from saved artifacts.
 | Verified raw CUDA projection accumulators | 6 diagnostic | `67a7a69a` + `786553b4…`; retained as `efd99574` | Build `20261019T191623Z-stage6-cpu-raw-projection-build-32773e`; replay `20261019T191741Z-stage6-cpu-raw-projection-replay-164fd7` | F32 observations reconstruct every normal GPU product and contribution exactly in all 53 records. Whole-group CPU partials differ after BF16 narrowing at 3/33,920 gate, 1/33,920 up and 11/135,680 down coordinates | Projection differences are directly observed before publication; the earlier warmed failure remains unreproduced. No serving/timing claim |
 | Intermediate half-group rounding | 6 numerical proof of concept | `efd99574` + `6e1a4556…`; retained as `394d3764` | Build `20261019T192052Z-stage6-cpu-half-rounding-build-3ea984`; replay `20261019T192208Z-stage6-cpu-half-rounding-replay-25e54b` | GPU raw bytes remain identical. Rounding each 16-product half leaves products at 50/53 exact and improves contributions only from 43/53 to 44/53; same-input down remains 44/53 | Intermediate rounding alone does not repair compatibility. Keep CPU serving experimental; investigate independent GPU capacity work next |
 | Complete per-owner expert-cache allocation bound | 7a | `d2b3b935` + `98a33646…`; published source-equivalent as `5e42c2a2` on `two-gpu-owner-budget-published` | Build `20261019T193611Z-stage7-owner-budget-build-b28ef8`; serving `20261019T193817Z-stage7-owner-budget-strict-3049d1`; lifecycle `20261019T194424Z-stage7-owner-budget-lifecycle-4f5d62`; comparison `20261019T194631Z-stage7-owner-budget-comparison-a0f388` | Six exact serving responses and lifecycle pass; all 24 comparison responses exact with identical kernel choices. Capacity grows from 200/203 to 201/206 records per layer, adding 289.102 MiB GPU payload. Ordinary generation −2.938%, total −4.465%; repeat generation −11.442%, total −11.267%, but neither generation difference exceeds control spread | Retain the capacity/accounting prototype without a speedup or default-promotion claim. Compare prompt grouping separately; preserve the measured source and binaries |
+| Group 1 on the frozen owner-budget build | 7b failure | Exact Stage 7a source and binaries; group 8 versus 1 | `20261019T200146Z-stage7-grouping-strict-918530` | Group 8 returns three valid responses; group 1 reaches readiness then unloads on the first request because its second owner has no residual output lease. GPU choices unchanged | Preserve the failure; repair reservation and scratch lifetimes before timing |
+| Paired lease repair and prompt-group comparison | 7b | Clean `783f5422`; group 8 versus 1 on the same repaired build | Build `20261019T201621Z-stage7-grouping-reservations-build-871588`; serving `20261019T201819Z-stage7-grouping-reservations-strict-c53c5e`; lifecycle `20261019T202218Z-stage7-grouping-reservations-lifecycle-e0af93`; comparison `20261019T202414Z-stage7-grouping-reservations-comparison-9716a0` | Six exact serving responses, prior group 8 parity and lifecycle pass; all 24 comparison responses exact with identical GPU choices. Group 1 adds 650.227 MiB GPU model storage, but ordinary generation rises 9.084% and total model time 19.233%; repeat generation falls 2.152%, total rises 9.734% | Retain the reservation repair on its experimental branch. Keep group 8; group 1 fails the primary bar and has material prefill/total regressions. No default or cumulative speedup claim |
 
 
 ### Stage 0 progress — baseline and diagnostic correction
@@ -2514,7 +2523,7 @@ retains `analysis.json`, `analyze.py`, raw observations, I/O, RAM and temperatur
 samples, cache assessments and selected configurations. No unit or integration
 tests were added or run.
 
-### Stage 7b — Group 1 exposes a second-owner reservation failure
+### Stage 7b — Paired reservation repair and prompt-group comparison
 
 Qualification run **`20261019T200146Z-stage7-grouping-strict-918530`** compares
 group 8 with group 1 on the exact frozen Stage 7a engine and harness, at context
@@ -2545,9 +2554,94 @@ and actual-load records: group 1 logs both consistent owner pairs, whereas the
 initial script expects exactly one pair. That parser assumption did not cause
 the serving failure.
 
+The root cause is a scratch-lifetime mismatch. The first owner's launch returns
+its residual output pair once every reader has been queued, allowing reuse by
+later ordered submissions. The second owner instead retains that pair in its
+completion workspace. Group 1 has one pair, so its queued successor encounters
+an empty pool. Group 8's larger pool masks the mismatch.
+
+Repair **`783f5422eee185c7154d3e2f50d7b4e5f32f4ab8`** makes each owner return
+residual scratch after queuing its readers, while retaining uploads, readout
+workspaces and transfer storage through completion. Read-only admission and
+reservation cover both owners' graph leases and transfer slots. Every group
+member acquires its complete leases as it is built; speculative successors
+check both pools. The native family consumes the admitted leases without
+acquiring peer capacity during submission. Partial reservations roll back by
+ownership. No graph slots, numerical recipes, native choices, tuning time or
+memory-reserve exceptions are added; lookahead stays enabled.
+
+The release build passes. The repaired **1024-token context** serving gate
+returns six exact responses across repeat, ordinary continuation and BFCL tools,
+with identical token counts, stop boundaries and selected GPU configurations.
+Repaired group 8 also matches all three frozen Stage 7a outputs. Group 1's cold,
+retaining, cached-hit, cancellation, recovery and health checks pass: hit and
+recovery reuse 757 prompt tokens, and cancellation closes after four content
+events and 15 characters. The diagnostic parser retains preparation and load
+assessments separately and checks their physical inventories.
+
+The comparison uses the same repaired binary for both profiles, with A = group
+8 and B = group 1, context 1024, lookahead enabled, drafting and prefix reuse
+disabled, managed host cache zero, and unchanged decode-reuse seed/replacement
+policies and 30-second preparation. The thermal-gated A/B/B/A run uses two
+warmups per fixture and launch, then one measurement, returning **24 exact
+responses** with unchanged GPU choices. Repeat consumes 758 prompt tokens and
+generates 64; ordinary consumes 396 and generates 60.
+
+Group 1 selects **205/211 records per layer**, versus group 8's **201/206**.
+Its ready census adds **681,811,968 GPU model bytes (650.227 MiB)**, reduces GPU
+compute by 744,516,608 bytes, and reduces GPU context by 2,117,280 bytes. Host
+model storage grows by 1,728 bytes and compute falls by 191,088,768 bytes. Both
+profiles fit their independent owner bounds. These are ready samples, not peak
+measurements or a new memory grant.
+
+| Fixture | Group 8 mean generation | Group 1 mean generation | Generation-time change | Prefill-time change | Total model-time change |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Repeat | 3337.452 ms | 3265.632 ms | −2.152% | +20.202% | +9.734% |
+| Ordinary | 2257.792 ms | 2462.889 ms | +9.084% | +26.849% | +19.233% |
+
+Neither fixture passes the generation bar. Repeat's 71.820 ms mean gap is below
+both observed spreads, **99.957 ms for group 8 and 140.112 ms for group 1**, and
+below the 3% threshold. Ordinary regresses on average; its spreads are
+**11.159/681.354 ms**. Retain both group 1 ordinary measurements,
+2803.566 and 2122.212 ms; excluding the slower one would change the experiment.
+
+Mean observed first-token latency rises from **3837.363 to 4607.425 ms** for
+repeat and **3038.644 to 3846.389 ms** for ordinary. Mean completed-request
+latency rises from **7175.071 to 7864.608 ms** and **5313.723 to 6322.418 ms**,
+respectively. These HTTP observations are separate from the model timing table.
+
+Logical generation-delivery reads fall from **7.188 to 6.854 GB** for repeat
+and **3.878 to 3.443 GB** for ordinary. Physical reads in the two group 8
+repeat windows are **92.434/0 MB**, versus group 1's **100.770/0 MB**. Ordinary
+windows read **0/3.981 MB** for group 8 and **385.081/0 MB** for group 1.
+The slower group 1 ordinary response coincides with the larger physical-read
+window; this does not isolate a disk contribution or justify dropping that
+response. Delivery windows include possible lookahead and are not exact device
+decode boundaries. Group 1 reports **56.583–56.706 GiB cached**, only
+**0.378–0.486 GiB free**, and **54.004–54.034 GiB available** at those endpoints.
+Thus this profile can encounter physical misses while RAM is already occupied
+by reclaimable cache. The thermal gate passes; maximum recorded GPU temperature
+is 48 °C.
+
+**Retain the paired reservation repair and keep group 8 for subsequent work.**
+Group 1 is qualified only at this scope and is not a useful replacement for the
+measured short requests: lower logical reads and greater GPU residency do not
+establish lower latency, and its prefill/total regressions exceed the declared
+5% tradeoff threshold. No default, cumulative, long-context or single-GPU
+performance promotion follows this result.
+
+Source is clean on **`two-gpu-grouping-reservations-experimental`**. The build
+records exact engine/harness hashes and reproduction scripts. Stage 7a's
+original binaries were copied independently to `owner-budget-control` and
+hash-checked before reusing their target; its original build directory retains
+`preserved-binaries.json`. The comparison retains individual observations,
+delivery latencies, ready census, owner assessments, logical/physical reads,
+RAM, temperatures, `analysis.json` and `analyze.py`. No unit or integration tests
+were added or run.
+
 ## Immediate next action
 
-Begin **Stage 7** using the frozen Stage 2b plain serving control. This is a
+Continue **Stage 7** using the frozen Stage 2b plain serving control. This is a
 recorded change in order: Stage 6 has an isolated CPU-ready crossover but no
 qualified serving benefit; both grouped scalar recipes still differ from the
 actual CUDA projections, and another native cache competes with Linux file
@@ -2555,21 +2649,24 @@ cache. Keep that implementation experimental and leave its numerical repair
 and warmed failure open. Independent GPU-capacity work can avoid more source
 traffic without introducing a different CPU arithmetic path.
 
-The **Stage 7a** owner-budget candidate now passes its scoped serving/lifecycle
-gates and completes its comparison, with a measured capacity increase but no accepted speedup.
-Keep its exact source and binaries frozen. **Stage 7b** first needs the
-second-owner reservation failure repaired in a separate source candidate.
-Preserve and hash-check independent copies of both current binaries before
-reusing their target directory. Requalify group **8 versus 1** on the repaired
-candidate at the existing 1024-token context, with unchanged fixtures and other
-policies. Declare it as an experimental profile comparison, with Stage 2b still
-the accepted reference for later cumulative qualification. Requalify text,
-tools, usage, lifecycle and native selections for group 1 before timing, and
-retain prepare-only and serving assessment records separately. Use the same
-thermal-gated A/B/B/A schedule, two warmups per fixture and launch, and the existing ordinary primary
-bar. Record actual capacity, RAM, I/O, prefill and generation costs, including any
-changed native choices. This measures a workload-specific profile; it does not
-authorize changing the default or extrapolating to long prompts.
+**Stage 7a** establishes a qualified owner-allocation bound and capacity increase,
+without an accepted speedup. **Stage 7b** repairs paired admission and residual
+scratch lifetimes, qualifies group 1, and completes its same-source comparison.
+Keep group 8: group 1 fails the primary generation bar and increases both
+fixtures' total latency. Preserve both candidates' exact sources and binaries;
+hash-check independent copies of the repaired engine and harness before another
+build reuses their target. Stage 2b remains the accepted serving reference.
+
+Next audit **Stage 7c startup phase accounting** with the repaired group 8 build
+as its experimental control. Identify the largest actual source/import and
+qualification contributors and all resources surviving each phase. Preparation
+precedes bulk model import, while the current bound adds the combined
+qualification/import allowance beside persistent holdings. Derive a complete
+maximum over actual overlapping phases before changing that bound; retain fresh
+heap claims and ordinary reserves throughout allocation. Do not credit a
+readiness sample as unused peak capacity. Requalify text, tools, lifecycle,
+native choices and memory admission before the same thermal-gated comparison.
+Only then broaden affected context and single-GPU coverage for Stage 8.
 
 Before resuming Stage 6 timing, repair and qualify affected serving behavior.
 Account for cache hit rate, import cost, file-cache displacement, worker contention
