@@ -260,9 +260,9 @@ against a reference require that reference to pass its sanity gate.
 | --- | --- | --- | --- |
 | 0 | Current baseline and critical-path measurement | Baseline established; attribution limits recorded | Current checkout |
 | 1 | Batched asynchronous expert transfers | Disposed: prompt candidate failed; decode candidate not promoted | 0 |
-| 2 | Trace-informed GPU expert retention | 2a generation bar passed; tool gate and optional-profile decision next | 1 decision |
-| 3 | Confidence-limited expert prefetch | Pending | 2 decision |
-| 4 | MTP across the two owners | Pending | 3 decision |
+| 2 | Trace-informed GPU expert retention | 2a and 2b retained as opt-in; controlled timing and tool gates passed | 1 decision |
+| 3 | Confidence-limited expert prefetch | Repeated-miss candidate rejected after no actionable predictions; other conditioning deferred | 2 decision |
+| 4 | MTP across the two owners | Isolated implementation built; full-acceptance lifecycle passed; rejection and timing gates next | 3 decision |
 | 5 | SM86 packed-kernel and representation improvements | Pending | 4 decision |
 | 6 | Selective CPU expert execution | Exploratory | Measured transfer/compute crossover |
 | 7 | Adaptive placement and prompt grouping | Pending | Accepted earlier stages |
@@ -1007,13 +1007,67 @@ evidence of predictable new misses and exposed source wait; lowering a threshold
 cannot create positive repeats in this dataset. No trained checkpoint or
 additional activation-transfer path is introduced by this stage.
 
+### Stage 4 initial implementation and lifecycle qualification
+
+The isolated candidate now admits the catalog's own-history causal head on the
+first owner. It includes head weights/state/workspace, independent conditioning
+transfer slots derived from sealed head inputs, and raw F32 feature transport
+from the final target owner. Independently retained prompt boundaries live on
+the head owner. Target verification and state maintenance continue to use the
+existing coordinated transaction and every physical owner's completion tickets.
+The accepted main branch still uses its previous implementation while this
+candidate completes qualification.
+
+Build `20261019T093842Z-stage4-build-893593` completed with verified engine and
+harness provenance: candidate base `47f852f5`, dirty digest
+`a3dc95c59a35d94f72848accb88032fa824ff3d2ed1fa2c4bbea2ff2804f1454`.
+Earlier build/readiness attempts are retained: the initial compile found two API
+mismatches, and two startup attempts exposed planning/qualification paths that
+mistook local head ownership for the target's raw-residual export requirement.
+The correction carries that export in the target program plan and uses one
+conditioning-element declaration for kernel formation and its exact-copy
+qualification. No precision tolerance or proposal-acceptance rule was relaxed.
+
+`20261019T093945Z-stage4-lifecycle-1dcc70` passed the canonical 758-input-token,
+64-output-token repeated-prose checks with one generated/verified proposal per
+round, the default KV codec, both reuse policies selected, and managed host
+retention disabled:
+
+- Cold, retaining, cache-hit and post-cancellation recovery responses were the
+  same exact 308-character prefix, each with **31 proposals and 31 accepted**.
+- Cold and retaining requests had no reused prefix; hit and recovery reused
+  757 input tokens.
+- The cancelled stream ended after four content events/15 matching characters,
+  before its terminal response; the following recovery completed correctly.
+
+These four completed requests exercised 124 accepted proposals and **no rejected
+proposals**. They establish actual placed drafting and this full-acceptance
+lifecycle; they do not qualify rejected-suffix repair or ordinary continuation.
+The run was traced and untimed for promotion purposes, so no performance claim
+is made. Qualify an ordinary continuation and canonical tool fixture against
+the frozen accepted plain build, requiring exact greedy parity and observed
+rejections, before a controlled timing comparison. Stale original build output
+was cleaned to recover about 32 GiB; the accepted Stage 2b executable was kept.
+
 ## Immediate next action
 
-Begin **Stage 4: MTP across the two placed owners**, using the frozen Stage 2b
-profile as the accepted plain control. Inspect prediction-head admission,
-feature/table ownership, verification state and rejected-suffix repair before
-changing the plain-only startup guard. Preserve the MTP proposal/acceptance and
-physical lifetime contracts. Fully build and qualify real proposals, accepted
-prefixes and cancellation/recovery before timing. Then work through Stages 5–8.
+Implement **Stage 4: MTP across the two placed owners**, using the frozen Stage 2b
+profile as the accepted plain control. The isolated `placed-mtp` candidate starts
+at `47f852f5`. Its first scope is the catalog's causal prediction head with its
+own history: head weights, shared embedding/projection and head history on the
+first owner, with raw residual conditioning produced on the final target owner.
+Admit independent conditioning transfer slots before allocation, retain them
+through head completion, and copy representation bytes without narrowing F32
+residuals. Cached prompt boundaries remain independently owned on the head's
+device. Target-reading heads, vision and separate block drafters remain outside
+this first placement contract.
+
+Start with one proposed token and preserve the existing proposal/acceptance,
+accepted-prefix reconciliation, repair and physical lifetime contracts. Fully
+build and qualify actual proposals, accepted prefixes, rejected suffixes,
+prefix reuse and cancellation/recovery before timing. A startup-guard change or
+successful build alone is insufficient. Compare total time per committed token
+against plain execution and include a held-out ordinary continuation or tool
+fixture before any serving-speed claim. Then work through Stages 5–8.
 Stage 3's repeated-miss candidate is rejected; a differently conditioned predictor
 remains deferred. Full CUDA graph attribution is still unavailable.
