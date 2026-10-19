@@ -351,8 +351,8 @@ against a reference require that reference to pass its sanity gate.
 | 3 | Confidence-limited expert prefetch | Repeated-miss candidate rejected after no actionable predictions; other conditioning deferred | 2 decision |
 | 4 | MTP across the two owners | Qualified experimental capability; repeat generation improves, ordinary primary bar fails and total time regresses | 3 decision |
 | 5 | SM86 packed-kernel and representation improvements | Packing experiment qualified; repeat improves, ordinary gain below bar; four-warp declaration deferred after a confounded gate | 4 decision |
-| 6 | Selective CPU expert execution | Source/upload diagnostics qualified; CPU/GPU crossover pending | Transfer profiling, then compute crossover |
-| 7 | Adaptive placement and prompt grouping | Pending | Accepted earlier stages |
+| 6 | Selective CPU expert execution | Isolated crossover established; serving fails warmed parity; grouped arithmetic follow-up remains experimental | Transfer profiling, then compute crossover |
+| 7 | Adaptive placement and prompt grouping | Next: investigate the per-owner cache budget, then placement/grouping | Recorded earlier-stage decisions |
 | 8 | Consolidated qualification and reference comparison | Pending | Selected candidates disposed |
 
 A dependency on a decision permits a recorded revert or deferral. It does not
@@ -569,6 +569,8 @@ before running it; fill measured fields only from saved artifacts.
 | Shared CPU expert dispatch in serving | 6 prototype | `d92f10c0` + `dd6fb7aa…`; retained as `d7958b29` on `two-gpu-cpu-dispatch-experimental` | Build `20261019T174442Z-stage6-cpu-dispatch-build-84bb82`; operators `20261019T174618Z-stage6-cpu-dispatch-operators-23bcae`; isolation `20261019T175458Z-stage6-cpu-dispatch-isolation-a505ab`; lifecycle `20261019T180054Z-stage6-cpu-dispatch-lifecycle-df0535`; incomplete comparison `20261019T180314Z-stage6-cpu-dispatch-comparison-ea41aa` | Shared native cache reaches about 3.93 GiB; 49 CPU dispatches in the isolated six-response qualification. Initial exact prose/ordinary/tool and lifecycle checks pass, but warmed ordinary continuation fails exact parity on response 12 of the alternating run, with identical GPU choices | No promotion or accepted speed result. Preserve the failed run; diagnose actual routed arithmetic and retention/handoff before another comparison |
 | Actual routed CPU operands and fresh-import replay | 6 diagnostic | `d7958b29` + `861acb77…`; retained as `59b27255` on `two-gpu-cpu-dispatch-diagnostic` | Build `20261019T182107Z-stage6-cpu-capture-build-8581d3`; capture `20261019T182609Z-stage6-cpu-routed-capture-51ed05`; derived replay `20261019T183204Z-stage6-cpu-routed-replay-c98a62` | 53 consumed records across 18 blocks: all retained native weights match fresh source imports and all CPU outputs match fresh CPU execution. CPU/GPU products match in 31/53, contributions in 25/53; down projections with the same GPU product match in 32/53. The instrumented six-request run does not reproduce the warmed output failure | No corruption observed in these records; arithmetic compatibility needs work. Preserve the failed original range check and the verified ordinary subset. No model-quality, numerical-admission or speed claim |
 | Grouped CPU arithmetic on actual routed operands | 6 numerical proof of concept | `59b27255` + `9b0ba2cf…`; retained as `67a7a69a` on `two-gpu-cpu-grouped-experimental` | Build `20261019T184915Z-stage6-cpu-grouped-build-cbaf1b`; replay `20261019T185406Z-stage6-cpu-grouped-replay-54fe61` | Grouped scalar product agreement improves to 50/53, contribution agreement to 43/53, and down on the same GPU product to 44/53. All finite BF16 inputs have identical CPU/CUDA BF16 SiLU publication on this system; substituting GPU SiLU does not change replay results | Remaining projection differences require diagnosis before serving integration. No timing, numerical admission or serving-speed claim |
+| Verified raw CUDA projection accumulators | 6 diagnostic | `67a7a69a` + `786553b4…`; retained as `efd99574` | Build `20261019T191623Z-stage6-cpu-raw-projection-build-32773e`; replay `20261019T191741Z-stage6-cpu-raw-projection-replay-164fd7` | F32 observations reconstruct every normal GPU product and contribution exactly in all 53 records. Whole-group CPU partials differ after BF16 narrowing at 3/33,920 gate, 1/33,920 up and 11/135,680 down coordinates | Projection differences are directly observed before publication; the earlier warmed failure remains unreproduced. No serving/timing claim |
+| Intermediate half-group rounding | 6 numerical proof of concept | `efd99574` + `6e1a4556…`; retained as `394d3764` | Build `20261019T192052Z-stage6-cpu-half-rounding-build-3ea984`; replay `20261019T192208Z-stage6-cpu-half-rounding-replay-25e54b` | GPU raw bytes remain identical. Rounding each 16-product half leaves products at 50/53 exact and improves contributions only from 43/53 to 44/53; same-input down remains 44/53 | Intermediate rounding alone does not repair compatibility. Keep CPU serving experimental; investigate independent GPU capacity work next |
 
 
 ### Stage 0 progress — baseline and diagnostic correction
@@ -2344,30 +2346,89 @@ inference files and the gitlink byte-for-byte. Its independent retained harness
 binary, original build identity, source manifests and comparisons remain with
 the build/replay records. No unit or integration tests were added or run.
 
+The next diagnostic exports raw F32 accumulators through a CUDA-only
+`routed_projection` entry using the same `GemvShape<4, TPW, KSPLIT, 1>` and
+projection helper as the ordinary routed operations. It pins the captured
+one-part, one-tile policy and independently reconstructs the original BF16
+gate/up product and down publication before accepting an observation. This is
+necessary because the standalone dense projection does not admit that one-part
+reduction. The entry is not connected to serving.
+
+Replay **`20261019T191741Z-stage6-cpu-raw-projection-replay-164fd7`** verifies
+both reconstructions in **all 53 records**, with unchanged original CPU/import
+checks. The whole-group F64/F32 recipe has:
+
+| Raw CPU versus CUDA phase | Equal F32 coordinates | Different BF16 coordinates | Maximum absolute F32 difference |
+| --- | ---: | ---: | ---: |
+| Gate | 28,702 / 33,920 | 3 | 0.000000298023223876953125 |
+| Up | 28,337 / 33,920 | 1 | 0.000000476837158203125 |
+| Down on the same GPU product | 106,150 / 135,680 | 11 | 0.000000059604644775390625 |
+
+The retained arrays show actual publication crossings. One down result differs
+by one F32 ULP with the GPU exactly on a BF16 midpoint. Cancellation also makes
+some small absolute differences span many F32 ULPs near zero; the largest
+observed distance is 131,072 ULPs. Thus these differences cannot all be described
+as one-ULP accumulator changes. They are arithmetic observations on this subset,
+not an established explanation of the earlier warmed output failure.
+
+CUDA issues two 16-element MMA operations per 32-value group. A second scalar
+recipe accumulates each half in F64, combines it with the preceding F32 partial,
+and rounds back to F32 after each half, for both code dots and input sums.
+Replay **`20261019T192208Z-stage6-cpu-half-rounding-replay-25e54b`** verifies
+that **every GPU raw payload remains byte-identical** to the preceding study.
+Products remain **50/53** exact, contributions improve only to **44/53**, and
+down on the same GPU product remains **44/53**. The remaining BF16 crossings are
+2 gate, 1 up and 11 down coordinates. The largest product difference decreases
+to 0.00000011920928955078125; the contribution maximum stays 0.0001220703125.
+Intermediate publication alone therefore does not reproduce the GPU recipe.
+
+[NVIDIA's PTX contract](https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-matrix-instructions-mma)
+does not fix BF16 MMA accumulation order or rounding. Neither F64 scalar recipe
+can infer exact MMA behavior from its group geometry. Any further CPU integration
+still needs verified arithmetic compatibility and the existing serving gates;
+these observations grant no qualification, extra tuning allowance or speed claim.
+
+The initial raw diagnostic build
+**`20261019T191548Z-stage6-cpu-raw-projection-build-dcbd4c`** fails because its
+native constraint reads nonstatic `M`; the retained retry makes `M` static.
+The successful raw build measures `67a7a69a` plus
+`786553b441452d9d661fd7d4351e4765438674cb6a5b9d104fbfa78ea42f9f2a`,
+published as **`efd9957413626f65814507467b3dfab7d796be5d`**. The half-group
+build measures `efd99574` plus
+`6e1a45562ae5097cdafadbad9fd15cb7014a80295b8eff00a088436044eda980`,
+published as **`394d3764dababff9b64c92c6f2367fbb0752df14`** on
+`two-gpu-cpu-grouped-experimental`. Both retain source-equivalence manifests
+covering all 2,948 inference files and the gitlink, original build identities,
+independent harness binaries, raw arrays with digests and reproduction scripts.
+No unit or integration tests were added or run.
+
 ## Immediate next action
 
-Continue **Stage 6** using the frozen Stage 2b plain serving control. The
-canonical CPU-ready crossover and retention replay justify a bounded CPU-format
-cache using eligible demand records. The physical storage/lease component and
-dual-GPU activation/contribution exchange now pass their scoped qualifications.
-The serving prototype is connected but fails warmed exact parity. Actual-operand
-replay finds no retained-byte or CPU execution discrepancy in its 53 records,
-while cross-backend arithmetic differs. A scalar grouped recipe improves product
-agreement to 50/53 and contribution agreement to 43/53, with matching finite
-BF16 SiLU publication on this system. Inspect the remaining projection
-differences before integrating or qualifying affected serving behavior. The earlier
-failure still needs reproduction or a separately verified cause. Repeat
-affected semantic checks before restarting timing.
-Account for
-cache hit rate, import cost, file-cache displacement, worker contention and
-activation/result publication; retaining another copy of raw GGUF bytes alone
-does not obtain the measured CPU-ready cost. Keep original router choices,
-per-expert rounding and slot-order accumulation. Use actual routed work and
-normal numerical/greedy, tool and lifecycle gates before a serving comparison.
-Preserve the 30-second tuning budget and normal admission for any additional
-CPU configurations. Keep GPU execution as the default until affected serving
-measurements justify a CPU path. Two-miss work and other weight formats remain
-follow-ups, not established crossovers.
+Begin **Stage 7** using the frozen Stage 2b plain serving control. This is a
+recorded change in order: Stage 6 has an isolated CPU-ready crossover but no
+qualified serving benefit; both grouped scalar recipes still differ from the
+actual CUDA projections, and another native cache competes with Linux file
+cache. Keep that implementation experimental and leave its numerical repair
+and warmed failure open. Independent GPU-capacity work can avoid more source
+traffic without introducing a different CPU arithmetic path.
+
+First audit the owner cache budget. Source inspection shows that startup chooses
+a whole-decoder plan, then bounds each range's local cache by that source plan's
+device weight charge. The range does not independently derive this budget from
+its complete local graph/state charge. Earlier sampled headroom is a reason to
+investigate, not proof that more cache fits. Evaluate exact local inventories,
+graph and state bounds, boundary storage, import peak and ordinary reserves
+against the owner's capacity before changing allocation. Preserve global state
+ownership and final range admission, then qualify and benchmark any candidate
+against the accepted control with unchanged unrelated choices.
+
+Before resuming Stage 6 timing, repair and qualify affected serving behavior.
+Account for cache hit rate, import cost, file-cache displacement, worker contention
+and activation/result publication. Keep original router choices, per-expert
+rounding and slot-order accumulation, with actual routed work and normal
+numerical/greedy, tool and lifecycle gates. Preserve the 30-second tuning budget
+and ordinary admission for additional CPU configurations. Two-miss work and
+other weight formats remain follow-ups, not established crossovers.
 
 The serving cache must share one host budget across both owners and
 protect ordinary runtime reserves. In-flight read leases retain their charges;
