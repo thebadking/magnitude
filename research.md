@@ -155,6 +155,25 @@ windows. RAM remains occupied: **56.583–56.706 GiB cached** and only
 generalized to every profile or request. Retain the changed cache behavior with
 the grouping result, rather than treating available RAM as unoccupied space.
 
+A fresh active sample at **2026-10-19 21:49:46 UTC**, while the Stage 7c
+candidate is serving its 1024-context qualification, finds **62.696 GiB
+total, 55.433 GiB `Cached`, 0.532 GiB actually free and 53.739 GiB
+`MemAvailable`**. The engine has **6.811 GiB RSS and zero process swap**.
+This is one live snapshot, not a peak or model-page inventory; cached files and
+mapped RSS can overlap. Its raw `/proc` observations and reproduction script
+are in `20261019T214830Z-stage7-startup-attention-inventory-strict-a9ddbd/`.
+
+The subsequent Stage 7c comparison directly observes a costly physical-miss
+case: the second candidate repeat delivery window reads **1,061.032 MB from
+storage**, versus 5.263 MB in its first pass, while its endpoint still has
+**56.799 GiB cached and only 0.428 GiB free**. Ordinary candidate windows read
+0/0.004 MB physically, despite about 3.005 GB of logical source reads each.
+Useful page retention can therefore help particular requests, while most spare
+RAM already holds file pages. The next diagnostic must identify displaced
+required records and source stalls; another anonymous cache competes for that
+same RAM. The model's 103.688 GiB source still exceeds host memory. Full results
+are in `20261019T215322Z-stage7-startup-attention-inventory-comparison-f330d9/`.
+
 Local evidence: `20261019T075917Z-stage2a-comparison-b3e32b/` contains
 `ram-residency.json`, its reproduction script, measured I/O windows and
 `memory-summary.json`. The residency snapshot was taken after qualification;
@@ -591,6 +610,9 @@ before running it; fill measured fields only from saved artifacts.
 | Complete per-owner expert-cache allocation bound | 7a | `d2b3b935` + `98a33646…`; published source-equivalent as `5e42c2a2` on `two-gpu-owner-budget-published` | Build `20261019T193611Z-stage7-owner-budget-build-b28ef8`; serving `20261019T193817Z-stage7-owner-budget-strict-3049d1`; lifecycle `20261019T194424Z-stage7-owner-budget-lifecycle-4f5d62`; comparison `20261019T194631Z-stage7-owner-budget-comparison-a0f388` | Six exact serving responses and lifecycle pass; all 24 comparison responses exact with identical kernel choices. Capacity grows from 200/203 to 201/206 records per layer, adding 289.102 MiB GPU payload. Ordinary generation −2.938%, total −4.465%; repeat generation −11.442%, total −11.267%, but neither generation difference exceeds control spread | Retain the capacity/accounting prototype without a speedup or default-promotion claim. Compare prompt grouping separately; preserve the measured source and binaries |
 | Group 1 on the frozen owner-budget build | 7b failure | Exact Stage 7a source and binaries; group 8 versus 1 | `20261019T200146Z-stage7-grouping-strict-918530` | Group 8 returns three valid responses; group 1 reaches readiness then unloads on the first request because its second owner has no residual output lease. GPU choices unchanged | Preserve the failure; repair reservation and scratch lifetimes before timing |
 | Paired lease repair and prompt-group comparison | 7b | Clean `783f5422`; group 8 versus 1 on the same repaired build | Build `20261019T201621Z-stage7-grouping-reservations-build-871588`; serving `20261019T201819Z-stage7-grouping-reservations-strict-c53c5e`; lifecycle `20261019T202218Z-stage7-grouping-reservations-lifecycle-e0af93`; comparison `20261019T202414Z-stage7-grouping-reservations-comparison-9716a0` | Six exact serving responses, prior group 8 parity and lifecycle pass; all 24 comparison responses exact with identical GPU choices. Group 1 adds 650.227 MiB GPU model storage, but ordinary generation rises 9.084% and total model time 19.233%; repeat generation falls 2.152%, total rises 9.734% | Retain the reservation repair on its experimental branch. Keep group 8; group 1 fails the primary bar and has material prefill/total regressions. No default or cumulative speedup claim |
+
+
+| Startup phases, scoped qualification and complete invocation inventory | 7c | Initial `1fa4bd9a`; scoped scratch `a3735d40`; rejected handoff `c253c094`; incomplete inventory `305c23a2`; qualified complete inventory `7a0a1f30` | Build `20261019T214356Z-stage7-startup-attention-inventory-build-45cd2c`; serving/audit `20261019T214830Z-stage7-startup-attention-inventory-strict-a9ddbd`; lifecycle `20261019T215127Z-stage7-startup-attention-inventory-lifecycle-78561e`; comparison `20261019T215322Z-stage7-startup-attention-inventory-comparison-f330d9` | Exact text/tools, native choices, fixed charges and lifecycle pass; 24 comparison responses exact. Slots grow to 223/224; ordinary generation −11.157%, beyond both spreads. Repeat generation +27.734%, including a 1.061 GB physical-read window | Retain the qualified accounting/capacity implementation experimentally. No overall promotion: repeat total latency rises 10.655%. Diagnose source misses and retention before broadening performance claims |
 
 
 ### Stage 0 progress — baseline and diagnostic correction
@@ -2669,8 +2691,8 @@ source on both owners is `output.weight`, **675,430,400 bytes** at shape
 The initial-state charge samples are **260,585,040/260,104,592 bytes**, below
 the fit-state bounds of **792,502,032/788,332,880 bytes**.
 
-**The complete memory audit is still open; do not time or promote this initial
-candidate.** Post-preparation samples show **42,439,840/42,439,827 charged
+**The initial candidate fails its complete memory audit and is not timed or
+promoted.** Post-preparation samples show **42,439,840/42,439,827 charged
 bytes**, while the factory's fixed planned invocation charge is only **78
 bytes**. Source inspection finds that qualification calls grow each prepared
 kernel's cached standalone scratch after the factory compares its invocation
@@ -2678,16 +2700,100 @@ charge with the plan. Those arenas remain retained across readiness, and the
 cached attested charge is not rechecked. Separating the weight-fixture phase
 does not dispose this additional persistent storage.
 
-The follow-up must give one-shot qualification calls scratch owned through that
-call's completion, preserve scalar-result serialization and returned-tensor
-ownership, and recheck the fixed retained charge after qualification. Ordinary
-cached standalone calls keep their existing lifetime. Rebuild and requalify
-the complete candidate before lifecycle/timing. The initial source remains
-frozen in `startup-phases`, with independent engine/harness copies in
-`startup-phases-initial-control`; the build and qualification retain raw
-observations, memory points, `preserved-binaries.json`, and the limited phase
-arithmetic derivation. `phase-audit.json` explicitly records the outstanding
-workspace finding. No unit or integration tests were added or run.
+The scoped follow-up **`a3735d40`** gives one-shot qualification calls scratch
+owned through completion, preserving scalar-result serialization and returned
+tensor ownership. Ordinary standalone calls keep cached scratch. Its release
+build and all six live control/candidate responses pass in
+`20261019T210652Z-stage7-startup-scratch-strict-d98c84`. Post-preparation charges
+fall to **118/105 bytes**, releasing **42,439,722 bytes per GPU**, but the
+original planned invocation count remains 78 bytes. The additional fixed
+storage therefore still needs an inventory repair.
+
+The next prototype **`c253c094`** tries clearing unused formation handoffs.
+`20261019T212020Z-stage7-startup-handoff-strict-abd8ee` returns three exact live
+candidate responses against three explicitly archived, validated control
+references. It releases **zero handoffs on both devices** and leaves 118/105
+bytes charged. This hypothesis is disproved; its cleanup API and design claims
+are removed in the following revision. No timing is taken from these references.
+
+Inventory revision **`305c23a2`** adds the omitted streamed-routing, fill,
+scratch-bank, copy, conversion and commit entries to planning and storage
+accounting, and stream/ngram helpers to the retained census. Its new ownership
+check correctly refuses readiness in
+`20261019T214007Z-stage7-startup-inventory-strict-98e2ea`: retained owners charge
+118 bytes while the plan charges 117. Attention history accounting takes a
+maximum across independently prepared decode and verification kernels; both
+allocations remain live. No serving response or timing is collected from this
+failed prototype.
+
+Complete revision **`7a0a1f301d5acdaec5d73abce8910a7169e89392`** shares attention
+class selection between planning and preparation, using the resolved row bound
+and device capability. Retained decode, verification and listed-prefill kernels
+are summed. The release build passes. In
+`20261019T214830Z-stage7-startup-attention-inventory-strict-a9ddbd`, all three
+fresh candidate responses exactly match the explicitly archived validated
+control, with equal usage, stops, tools and GPU choices. Planned invocation
+bytes, retained owners and the observed post-preparation ledger now agree at
+**118/118/118 and 105/105/105 bytes**.
+
+The phase derivation in `phase-audit.json` passes: preparation, source import,
+initial state and the fit workload stay within the complete independent owner
+bounds of **23,712,915,074/23,681,273,741 bytes**, below capacities
+**23,730,031,821/23,752,382,874 bytes**. Every observed demand refusal is null;
+prepared charge high-water and completed-load held samples fit their bounds.
+These are Seismic ledger observations and point samples, not a continuous
+measurement of global VRAM peak. No fresh tuning, extra numerical witness or
+reserve exception is introduced.
+
+The lifecycle gate passes cold/retaining/cached-hit, cancellation, recovery and
+health checks. Hit and recovery reuse 757 prompt tokens; cancellation closes
+after four content events and 15 characters. Exact binaries are independently
+preserved in `startup-attention-inventory-control`, with hashes and build
+identity in the build's `preserved-binaries.json`. Earlier prototypes also have
+independent copies. Locked cleanup
+`20261019T215119Z-stage7-qualified-reclaim-build-cache-504ffe` removes the shared
+Cargo output; subsequent jobs use the preserved copies.
+
+The thermal-gated **A/B/B/A** comparison uses fresh alternating launches of
+repaired group 8 control `783f5422` and complete candidate `7a0a1f30`, context
+1024, two warmups per fixture per launch, fixed rendered inputs, no prefix
+reuse, no managed host cache, no drafting, and unchanged decode-reuse seed and
+replacement policies. All **24 responses are exact**, with identical GPU
+choices. The candidate selects **223/224 records per layer**, versus 201/206;
+its ready census adds **2,889.609 MiB GPU model storage**, releases
+84,879,444 GPU compute bytes and adds 7,680 host model bytes. Context and host
+graph upload charges are unchanged. These are ready census samples.
+
+| Fixture | Control mean generation | Candidate mean generation | Generation-time change | Prefill-time change | Total model-time change |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Repeat | 3295.440 ms | 4209.403 ms | +27.734% | −4.946% | +10.655% |
+| Ordinary | 2250.227 ms | 1999.160 ms | −11.157% | +2.068% | −3.597% |
+
+Ordinary passes the declared generation bar: its 251.067 ms gap exceeds both
+observed spreads, **10.034/4.953 ms**, and the 3% threshold. Repeat fails;
+retain both candidate observations, **3135.169 and 5283.637 ms**. Its candidate
+spread is **2148.468 ms**, versus 18.076 ms for control. Mean HTTP completion
+latency is 5303.269→5115.439 ms for ordinary and 6951.892→7663.575 ms for
+repeat; first-token means are 3032.744→3096.621 and 3656.233→3486.568 ms.
+These delivery observations are separate from model timing.
+
+Logical generation-delivery reads fall **7.188→6.531 GB** for repeat and
+**3.878→3.005 GB** for ordinary. Control physical repeat reads are 3.072/0 MB;
+candidate repeat reads are **5.263/1061.032 MB**. Ordinary reads are 0/0 MB for
+control and 0/0.004 MB for candidate. The slower candidate repeat coincides
+with the larger physical-read window; this does not isolate all latency to
+disk. Candidate endpoints show **56.645–56.799 GiB cached, 0.403–0.527 GiB
+actually free and 53.854–53.978 GiB available**. Delivery windows include
+possible lookahead, rather than exact device decode boundaries. Maximum
+recorded GPU temperature is 48 °C.
+
+**Retain the qualified accounting implementation experimentally; do not promote
+an overall serving speedup.** Ordinary has a scoped generation gain, while
+repeat's total regression exceeds the 5% tradeoff threshold. Diagnose useful
+source-page residency and stalls before another speed comparison. Broad
+context, single-GPU, cumulative Stage 2b and llama.cpp comparisons remain
+outstanding. Raw observations, source identities, retained hashes, audit and
+analysis scripts are preserved. No unit or integration tests were added or run.
 
 ## Immediate next action
 
@@ -2708,15 +2814,18 @@ the repaired independent copies are hash-checked and the shared Cargo target is
 cleaned. Use `grouping-reservations-control` for the next comparison's repaired
 group 8 binaries. Stage 2b remains the accepted serving reference.
 
-Continue **Stage 7c startup phase accounting** with repaired group 8 as the
-experimental control. The initial phase candidate passes scoped serving, but
-the charge audit exposes retained standalone qualification arenas. Finish the
-call-scoped workspace repair and the post-qualification charge check, then
-rebuild and requalify the complete candidate. Retain fresh heap claims and
-ordinary reserves throughout allocation; readiness samples are not unused peak
-capacity. Text, tools, lifecycle, native choices and complete memory admission
-must precede the same thermal-gated comparison. Only then broaden affected
-context and single-GPU coverage for Stage 8.
+Continue **Stage 7c source-miss diagnosis** with repaired group 8 as the
+experimental control and complete candidate `7a0a1f30`. Scoped qualification,
+complete retained invocation accounting, phase admission, lifecycle and the
+same-session comparison now pass their correctness gates. Ordinary generation
+improves 11.157% beyond both spreads, but the second repeat pass has a 1.061 GB
+physical-read window and a material total-latency regression. Preserve that
+observation and identify the required records' residency and source-service
+stalls with the canonical repeat fixture before changing retention. Most spare
+RAM already serves Linux file cache; a larger anonymous allocation is not an
+established remedy. Keep the ordinary reserves and 30-second tuning allowance.
+Resolve the regression and then broaden affected context and single-GPU
+coverage for Stage 8, followed by cumulative and llama.cpp comparisons.
 
 Before resuming Stage 6 timing, repair and qualify affected serving behavior.
 Account for cache hit rate, import cost, file-cache displacement, worker contention
