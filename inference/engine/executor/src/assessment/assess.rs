@@ -111,6 +111,8 @@ pub fn prepare_execution_assessment(
         draft.load(),
         policy.codec(),
         draft.device().backend(),
+        policy.limits(),
+        draft.device().tensor_operations(),
     )
     .map_err(AssessmentError::Memory)?;
     let state = ResourcePlanner::state_plan(

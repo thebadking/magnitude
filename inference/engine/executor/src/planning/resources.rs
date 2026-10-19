@@ -1797,6 +1797,8 @@ impl ResourcePlanner {
                 .program_plan(&state.definition, state.codec)
                 .map_err(|error| error.to_string())?,
             backend,
+            state.limits,
+            state.owner_capacities[owner].tensor_operations == TensorOperations::Formed,
         )
         .map_err(|error| error.to_string())?;
         let bytes = ResourceBytes {
@@ -1828,7 +1830,11 @@ impl ResourcePlanner {
             bytes,
             qualification_peak_bytes: load.import_peak_bytes(),
             preparation_peak_bytes: load.preparation_peak_bytes(
-                &state.definition, state.codec, backend,
+                &state.definition,
+                state.codec,
+                backend,
+                state.limits,
+                state.owner_capacities[owner].tensor_operations == TensorOperations::Formed,
             )?,
             target_graph,
             target_readout_graph,
@@ -1911,6 +1917,8 @@ impl ResourcePlanner {
                 .program_plan(definition, state.codec)
                 .map_err(|error| error.to_string())?,
             backend,
+            state.limits,
+            state.tensor_operations(),
         )
         .map_err(|error| error.to_string())?;
         let [target_weights, head_weights, vision_weights] = weight_bytes_by_component(load)?;

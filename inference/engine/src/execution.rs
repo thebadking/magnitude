@@ -255,12 +255,24 @@ fn plan_on_device(
     // Preparation allocates fixed invocation buffers and runs qualification
     // fixtures before any model weights are imported. It is part of startup,
     // so it must claim its peak through the same heap as later allocations.
-    let workspace = AttestedPrograms::planned_invocation_workspace_bytes(draft.programs(), backend)
-        .map_err(|error| internal(format!("program preparation workspace: {error:?}")))?;
+    let workspace = AttestedPrograms::planned_invocation_workspace_bytes(
+        draft.programs(),
+        backend,
+        draft.policy().limits(),
+        draft.device().tensor_operations(),
+    )
+    .map_err(|error| internal(format!("program preparation workspace: {error:?}")))?;
     let qualification =
         AttestedPrograms::qualification_peak_bytes(draft.load()).map_err(internal)?;
     let preparation_peak = match &range {
-        Some(range) => range.preparation_peak_bytes(&manifest.definition, draft.policy().codec(), backend)
+        Some(range) => range
+            .preparation_peak_bytes(
+                &manifest.definition,
+                draft.policy().codec(),
+                backend,
+                draft.policy().limits(),
+                draft.device().tensor_operations(),
+            )
             .map_err(internal)?,
         None => workspace.checked_add(qualification)
             .ok_or_else(|| internal("program preparation peak byte count overflows"))?,
@@ -509,7 +521,11 @@ fn prepare(
     };
     let draft = if range.is_some() {
         programs
-            .discard_readout_choices(draft.programs())
+            .discard_readout_choices(
+                draft.programs(),
+                draft.policy().limits(),
+                draft.device().tensor_operations(),
+            )
             .map_err(|error| LoadError::from(classify_plan(error, backend)))?;
         draft
     } else {
@@ -518,7 +534,11 @@ fn prepare(
             .map_err(|error| LoadError::from(classify_plan(error, backend)))?;
         if draft.load().readout_choices() != programs.readout_choices() {
             programs
-                .discard_readout_choices(draft.programs())
+                .discard_readout_choices(
+                    draft.programs(),
+                    draft.policy().limits(),
+                    draft.device().tensor_operations(),
+                )
                 .map_err(|error| LoadError::from(classify_plan(error, backend)))?;
         }
         draft

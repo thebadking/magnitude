@@ -451,6 +451,8 @@ pub(super) fn range_memory_charge(
         prepared_program_bytes: AttestedPrograms::planned_invocation_workspace_bytes(
             &programs,
             draft.device().backend(),
+            policy.limits(),
+            draft.device().tensor_operations(),
         )
         .map_err(|error| error.to_string())?,
         startup_additional_bytes: range.import_peak_bytes(),
@@ -490,7 +492,11 @@ pub(super) fn range_memory_charge(
     Ok(RangeMemoryCharge {
         memory,
         preparation_bytes: range.preparation_peak_bytes(
-            definition, policy.codec(), draft.device().backend(),
+            definition,
+            policy.codec(),
+            draft.device().backend(),
+            policy.limits(),
+            draft.device().tensor_operations(),
         )?,
     })
 }
@@ -501,13 +507,19 @@ impl AssessmentHeaderBounds {
         load: &ModelLoadPlan,
         codec: KvCodec,
         backend: BackendName,
+        limits: ResourceLimits,
+        tensor_operations: bool,
     ) -> Result<Self, String> {
         let programs = load
             .program_plan(definition, codec)
             .map_err(|error| error.to_string())?;
-        let prepared_program_bytes =
-            AttestedPrograms::planned_invocation_workspace_bytes(&programs, backend)
-                .map_err(|error| error.to_string())?;
+        let prepared_program_bytes = AttestedPrograms::planned_invocation_workspace_bytes(
+            &programs,
+            backend,
+            limits,
+            tensor_operations,
+        )
+        .map_err(|error| error.to_string())?;
         let largest_source = load
             .weights()
             .map(|weight| weight.source_bytes)
@@ -2321,14 +2333,22 @@ mod tests {
             .is_err()
         );
 
-        let header =
-            AssessmentHeaderBounds::derive(&definition, &load, KvCodec::Dense, BackendName::Cpu)
-                .unwrap();
+        let header = AssessmentHeaderBounds::derive(
+            &definition,
+            &load,
+            KvCodec::Dense,
+            BackendName::Cpu,
+            limits,
+            false,
+        )
+        .unwrap();
         assert_eq!(
             header.prepared_program_bytes,
             AttestedPrograms::planned_invocation_workspace_bytes(
                 &load.program_plan(&definition, KvCodec::Dense).unwrap(),
-                BackendName::Cpu
+                BackendName::Cpu,
+                limits,
+                false,
             )
             .unwrap()
         );

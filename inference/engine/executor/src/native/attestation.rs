@@ -381,6 +381,8 @@ impl AttestedPrograms {
     pub fn discard_readout_choices(
         &mut self,
         canonical_plan: &ProgramPlan,
+        limits: crate::ResourceLimits,
+        tensor_operations: bool,
     ) -> Result<(), PlanError> {
         if self.target_graphs.is_some()
             || self.target_readout_graphs.is_some()
@@ -411,8 +413,12 @@ impl AttestedPrograms {
             }
         }
         self.readout_choices.clear();
-        self.invocation_workspace_bytes =
-            Self::planned_invocation_workspace_bytes(canonical_plan, self.backend)?;
+        self.invocation_workspace_bytes = Self::planned_invocation_workspace_bytes(
+            canonical_plan,
+            self.backend,
+            limits,
+            tensor_operations,
+        )?;
         Ok(())
     }
 
@@ -655,12 +661,40 @@ impl AttestedPrograms {
     pub fn planned_invocation_workspace_bytes(
         plan: &ProgramPlan,
         backend: BackendName,
+        limits: crate::ResourceLimits,
+        tensor_operations: bool,
     ) -> Result<u64, PlanError> {
         macro_rules! bytes {
             ($entry:ident) => {
                 u128::from(NativeKernel::<$entry::Entry>::planned_invocation_workspace_bytes())
             };
         }
+        let history_bytes = |binding: crate::AttentionBinding| -> Result<u128, PlanError> {
+            let classes = super::preparation::attention_history_classes(
+                binding,
+                backend,
+                limits.max_launch_rows as u64,
+                tensor_operations,
+            );
+            Ok(match binding.history.encoding() {
+                magnitude_state::HistoryEncoding::Dense => {
+                    bytes!(attention_append_dense)
+                        + (1 + u128::from(classes.verify)) * bytes!(attention_decode)
+                        + bytes!(attention_prefill)
+                }
+                magnitude_state::HistoryEncoding::Affine => {
+                    bytes!(attention_append_k8v4)
+                        + (1 + u128::from(classes.verify)
+                            + u128::from(classes.verify_four)
+                            + u128::from(classes.verify_eight))
+                            * bytes!(attention_decode_k8v4)
+                        + (1 + u128::from(classes.prefill_listed)) * bytes!(attention_prefill_k8v4)
+                }
+                magnitude_state::HistoryEncoding::Unsupported => {
+                    return Err(PlanError::Unsupported("native rotated K4/V4 KV codec"));
+                }
+            })
+        };
         // The fused routed form's entries: the decode ones by the backend's
         // form.
         let decode_form = DecodeForm::of(backend).map_err(PlanError::ResourcePlanning)?;
@@ -780,23 +814,7 @@ impl AttestedPrograms {
                                 bytes!(project_rows) + bytes!(post_norm_residual)
                             }
                         }
-                        + match binding.history.encoding() {
-                            magnitude_state::HistoryEncoding::Dense => {
-                                bytes!(attention_append_dense)
-                                    + bytes!(attention_decode)
-                                    + bytes!(attention_prefill)
-                            }
-                            magnitude_state::HistoryEncoding::Affine => {
-                                bytes!(attention_append_k8v4)
-                                    + bytes!(attention_decode_k8v4)
-                                    + bytes!(attention_prefill_k8v4)
-                            }
-                            magnitude_state::HistoryEncoding::Unsupported => {
-                                return Err(PlanError::Unsupported(
-                                    "native rotated K4/V4 KV codec",
-                                ));
-                            }
-                        }
+                        + history_bytes(binding)?
                         // A selected read's indexer projection, selection
                         // and WorkList prefill.
                         + match binding.selection {
@@ -948,9 +966,7 @@ impl AttestedPrograms {
                     }
                     bytes += bytes!(draft_rows)
                         + 2 * bytes!(attention_project)
-                        + bytes!(attention_append_dense)
-                        + bytes!(attention_decode)
-                        + bytes!(attention_prefill)
+                        + history_bytes(binding.attention)?
                         + bytes!(attention_output)
                         + bytes!(readout_features_rows);
                     bytes += match binding.projection {
@@ -990,9 +1006,7 @@ impl AttestedPrograms {
                     if attention.insert(binding) {
                         bytes += bytes!(attention_project)
                             + bytes!(attention_output)
-                            + bytes!(attention_append_dense)
-                            + bytes!(attention_decode)
-                            + bytes!(attention_prefill);
+                            + history_bytes(binding)?;
                     }
                 }
                 if dense.insert(block.feed_forward) {
@@ -1692,13 +1706,17 @@ impl AttestedPrograms {
                     bindings: "finalized readout topology".into(),
                     outcome: error.to_string(),
                 })?;
-        let planned_bytes =
-            Self::planned_invocation_workspace_bytes(&finalized_topology, device.backend())
-                .map_err(|error| CatalogFailure::Preparation {
-                    entry: "program_factory",
-                    bindings: "native invocation workspace".into(),
-                    outcome: error.to_string(),
-                })?;
+        let planned_bytes = Self::planned_invocation_workspace_bytes(
+            &finalized_topology,
+            device.backend(),
+            selection_limits,
+            device.forms_tensor_operations(),
+        )
+        .map_err(|error| CatalogFailure::Preparation {
+            entry: "program_factory",
+            bindings: "native invocation workspace".into(),
+            outcome: error.to_string(),
+        })?;
         if invocation_workspace_bytes != planned_bytes {
             return Err(CatalogFailure::Qualification {
                 entry: "program_factory",

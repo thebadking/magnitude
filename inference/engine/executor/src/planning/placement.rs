@@ -77,11 +77,18 @@ impl DecoderRangeLoadPlan {
         definition: &magnitude_family_contracts::ModelDefinition,
         codec: magnitude_state::KvCodec,
         backend: seismic::BackendName,
+        limits: super::ResourceLimits,
+        tensor_operations: bool,
     ) -> Result<u64, String> {
         let programs = self.graph_load.program_plan(definition, codec)
             .map_err(|error| error.to_string())?;
-        let invocation = crate::AttestedPrograms::planned_invocation_workspace_bytes(&programs, backend)
-            .map_err(|error| error.to_string())?;
+        let invocation = crate::AttestedPrograms::planned_invocation_workspace_bytes(
+            &programs,
+            backend,
+            limits,
+            tensor_operations,
+        )
+        .map_err(|error| error.to_string())?;
         invocation
             .checked_add(crate::AttestedPrograms::qualification_peak_bytes(&self.graph_load)?)
             .and_then(|bytes| bytes.checked_add(seismic::recorded_graph_device_bytes(backend)))

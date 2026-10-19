@@ -61,6 +61,47 @@ use magnitude_kernels::{
 use seismic::KernelRequest;
 use std::collections::HashSet;
 use std::{cell::RefCell, rc::Rc};
+/// The independently retained history kernels selected from the same device
+/// facts and row bound during planning and preparation.
+pub(super) struct AttentionHistoryClasses {
+    pub verify: bool,
+    pub verify_four: bool,
+    pub verify_eight: bool,
+    pub prefill_listed: bool,
+}
+
+pub(super) fn attention_history_classes(
+    binding: AttentionBinding,
+    backend: BackendName,
+    max_rows: u64,
+    tensor_operations: bool,
+) -> AttentionHistoryClasses {
+    let verify = matches!(
+        backend,
+        BackendName::Metal | BackendName::Vulkan | BackendName::Cuda
+    ) && max_rows >= 2;
+    let affine = binding.history.encoding() == magnitude_state::HistoryEncoding::Affine;
+    let verify_four = affine
+        && verify
+        && separates_packed_attention_rows(
+            backend,
+            binding.shape.group,
+            binding.shape.width,
+            max_rows,
+        );
+    AttentionHistoryClasses {
+        verify,
+        verify_four,
+        verify_eight: verify_four && max_rows >= 5,
+        prefill_listed: crate::operators::attention::graph::lists_history_tiles(binding)
+            && crate::planning::reads_decoded_history(
+                backend,
+                tensor_operations,
+                binding.shape.width,
+            ),
+    }
+}
+
 #[derive(Default)]
 struct ReadoutStates {
     choices: HashMap<String, RecipeState>,
@@ -1486,18 +1527,19 @@ impl<'a> Preparation<'a> {
             selection: None,
             ..mix()
         };
+        let classes = attention_history_classes(
+            binding,
+            self.spec.backend(),
+            self.limits.max_rows,
+            self.spec.forms_tensor_operations(),
+        );
         let history = match binding.history.encoding() {
             magnitude_state::HistoryEncoding::Dense => {
                 // As for K8/V4, multi-row launches (draft blocks,
                 // verification) get their own tuning identity, so their
                 // grouped form is not displaced by the single-row one. CUDA
                 // also changes history-tile row capacity with its warp count.
-                let split_decode = matches!(
-                    self.spec.backend(),
-                    seismic::BackendName::Metal
-                        | seismic::BackendName::Vulkan
-                        | seismic::BackendName::Cuda
-                ) && self.limits.max_rows >= 2;
+                let split_decode = classes.verify;
                 let mut single = mix();
                 if split_decode {
                     single.decode_rows = Some(1..2);
@@ -1539,12 +1581,7 @@ impl<'a> Preparation<'a> {
                     )
             }
             magnitude_state::HistoryEncoding::Affine => {
-                let split_decode = matches!(
-                    self.spec.backend(),
-                    seismic::BackendName::Metal
-                        | seismic::BackendName::Vulkan
-                        | seismic::BackendName::Cuda
-                ) && self.limits.max_rows >= 2;
+                let split_decode = classes.verify;
                 let mut single = mix();
                 // The base kernel serves only single-row decode when the
                 // graph binds separate verification kernels. Pricing their
@@ -1555,13 +1592,7 @@ impl<'a> Preparation<'a> {
                 let decode = self
                     .spec
                     .tuned(&mut self.tuning, &AttentionDecodeK8V4Tuning(single))?;
-                let packed_four_rows = split_decode
-                    && separates_packed_attention_rows(
-                        self.spec.backend(),
-                        shape.group,
-                        shape.width,
-                        self.limits.max_rows,
-                    );
+                let packed_four_rows = classes.verify_four;
                 let verify = if split_decode {
                     let mut selected = mix();
                     selected.decode_rows = Some(
@@ -1587,7 +1618,7 @@ impl<'a> Preparation<'a> {
                 } else {
                     None
                 };
-                let verify_eight = if packed_four_rows && self.limits.max_rows >= 5 {
+                let verify_eight = if classes.verify_eight {
                     let mut selected = mix();
                     selected.decode_rows =
                         Some(5..crate::operators::attention::graph::DECODE_ROWS + 1);
@@ -1601,12 +1632,7 @@ impl<'a> Preparation<'a> {
                 // are two kernels with their own admissible forms.
                 // (`StateResourcePlan::lists_history_tiles`, of the opened
                 // device's own fact; graph preparation checks they agree.)
-                let lists = crate::operators::attention::graph::lists_history_tiles(binding)
-                    && crate::planning::reads_decoded_history(
-                        self.spec.backend(),
-                        self.spec.forms_tensor_operations(),
-                        shape.width,
-                    );
+                let lists = classes.prefill_listed;
                 // A launch whose rows see at most one request's history
                 // lists the tiles they see; the unlisted kernel serves the
                 // others, or every launch where nothing lists.

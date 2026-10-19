@@ -336,7 +336,10 @@ Invocation planning and the retained-storage census include every separately
 prepared streamed-routing, fill, scratch-bank, copy, conversion and commit entry,
 as well as stream and n-gram helpers. Cloned program handles are counted once
 per physical owner. The retained inventory must agree with the fixed plan after
-qualification.
+qualification. Decode, verification and listed-prefill kernels each retain their
+own invocation buffers even though one launch selects only one class. Their
+planning and preparation share the same row-bound and device-capability decision;
+retained storage is summed across the prepared classes.
 A placed load bounds preparation, import, initial-state allocation and serving
 separately and takes their maximum
 per physical allocation domain. Preparation retains native invocation buffers

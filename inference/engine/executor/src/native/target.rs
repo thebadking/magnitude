@@ -17,11 +17,11 @@ use magnitude_kernels::{
     dense_up, feature_rows, routed_down, routed_experts_up, routed_gate_up, routed_scatter,
     routed_select, routed_up, state_space_chunk, state_space_gate, state_space_step, tap_rows,
 };
-use magnitude_kernels::{short_conv_project, short_conv_rows};
 use magnitude_kernels::{
     routed_bank_fill, routed_convert_wide, routed_copy, routed_route_streamed,
     routed_scratch_request, routed_scratch_wait, routed_seed_commit, routed_step,
 };
+use magnitude_kernels::{short_conv_project, short_conv_rows};
 use seismic::NativeKernel;
 use std::collections::HashMap;
 
@@ -350,11 +350,10 @@ impl AttentionHistoryKernels {
                 prefill,
             } => {
                 append.invocation_workspace_bytes()
-                    + decode.invocation_workspace_bytes().max(
-                        verify
-                            .as_ref()
-                            .map_or(0, |kernel| kernel.invocation_workspace_bytes()),
-                    )
+                    + decode.invocation_workspace_bytes()
+                    + verify
+                        .as_ref()
+                        .map_or(0, NativeKernel::invocation_workspace_bytes)
                     + prefill.invocation_workspace_bytes()
             }
             Self::AffineK8V4 {
@@ -367,28 +366,20 @@ impl AttentionHistoryKernels {
                 prefill_listed,
             } => {
                 append.invocation_workspace_bytes()
-                    + decode
-                        .invocation_workspace_bytes()
-                        .max(
-                            verify
-                                .as_ref()
-                                .map_or(0, NativeKernel::invocation_workspace_bytes),
-                        )
-                        .max(
-                            verify_four
-                                .as_ref()
-                                .map_or(0, NativeKernel::invocation_workspace_bytes),
-                        )
-                        .max(
-                            verify_eight
-                                .as_ref()
-                                .map_or(0, NativeKernel::invocation_workspace_bytes),
-                        )
-                    + prefill.invocation_workspace_bytes().max(
-                        prefill_listed
-                            .as_ref()
-                            .map_or(0, NativeKernel::invocation_workspace_bytes),
-                    )
+                    + decode.invocation_workspace_bytes()
+                    + verify
+                        .as_ref()
+                        .map_or(0, NativeKernel::invocation_workspace_bytes)
+                    + verify_four
+                        .as_ref()
+                        .map_or(0, NativeKernel::invocation_workspace_bytes)
+                    + verify_eight
+                        .as_ref()
+                        .map_or(0, NativeKernel::invocation_workspace_bytes)
+                    + prefill.invocation_workspace_bytes()
+                    + prefill_listed
+                        .as_ref()
+                        .map_or(0, NativeKernel::invocation_workspace_bytes)
             }
         }
     }
