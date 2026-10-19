@@ -3146,10 +3146,10 @@ each placed owner's slab-rounded state at the **full configured context**,
 with the ordinary in-flight recurrent bank count. It keeps the metadata-only
 assessment capped, preserves startup-phase accounting and leaves actual slab
 growth under fresh heap claims. It changes no GPU arithmetic, token limit,
-tuning allowance or reserve. Its effectiveness is **pending build and model
-qualification**. Preserve the failed candidate and its independent binaries;
+tuning allowance or reserve. Its effectiveness is **pending model qualification**.
+Preserve the failed candidate and its independent binaries;
 do not mutate them or run its pending speed comparison as if maximum context
-had passed. [Bug and reproduction](bugs/26-10-19/context-capacity.md).
+had passed. [Local bug report and reproduction](bugs/26-10-19/context-capacity.md).
 
 Before rebuilding, locked cleanup
 **`20261019T232457Z-stage8-reclaim-stale-targets-6739e5`** preserves both exact
@@ -3161,6 +3161,14 @@ links. It then cleans only their stale `stage6-target` and `cpu-experts-target`
 Cargo output, increasing free disk from **5.619 to 18.877 GiB**. Source
 worktrees and the accepted/Stage 7 controls are untouched. Use these independent
 copies when revisiting the corresponding Stage 6 diagnostics.
+
+Full rebuild **`20261019T232622Z-stage8-context-capacity-build-8277bc`** passes
+in **4m35s** from clean source
+`8276313087da8e1960342a03a93c44633c355612`. The release engine and harness both
+pass source provenance, then independent copies in `context-capacity-control`
+are checked against their exact verified hashes. The run preserves this mapping
+in `preserved-binaries.json`. This is build evidence; replay of the failed
+maximum-context fixture remains the next necessary model gate.
 
 ### Stage 8 next gate — repair maximum context, then consolidated timing
 
