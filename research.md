@@ -2634,7 +2634,14 @@ Source is clean on **`two-gpu-grouping-reservations-experimental`**. The build
 records exact engine/harness hashes and reproduction scripts. Stage 7a's
 original binaries were copied independently to `owner-budget-control` and
 hash-checked before reusing their target; its original build directory retains
-`preserved-binaries.json`. The comparison retains individual observations,
+`preserved-binaries.json`. Repaired engine/harness controls are independently
+preserved under
+`/home/dre/.cache/magnitude-evaluation/grouping-reservations-control/`, with
+their paths and hashes in this build's `preserved-binaries.json`. The locked
+cleanup job `20261019T203712Z-stage7-reclaim-build-cache-90b27f` then removes
+4,298 regenerable Cargo files from `cpu-grouped-target`; its binaries must now
+be taken from the preserved control directory, not the cleaned target.
+The comparison retains individual observations,
 delivery latencies, ready census, owner assessments, logical/physical reads,
 RAM, temperatures, `analysis.json` and `analyze.py`. No unit or integration tests
 were added or run.
@@ -2654,8 +2661,9 @@ without an accepted speedup. **Stage 7b** repairs paired admission and residual
 scratch lifetimes, qualifies group 1, and completes its same-source comparison.
 Keep group 8: group 1 fails the primary generation bar and increases both
 fixtures' total latency. Preserve both candidates' exact sources and binaries;
-hash-check independent copies of the repaired engine and harness before another
-build reuses their target. Stage 2b remains the accepted serving reference.
+the repaired independent copies are hash-checked and the shared Cargo target is
+cleaned. Use `grouping-reservations-control` for the next comparison's repaired
+group 8 binaries. Stage 2b remains the accepted serving reference.
 
 Next audit **Stage 7c startup phase accounting** with the repaired group 8 build
 as its experimental control. Identify the largest actual source/import and
