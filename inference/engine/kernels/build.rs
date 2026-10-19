@@ -19,6 +19,11 @@ const BACKENDS: [BackendName; 4] = [
 /// stale; its assets are exempt from `tree_parity` alike.
 const ENTRY_EXCEPTIONS: &[(&str, &[BackendName], &str)] = &[
     (
+        "routed_projection",
+        &[BackendName::Cuda],
+        "raw F32 routed projection observation; other backends do not expose the CUDA grouped accumulator",
+    ),
+    (
         "routed_gate_up_cpu",
         &[BackendName::Cuda],
         "one-row GPU expansion skips a CPU-served choice",
@@ -351,6 +356,7 @@ fn main() {
         .source("kernels/ngram.seismic")
         .source("kernels/indexer.seismic")
         .source("kernels/functions.seismic")
+        .source("kernels/routed_projection.seismic")
         .run()
         .unwrap_or_else(|error| {
             panic!("checking engine Seismic sources and generating bindings failed: {error}")

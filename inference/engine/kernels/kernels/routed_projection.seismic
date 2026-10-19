@@ -1,0 +1,24 @@
+# Raw routed projection, before activation publication, weighting or joins.
+# Evaluation uses the CUDA form to observe the same grouped accumulator as
+# routed_gate_up/routed_down, then verifies their original publications.
+fn routed_projection[M, H, E, K, F](normalized: &tensor[M, H] A,
+    routes: &tensor[M, K] i32, expert_weight: &tensor[E, F, H] EW)
+    -> tensor[M, K, F] f32:
+    let mut projected = tensor[M, K, F] f32
+    for row in 0..M:
+        for choice in 0..K:
+            let expert = routes[row, choice]
+            for feature in 0..F:
+                let mut value = f32(0.0)
+                for source in 0..H:
+                    value = fma(f32(normalized[row, source]), f32(expert_weight[expert, feature, source]), value)
+                projected[row, choice, feature] = value
+    return projected
+
+native routed_projection for cuda from "cuda/routed_projection.cu":
+    static (M, H, K, F)
+    where H % 64 == 0 and M <= 8
+    launch routed_projection:
+        params (code TPW in [1, 2], code arithmetic KSPLIT in [1, 2, 4])
+        threadgroups (ceil_div(ceil_div(ceil_div(F, 16), TPW), 4 / KSPLIT), M * K, 1)
+        threads_per_threadgroup (128, 1, 1)

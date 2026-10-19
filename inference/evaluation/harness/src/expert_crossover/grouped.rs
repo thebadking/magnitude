@@ -8,6 +8,10 @@ pub(super) struct Activations {
     pub diagnostic: Value,
 }
 impl Activations {
+    pub fn product(&self, gate: f32, up: f32) -> u16 {
+        Bf16::narrow(Bf16::widen(self.values[usize::from(Bf16::narrow(gate))]) * Bf16::round(up))
+    }
+
     pub fn new(device: &Device) -> Result<Self, String> {
         // Full BF16 function domain, independent of model or captured operands.
         let bytes: Vec<u8> = (0..=u16::MAX).flat_map(u16::to_le_bytes).collect();
@@ -73,6 +77,9 @@ pub(super) struct Candidate {
     pub product_gpu_silu: Tensor,
     pub result_gpu_silu: Tensor,
     pub result_same_gpu_product: Tensor,
+    pub gate: Vec<f32>,
+    pub up: Vec<f32>,
+    pub down_same_gpu_product: Vec<f32>,
 }
 
 pub(super) fn evaluate(
@@ -98,7 +105,7 @@ pub(super) fn evaluate(
     dot(&weights[1], &native[1], &normalized, &mut up)?;
     let mut product = Vec::with_capacity(f);
     let mut gpu_silu = Vec::with_capacity(f);
-    for (g, u) in gate.into_iter().zip(up) {
+    for (&g, &u) in gate.iter().zip(&up) {
         let code = Bf16::narrow(g);
         let g = Bf16::widen(code);
         let u = Bf16::round(u);
@@ -112,20 +119,23 @@ pub(super) fn evaluate(
         .chunks_exact(2)
         .map(|b| u16::from_le_bytes([b[0], b[1]]))
         .collect();
-    let down = |product: &[u16]| -> Result<Tensor, String> {
+    let down = |product: &[u16]| -> Result<(Tensor, Vec<f32>), String> {
         let x: Vec<f32> = product.iter().map(|&v| Bf16::widen(v)).collect();
         let mut result = vec![0.0_f32; h];
         dot(&weights[2], &native[2], &x, &mut result)?;
         let bytes: Vec<u8> = result
-            .into_iter()
-            .map(|v| 0.0_f32 + 1.0_f32.mul_add(Bf16::round(v), 0.0))
+            .iter()
+            .map(|&v| 0.0_f32 + 1.0_f32.mul_add(Bf16::round(v), 0.0))
             .flat_map(f32::to_le_bytes)
             .collect();
-        Tensor::from_host(&cpu.device, Element::f32(), &[1, h as u64], &bytes).map_err(why)
+        Ok((
+            Tensor::from_host(&cpu.device, Element::f32(), &[1, h as u64], &bytes).map_err(why)?,
+            result,
+        ))
     };
-    let result = down(&product)?;
-    let result_gpu_silu = down(&gpu_silu)?;
-    let result_same_gpu_product = down(&actual_gpu_product)?;
+    let (result, _) = down(&product)?;
+    let (result_gpu_silu, _) = down(&gpu_silu)?;
+    let (result_same_gpu_product, down_same_gpu_product) = down(&actual_gpu_product)?;
     let tensor = |product: Vec<u16>| {
         Tensor::from_host(
             &cpu.device,
@@ -144,5 +154,8 @@ pub(super) fn evaluate(
         product_gpu_silu: tensor(gpu_silu)?,
         result_gpu_silu,
         result_same_gpu_product,
+        gate,
+        up,
+        down_same_gpu_product,
     })
 }

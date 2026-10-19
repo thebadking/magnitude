@@ -119,6 +119,11 @@ Rules for every measurement:
   inputs and can isolate pointwise publication differences; its generated
   function table is not model output or qualification evidence. Scalar recipes
   and function-table experiments establish no serving throughput.
+  Raw projection diagnostics record their exact native artifact and partition
+  policy. Attribution to a routed operation requires reconstructing its normal
+  activation and contribution publications exactly before comparing accumulators.
+  Retained raw values and their digests remain bound to the original operands;
+  these observations do not authorize a serving implementation or numerical gate.
 - **Tuning:** first-load tuning runs under an explicit budget. Fresh tuning ignores stored tuning results and keeps compiled kernels. The tuning trace and outcome are part of every measured run.
 
 ## Comparison

@@ -2,6 +2,7 @@
 mod cache;
 mod exchange;
 mod grouped;
+mod projections;
 mod replay;
 use crate::{Inputs, Rendered, digest::sha256_hex, render::RenderedFile};
 use clap::Args;
