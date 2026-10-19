@@ -1237,6 +1237,90 @@ This does not establish arithmetic parity inside that configuration. Both runs
 are untimed diagnostics with pinned launchers and archived input/output data;
 the MTP serving parity gate remains failed.
 
+### Stage 4 attention arithmetic and canonical history joins
+
+The admitted diagnostics now retain mixer input, Q/K/V, indexer projections and
+attention output using their producers' descriptors. Build
+`20261019T105520Z-stage4-build-ce250f` (base `47f852f5`, dirty digest
+`cfe698619ae771e06146062d70d4bab55588a8ff28c81bd9d67616ab869d3ede`)
+and probe `20261019T105647Z-stage4-attention-0e524d` localize the first change
+at position 395 more precisely:
+
+| Block 3 observation | Across widths 1 and 2 |
+| --- | --- |
+| Mixer input, projected Q including gate, K and V | Byte-identical |
+| Projected indexer query and key | Byte-identical |
+| Attention result, 6,144 BF16 values | 16 differ, by 1–2 representable steps |
+
+Attention-result RMS difference is **2.048715e-6**, maximum absolute difference
+**0.0001220703125**. The added exports preserve every earlier raw observation,
+logits and features exactly (`observer-check.json`). All 30 recorded tuning
+unit keys and their chosen configurations also match across widths
+(`20261019T104747Z-stage4-middle-66c44f/configuration-check.json`). This narrows
+the change to history/preparation/attention rather than Q/K/V projection, but
+does not establish an independent model-quality verdict.
+
+**Query-tile experiment, not retained.** Build
+`20261019T110211Z-stage4-build-18af2b`, dirty digest
+`e5814cf1528add8dae38a587548c63bc638149e6646f22fffe3d8b89c104a1e2`,
+assigned one query token per CUDA matrix tile, keeping tokens parallel and
+prefill unchanged. Probe `20261019T110346Z-stage4-query-tile-f8ecc0` made all
+104 raw observations at position 395 equal across widths; single-row logits,
+features and raw observations were unchanged. The four-position mean KL fell
+from 0.003611 to 0.000522 nats and argmax agreement became 4/4. Later features
+still differed; these are batching diagnostics, not speed or quality gains.
+
+`20261019T110723Z-stage4-trace-9ce653` still failed ordinary serving parity:
+35 proposals, 27 accepted, 8 rejected, and 64 output tokens instead of the
+plain reference's natural stop at 60. Its repeat fixture matched with 31/31
+proposals accepted. Probe `20261019T111106Z-stage4-second-row-b98e90` then
+captured position 396. Its blocks 0–2, block 3 input, Q/K/V and indexer
+projections match, but the attention result differs (RMS **9.091388e-6**,
+maximum **0.00048828125**). Isolating query tiles alone is therefore insufficient.
+The original grouped CUDA kernels were restored before the next experiment.
+
+**Canonical history correction, candidate only.** The target builder appended
+tentative cached rows to accepted ranges without coalescing their common
+boundary. This could give verification `[0,395), [395,396)` where straight
+advancement supplied `[0,396)`. The CUDA attention partitioning works over
+spans, so logically identical histories can acquire different physical work.
+
+The candidate now uses one append/coalesce helper for causal, indexer and Shared
+reads. It preserves logical order, joins only adjacent ranges within one slab,
+and leaves the read rows unchanged. Stored-history launch validation uses the
+same canonical preparation. Shared validation preserves the exact accepted
+prefix and permits its last span to grow only into rows reserved by the advance
+in that same slab. No precision tolerance or acceptance rule changed.
+
+The initial producer-only probe `20261019T111704Z-stage4-coalesce-2a72b7`
+preserved single-row output but correctly stopped at launch validation, whose
+expected prepared history still used the old split form. It is a failed probe,
+not a parity result. Build `20261019T112209Z-stage4-build-cea316` includes the
+coordinated producer/validator correction, with dirty digest
+`9d00a1cc0c2ac4e3216b5404aac8a39384754a22751e297249204ece9f41212d`.
+
+`20261019T112330Z-stage4-coalesce-89b10f` passes the bounded comparison:
+all **208 raw observations** at positions 395 and 396 match across widths;
+all four logits and exported feature rows are byte-identical; **KL is zero**.
+Single-row logits and features remain byte-identical to the saved control
+(`byte-parity.json`). This demonstrates the correction on this canonical prefix,
+with the original grouped kernels; it is not whole-continuation qualification.
+
+The actual MTP diagnostic `20261019T112543Z-stage4-trace-9ee35f` remains failed
+for ordinary parity: 35/27/8 proposed/accepted/rejected, 64 output tokens, while
+the repeated passage matches at 31/31. The first differing round is still at
+position 411 after 16 emitted tokens: input `[8026,11]`, target selections
+`[11,3804]`. The comma is accepted, then bonus token ` went` differs from plain
+` and`; **five rejections** precede this round. The canonical book answer used
+for teacher forcing is not the saved generated continuation. Exact parity on its
+first four scored positions therefore does not isolate the remaining serving
+failure from later batching differences or rejection-dependent state handling.
+
+All cited artifacts are under the local results directory. Successful runs have
+pinned launchers and exact input/output evidence; builds retain complete patches.
+The history correction and MTP implementation remain unpromoted, and timing
+remains held until the actual serving gate passes.
+
 ## Immediate next action
 
 Continue **Stage 4 qualification**, preserving the frozen Stage 2b plain control.
@@ -1245,13 +1329,18 @@ target-reading heads, vision and separate block drafters need other placement
 contracts. Real proposals, full-acceptance prefix reuse and cancellation/recovery
 now work; the ordinary-continuation parity gate remains failed.
 
-Separate block 3's attention input projection, history/softmax and output
-projection on the same bounded canonical input at verification widths 1 and 2.
-Its input matches exactly; its mixer output already differs. Retain exact
-projected query/key/value and attended rows through admitted graph exports as
-needed, and verify that observation preserves the saved logits. The target-only
-difference reproduces on plain main and with dense KV, before the GPU handoff;
-do not attribute it solely to drafting, rejected-suffix repair or compression.
+Compare target execution on the exact saved plain greedy continuation through
+the differing position 411 round. Represent that saved output as an explicitly
+identified diagnostic chat fixture, render it through the engine, and verify
+the full serving prompt prefix and the round's input IDs. Keep model context
+at the serving limit of 1,024; add an explicit harness context reservation if
+needed rather than changing the input to obtain that capacity. This is a
+control-derived diagnostic, not an independent reference-quality measurement.
+Compare single-row and two-row execution without rejected suffixes at positions
+411 and 412. If these match, inspect rejected-prefix state repair against the
+same accepted prefix; if they differ, localize that target difference first.
+The original grouped kernels are restored, and the canonical history correction
+must remain in both sides. Keep the frozen Stage 2b plain control unchanged.
 Preserve graph/state leases and every owner's completion, keep diagnostics
 opt-in, and make no timing claim from an instrumented run. Do not serialize
 verification or relax precision/greedy parity to obtain a pass. Requalify the
