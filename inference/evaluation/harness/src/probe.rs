@@ -87,6 +87,9 @@ pub fn run(inputs: &Inputs, options: &EngineOptions, args: &ProbeArgs) -> Result
             &LogitsOptions {
                 batch: args.batch,
                 verify_width: 1,
+                scored_rows: None,
+                feature_rows: false,
+                model_context: None,
             },
             &rendered,
             &rendered_digest,

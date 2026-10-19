@@ -37,6 +37,7 @@ mod probe;
 mod record;
 mod render;
 mod steps;
+mod target_compare;
 mod time;
 mod tuning;
 
@@ -148,6 +149,25 @@ enum Command {
         /// Also retain the exact exported feature rows beside the logits.
         #[arg(long)]
         feature_rows: bool,
+        /// Reserve model context without resizing the rendered fixtures.
+        #[arg(long)]
+        model_context: Option<std::num::NonZeroUsize>,
+    },
+    /// Compare sequential and paired target selections on a generated prefix.
+    TargetCompare {
+        #[command(flatten)]
+        common: Common,
+        #[command(flatten)]
+        engine: EngineArgs,
+        /// Absolute position of the first target row to compare.
+        #[arg(long)]
+        anchor: std::num::NonZeroUsize,
+        /// Reserve context without changing the fixture.
+        #[arg(long)]
+        model_context: std::num::NonZeroUsize,
+        /// Plan successors as in the serving load.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        lookahead: bool,
     },
     /// The catalog drafter's proposals at anchors in the scored spans.
     Draft {
@@ -608,6 +628,7 @@ fn run(command: Command) -> Result<(), String> {
             verify_width,
             scored_rows,
             feature_rows,
+            model_context,
         } => {
             if batch == 0 || verify_width == 0 {
                 return Err("--batch and --verify-width must be positive".into());
@@ -642,6 +663,7 @@ fn run(command: Command) -> Result<(), String> {
                     verify_width,
                     scored_rows: scored_rows.map(std::num::NonZeroUsize::get),
                     feature_rows,
+                    model_context: model_context.map(std::num::NonZeroUsize::get),
                 },
                 &rendered,
                 &digest,
@@ -650,6 +672,21 @@ fn run(command: Command) -> Result<(), String> {
             development.finish()?;
             let (measurements, traces) = tuned(&engine, &options)?;
             inputs.finish(digest, Some(vec![device]), measurements, traces)
+        }
+        Command::TargetCompare { common, engine, anchor, model_context, lookahead } => {
+            let inputs = Inputs::read(&common, "harness.target_compare")?;
+            let rendered = inputs.render(None)?;
+            let digest = inputs.write_rendered(&rendered)?;
+            let (options, development) = engine_options(&engine, &inputs)?;
+            let compared = target_compare::run(
+                &inputs.artifacts.artifacts, &options, &rendered, &digest,
+                anchor.get(), model_context.get(), lookahead,
+                &inputs.run.path("target-compare.json"),
+            )?;
+            development.finish()?;
+            let (mut measurements, traces) = tuned(&engine, &options)?;
+            measurements.insert("target_compare".into(), compared.result);
+            inputs.finish(digest, Some(vec![compared.device]), measurements, traces)
         }
         Command::Draft {
             common,

@@ -1360,7 +1360,15 @@ the target selects 3896. The run terminated with code 1 and records
 token path. The source of this mismatch needs sampled-token evidence; this
 probe cannot isolate rejection-dependent repair. Its comparison at position
 412 must not be described as proof of a repair defect or an exact serving-prefix
-comparison.
+execution comparison.
+
+The later generated-prefix observation below confirms that all sixteen rendered
+input IDs at positions 396–411 match native generation. Retokenization is
+therefore not the explanation for this bounded prefix. The old logits walk
+prefilled 395 rows and then decoded its first scored row; native generation
+prefills all 396 prompt rows and selects at the prompt boundary. Its output
+demand also differs. Matching token IDs alone does not establish matching
+numerical state or execution boundaries.
 
 Both candidate corrections were then combined: canonical history joins and
 one query per CUDA matrix tile, with queries still parallel. Build
@@ -1387,6 +1395,91 @@ pinned to its candidate build proof. It is instrumented qualification with no
 thermal timing gate and supports no speed claim. Both corrections and the MTP
 implementation remain candidate-only.
 
+### Stage 4 generated-prefix control isolates attention configuration
+
+The harness now has an opt-in `target-compare` command. It renders one chat
+fixture, generates a prefix through actual greedy selections, then compares two
+sequential rows with one paired target forward on a freshly regenerated prefix.
+It requires the complete sampled prefixes to match before comparing selections.
+Both walks use the same context capacity, selection-only output demand and
+admitted decode capacity. The paired continuation comes from the first walk's
+sampled token; no persisted token list is supplied as model input. This is a
+bounded batching diagnostic, not independent model-quality evaluation.
+
+With both experimental corrections still applied, build
+`20261019T115715Z-stage4-build-552f7b` (dirty digest
+`4d2c02ffad4d6a4d5855f911a69772ae73d4c9cb7be646cb941b4ad6ac587eb7`)
+and run `20261019T115825Z-stage4-generated-prefix-291e13` reproduced the
+sixteen serving-prefix tokens, and sequential/paired selections matched.
+However, **both selected `went`**, so this did not preserve the frozen plain
+serving control. Run `20261019T120113Z-stage4-current-plain-control-a5d910`
+then confirmed that the same candidate server diverged with drafting completely
+disabled: the repeated passage matched, but ordinary continuation reached its
+64-token limit instead of the frozen control's natural stop at 60.
+
+The query-tile experiment changed the kernel implementation identity and its
+stored tuning choices. The candidate's single-row attention used the canonical
+fallback where the frozen control used a qualified configuration. A successful
+bounded batching comparison under that changed plain path does not establish a
+serving fix. **The query-tile patch has been removed**, including its design
+requirement. Canonical history joins remain in the candidate.
+
+Build `20261019T120404Z-stage4-build-2c75d0`, dirty digest
+`4fe9e83d36eaebdac666b79500ce409c04db323ef1beb49712b26ca6fb142165`,
+restores the original CUDA kernels. Run
+`20261019T120525Z-stage4-original-generated-prefix-8902cd` now establishes
+the relevant failure without MTP or rejected suffixes:
+
+| At the generated serving prefix | Sequential target | Paired target |
+| --- | --- | --- |
+| Position 411, input 8026 | Selects comma, token 11 | Selects comma, token 11 |
+| Position 412, input 11 | Selects ` and`, token 321 | Selects ` went`, token 3804 |
+
+Both fresh walks generated the same sixteen tokens at positions 396–411,
+matching the actual earlier serving trace. Context capacity is 1,024 and the
+native serving prompt is exactly 396 tokens. The run correctly terminated
+with a failed parity result. This shows that the differing selection does not
+require rejected-prefix repair; it does not rule out other lifecycle defects.
+
+The earlier observation that both loads had the same 30 tuning records was
+insufficient: it compared available units, while the two row widths invoke
+**different units within that same set**. Their actual affine decode choices are:
+
+| Parameter | Single-row unit `M=1..2` | Multi-row unit `M=2..9` |
+| --- | ---: | ---: |
+| MATRIX | 1 | 1 |
+| PARTS | 48 | 12 |
+| WARPS | 1 | 4 |
+| COLUMNS | 4 | 1 |
+| QREG / SLICES / STAGES | 1 / 1 / 2 | 1 / 1 / 2 |
+
+To isolate this difference, build
+`20261019T120658Z-stage4-pinned-build-cee893` enables the existing harness-only
+`pinned-tuning` feature. Run `20261019T120820Z-stage4-pinned-prefix-7a48cb`
+replays all 30 observed units and changes **only the multi-row affine attention
+unit** to the single-row parameters. All 59 replay events name recorded choices;
+no unit falls back to an unrecorded default. The generated prefix and sequential
+selections remain unchanged. **Both paired selections now match**, including
+token 321 at position 412. `pin-change.json`, `replay-events.json` and
+`qualification.json` retain the complete control and change.
+
+This isolates an attention-configuration cause at the failing generated round.
+The development replay does not run normal tuning qualification and cannot
+serve as a production fix or a speed claim. The production change must preserve
+the target's arithmetic across these row widths, with ordinary resource and
+numerical admission, then pass actual serving and lifecycle gates before timing.
+
+The reusable harness command, explicit logits context capacity, and the missing
+optional precision-probe constructor fields are now retained on the working
+branch. Release build
+`20261019T121135Z-generated-prefix-harness-build-8b4e53` compiled the harness
+with `precision-probe` enabled and passed the unchanged provenance audit (base
+`044de819`, dirty digest
+`50d8446b9f101168d4913bb3b24cbf30faa8246e7bbdb2d7c4ceab780f77828e`).
+The MTP implementation and history correction remain candidate-only. All run
+artifacts above are local under `inference/evaluation/results/`; model jobs were
+untimed diagnostics under the machine lock. No speed improvement is claimed.
+
 ## Immediate next action
 
 Continue **Stage 4 qualification**, preserving the frozen Stage 2b plain control.
@@ -1395,17 +1488,21 @@ target-reading heads, vision and separate block drafters need other placement
 contracts. Real proposals, full-acceptance prefix reuse and cancellation/recovery
 now work; the ordinary-continuation parity gate remains failed.
 
-Generate the actual greedy prefix inside the evaluation harness from the
-original serving chat fixture, rendered through the engine at context capacity
-1,024. Record the tokens selected by the model; the failed text-derived replay
-cannot supply this control. Advance two fresh sequences by ordinary greedy
-decoding to position 411 and require their sampled prefixes to match. Then
-compare two sequential target rows with one two-row target verification using
-the first sequence's sampled next token. This compares actual generated tokens
-without MTP proposals or rejected suffixes. If these match, inspect rejected-prefix
-state repair against that prefix; if they differ, localize that target difference
-first. Keep both candidate corrections fixed across the comparison and preserve
-the frozen Stage 2b plain control unchanged.
+Implement matched attention arithmetic for single-row decoding and paired
+verification on the original CUDA kernels, guided by the successful controlled
+replay. Reuse the existing production specialization/dependency mechanism where
+appropriate; preserve normal numerical qualification and resource admission on
+the served verification rows. Keep configuration provenance explicit. Do not
+copy a development tuning pin into production or label single-row qualification
+as coverage of unmeasured widths. Preserve the frozen Stage 2b plain control,
+its qualified single-row choice, and the candidate's canonical history joins.
+Queries must remain parallel; the query-tile experiment is discarded.
+
+First repeat the bounded generated-prefix comparison without a development pin.
+Then requalify the original plain/MTP serving fixtures, including ordinary
+continuation, exact tool arguments, acceptance/rejection, prefix reuse and
+cancellation/recovery. A matching point does not qualify the whole continuation.
+If serving still differs, localize that actual difference before changing repair.
 Preserve graph/state leases and every owner's completion, keep diagnostics
 opt-in, and make no timing claim from an instrumented run. Do not serialize
 verification or relax precision/greedy parity to obtain a pass. Requalify the

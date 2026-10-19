@@ -28,6 +28,7 @@ pub struct LogitsOptions {
     /// A diagnostic prefix of each fixture's scored positions, when bounded.
     pub scored_rows: Option<usize>,
     pub feature_rows: bool,
+    pub model_context: Option<usize>,
 }
 
 /// One fixture's walk through its tokens: its sequence, its tokens, its
@@ -88,6 +89,10 @@ pub fn run(
         .expect("a fixture set is nonempty");
     let batch = logits.batch.min(rendered.len());
     let rows_per_step = batch * logits.verify_width;
+    let model_context = logits.model_context.unwrap_or(longest + 1);
+    if model_context < longest + 1 {
+        return Err(format!("--model-context must be at least {} for these rendered fixtures", longest + 1));
+    }
     let mut engine = Engine::open(
         artifacts,
         options,
@@ -96,7 +101,7 @@ pub fn run(
             proposals: None,
             // Every forward stays inside these known fixture tokens. Keep
             // the same context reservation across verification widths.
-            context_tokens: longest + 1,
+            context_tokens: model_context,
             decode_rows: rows_per_step,
             exported_logits_rows: rows_per_step.max(PREFILL_ROWS),
             lookahead: false,

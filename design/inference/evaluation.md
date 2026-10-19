@@ -61,7 +61,15 @@ Rules for every measurement:
 - Harness model loads may select the engine's explicit decoder ranges; the
   recorded command preserves their stable device identities and block ranges.
   Distribution probes retain identical rendered inputs and model context limits
-  across verification widths. Device timing or attribution across owners requires every owner's
+  across verification widths. An explicit context reservation changes capacity
+  without resizing or editing fixtures and must cover the complete rendered input.
+  A generated-prefix batching diagnostic selects its prefix from the rendered
+  serving prompt inside the harness. Fresh walks must reproduce every sampled
+  prefix token before paired target selections can be compared with sequential
+  selections. Only model-selected tokens supply the paired continuation; saved
+  output text is not a token-path control. Failed prefixes and selection parity
+  remain explicit results and never imply an independent quality or speed claim.
+  Device timing or attribution across owners requires every owner's
   trace; a path collecting only one owner's trace refuses placed timing before
   loading the model.
   A bounded distribution diagnostic may select the leading scored positions of
