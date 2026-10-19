@@ -207,15 +207,15 @@ Active snapshot and read-only reproduction script:
 Controlled delivery-window counters and limits:
 `20261019T133130Z-stage5-comparison-2f88c4/analysis.json`.
 
-A read-only check at **2026-10-19 15:06:33 UTC**, after the Stage 6 operator
-job exited, found **53.141 GiB `Cached`, 7.232 GiB actually free and 60.579 GiB
+A read-only check at **2026-10-19 16:16:43 UTC**, after the physical-cache
+qualification exited, found **55.475 GiB `Cached`, 4.740 GiB actually free and 60.433 GiB
 `MemAvailable`**. No Magnitude process was running and both GPUs were idle.
 This is not peak inference occupancy or a model-page inventory. Most available
 RAM remains reclaimable file cache; allocating another raw-weight cache would
 compete with it. The operator result below identifies a different possible use:
 retaining CPU-ready expert records could avoid both packing and GPU transfers,
 if a bounded selective CPU path passes serving qualification.
-Snapshot and reproduction script: `20261019T150633Z-idle-ram-diagnostic/`.
+Snapshot and reproduction script: `20261019T161643Z-idle-ram-diagnostic/`.
 
 ### Confirmed code observations
 
@@ -545,6 +545,7 @@ before running it; fill measured fields only from saved artifacts.
 | Separate source and blocking upload service | 6 diagnostic | `6572bbd2` + `e84abda8…`; accepted plain profile, Stage 5 frozen output controls | Build `20261019T135156Z-stage6-build-63ee63`; diagnostic `20261019T135740Z-stage6-source-service-5f527a`; trace-disabled lifecycle `20261019T140411Z-stage6-lifecycle-7f6abd` | Six exact responses and identical selected configurations; both owner traces present. Ordinary blocking uploads average 327.121 µs per 3.125 MB expert; trace-disabled retention/cancellation/recovery passes | Retain opt-in diagnostics. No speed or CPU-crossover claim; measure matched CPU work next |
 | Canonical expert operator crossover | 6 diagnostic | `513376a8` + `3ccacadb…`; fresh native feature export, real block 1 weights | Capture `20261019T144558Z-stage6-feature-capture-a916e2`; build `20261019T150219Z-stage6-crossover-build-7d6fd6`; timed comparison `20261019T150238Z-stage6-crossover-bd17b2` | All 32 groups pass per-backend path equality; 384 complete traced samples. CPU-ready one-expert pipeline 0.182 ms versus 0.811 ms GPU miss; CPU import 0.781 ms versus 0.799 ms with overlapping pass means | Retain harness. Prototype bounded CPU-ready retention and selective execution next; no CPU dispatch or serving speedup yet |
 | Actual miss/victim identities and bounded retention replay | 6 diagnostic | `2f7fbcc1` + `6186426f…`; same accepted plain profile | Build `20261019T152721Z-stage6-request-build-553dbd`; trace `20261019T152836Z-stage6-request-trace-26f7b0`; trace-disabled lifecycle `20261019T153420Z-stage6-request-lifecycle-fe37ac` | Six exact responses and unchanged configurations. 4 GiB payload-only demand replay hits 269/916 eligible completed repeat frames and 121/599 ordinary; victim replay hits 92/916 and 116/599 | Prefer demand retention for the prototype. Replay does not establish CPU execution, RAM admission or serving gain |
+| Physical CPU-ready cache and lease qualification | 6 prototype | `e2d68773` + `cf63e7ff…`; real block 1 weights and retained native fixture vectors | Build `20261019T160306Z-stage6-native-cache-build-d8953f`; qualification `20261019T160525Z-stage6-native-cache-qualification-10411b` | All 32 retained triples and CPU contributions exact; shared capacity, alias charges, pending/failed/withdrawn fills and owner lifetime pass | Retain on `two-gpu-native-cpu-cache-experimental`. Serving handoff, multi-layer integration, host admission at the modeled 4 GiB capacity and latency remain unmeasured |
 
 
 ### Stage 0 progress — baseline and diagnostic correction
@@ -2006,12 +2007,82 @@ per-event retention replays, `retention-analysis.json`, and the reproduction
 script. No native CPU cache has yet been allocated by serving and no CPU
 dispatcher is enabled.
 
+### Stage 6 physical CPU-ready cache
+
+The experimental branch **`two-gpu-native-cpu-cache-experimental`** now contains
+the physical cache component and the harness's
+`expert-crossover --qualify-only --misses 1 --cpu-cache-prototype` path.
+Serving does not construct this cache or dispatch CPU experts.
+
+The cache shares one native-payload limit and host surplus-claim authority among
+its clients. A source inventory fixes identity, representations, geometry and
+proportional layer quotas before use. Existing leases pin their records;
+surviving tensor aliases keep their allocation charges after an entry is removed.
+Read leases also retain the cache owner. Each fill reserves before allocating,
+then reconciles backing before another fresh host claim so allocated bytes are
+not also charged as an unbacked reservation. Packing runs outside the cache
+mutex. Only complete triples become visible, and clearing the cache withdraws
+any pending publication. A capacity refusal does not invoke the builder.
+
+Measured source is **`e2d68773` + dirty digest
+`cf63e7ff60a260448e26385bf8792cecf9a42e4be8da55d407eaa2f1270b024f`**;
+build/provenance **`20261019T160306Z-stage6-native-cache-build-d8953f`** passes.
+Qualification **`20261019T160525Z-stage6-native-cache-qualification-10411b`**
+uses the previously retained native fixture vectors and real block 1 gate/up/down
+records. All 32 experts' cached bytes equal the native CPU import. CPU products
+and F32 contributions are byte-identical to the existing CPU operator control.
+The original CPU/GPU resident/import path checks also pass.
+
+One complete native triple occupies **3,092,480 bytes**. The rotation cache has
+a **6,184,960-byte** payload ceiling, retains exactly two records after rotating
+all 32 experts, and has no pending reservation at the checkpoint. Two independent
+host clients acquire those records; a third fill is refused while their leases
+remain live, without running its builder. These are shared-client checks on one
+source inventory, not a dual-GPU serving qualification.
+
+The one-record lifecycle records the following actual storage accounting:
+
+| Checkpoint | Live native bytes | Retained records | Retired records |
+| --- | ---: | ---: | ---: |
+| Cache cleared while its read lease remains | 3,092,480 | 0 | 1 |
+| Lease dropped, gate tensor alias retained | 931,840 | 0 | 1 |
+| Final alias released | 0 | 0 | 0 |
+| Recovered complete fill | 3,092,480 | 1 | 0 |
+
+An interrupted triple remains unpublished and releases its reservation. A fill
+that clears the cache before returning also remains unpublished; the following
+fill recovers. Duplicate in-progress requests do not invoke another builder.
+Foreign cache keys, source-identity rebinding and late inventory growth are
+refused. Dropping the caller's cache owner while a read lease remains retains
+the owner, and dropping that final lease introduces no ownership cycle.
+
+Reported cache-owned controls are 3,417 bytes for the two-record checkpoint and
+3,305 bytes for the one-record checkpoints. They exclude Seismic's own
+tensor/program metadata and caller-owned staging. The process peak is
+948,617,216 bytes including the independent controls and diagnostic backend
+storage. No 4 GiB cache is allocated in this run, and this does not establish
+full-model host admission or file-cache effects.
+
+This qualification is untimed and makes no cache-latency, CPU dispatch,
+model-quality or serving-speed claim. It covers Q4_K gate/up and Q5_1 down on
+the existing AVX2 CPU, with readout features used as operator operands rather
+than actual routed activations. Multi-layer inventories, other formats and
+physical GPU-owner integration remain follow-ups. No unit or integration tests
+were added or run. The experimental branch keeps its updated memory and
+evaluation contracts beside the implementation; the accepted plain serving
+control remains frozen Stage 2b.
+
+Evidence includes the exact source patches/build identities, fixture and feature
+provenance, all per-expert differences, cache lifecycle snapshots and
+`cpu-cache-qualification.json` / `checks.json` in the qualification directory.
+
 ## Immediate next action
 
 Continue **Stage 6** using the frozen Stage 2b plain serving control. The
 canonical CPU-ready crossover and retention replay justify a bounded CPU-format
-cache prototype using eligible demand records, followed by selective execution
-for one-expert misses. Account for
+cache using eligible demand records. The physical storage/lease component now
+passes its scoped qualification; connect explicit activation/result publication
+and selective execution for one-expert misses next. Account for
 cache hit rate, import cost, file-cache displacement, worker contention and
 activation/result publication; retaining another copy of raw GGUF bytes alone
 does not obtain the measured CPU-ready cost. Keep original router choices,
@@ -2022,7 +2093,7 @@ CPU configurations. Keep GPU execution as the default until affected serving
 measurements justify a CPU path. Two-miss work and other weight formats remain
 follow-ups, not established crossovers.
 
-The first physical cache must share one host budget across both owners and
+The serving cache must share one host budget across both owners and
 protect ordinary runtime reserves. In-flight read leases retain their charges;
 dropping a cache entry cannot release its accounting while a tensor handle or
 submitted consumer still retains the storage. Publish only complete packed

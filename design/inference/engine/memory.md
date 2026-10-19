@@ -111,6 +111,19 @@ needs no new growth claim; it cannot allocate beyond the reused capacity.
 The host model census reports this cache once, separately from device weight
 charges; pressure probes release its unleased records before refusing growth.
 
+Optional CPU-ready expert retention uses the same fresh host surplus claims.
+One cache and native-payload ceiling are shared by its consumers. An immutable
+source inventory fixes representations, record geometry and proportional layer
+quotas before use. Reservations count before backing; once backed they become
+observed holdings rather than another deduction from fresh headroom. Only a
+complete packed triple becomes readable. A clear withdraws pending publication.
+Read leases and surviving tensor aliases retain their storage charge through
+physical release, including after eviction. Insufficient unleased capacity
+bypasses an optional fill without running its builder. Cache controls are
+claimed and reported separately from native payloads; caller-owned import
+staging and programs remain their owners' holdings. Retention alone neither
+enables CPU dispatch nor grants numerical admission.
+
 The device reserve is sized by measurement on the smallest supported devices. With every byte of
 the engine's device usage charged or held (Standing and claims), what remains is the residual: the
 capacity less observed headroom less `held`. On an 8 GiB A10-8Q vGPU (CUDA, WDDM) it stayed within

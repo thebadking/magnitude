@@ -36,6 +36,7 @@ mod residency;
 mod resident_weights;
 mod streaming;
 pub use streaming::cache::HostExpertCache;
+pub use streaming::cpu_cache::{CpuExpertCache, CpuExpertCacheSnapshot, CpuExpertLayer, CpuExpertLayerSpec, CpuExpertLease};
 mod resources;
 
 pub use completion::{Completed, Completion, CompletionWake};

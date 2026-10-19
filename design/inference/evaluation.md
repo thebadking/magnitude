@@ -92,6 +92,12 @@ Rules for every measurement:
   equality precede timing; cross-backend differences remain diagnostics, not
   numerical admission or a serving-speed claim. Canonical-only studies state
   their scope and cannot exclude unmeasured qualified alternatives.
+  A physical retention qualification uses actual packed buffers and the same
+  fixture-bound operators. It verifies capacity shared by independent clients,
+  unreadability of pending triples, retained alias charges, failed and withdrawn
+  fills, and recovery. Native-payload capacity is distinct from control and
+  staging memory; these checks do not establish full-model host admission or
+  a serving speedup.
 - **Tuning:** first-load tuning runs under an explicit budget. Fresh tuning ignores stored tuning results and keeps compiled kernels. The tuning trace and outcome are part of every measured run.
 
 ## Comparison

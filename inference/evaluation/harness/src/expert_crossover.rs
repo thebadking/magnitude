@@ -1,4 +1,5 @@
 //! An operator/storage diagnostic. It never dispatches experts for serving.
+mod cache;
 use crate::{Inputs, Rendered, digest::sha256_hex, render::RenderedFile};
 use clap::Args;
 use magnitude_artifacts::gguf::Encoding;
@@ -40,6 +41,9 @@ pub struct Options {
     /// Check imports and per-backend path equality without collecting timings.
     #[arg(long)]
     qualify_only: bool,
+    /// Qualify the physical CPU-ready cache with real weights and fixture vectors.
+    #[arg(long)]
+    cpu_cache_prototype: bool,
 }
 
 fn why(error: impl Display) -> String {
@@ -941,6 +945,10 @@ pub fn run(
     digest: &str,
 ) -> Result<(Value, Vec<String>), String> {
     require(
+        !options.cpu_cache_prototype || (options.qualify_only && options.misses == 1),
+        "CPU cache prototype qualification requires --qualify-only and --misses 1",
+    )?;
+    require(
         options.experts >= 32
             && options.experts <= 64
             && matches!(options.misses, 1 | 2)
@@ -1104,6 +1112,17 @@ pub fn run(
             ));
         }
     }
+    let cache_qualification = if options.cpu_cache_prototype {
+        let result = cache::qualify(&cpu, &weights, &catalog)?;
+        std::fs::write(
+            inputs.run.path("cpu-cache-qualification.json"),
+            serde_json::to_vec_pretty(&result).map_err(why)?,
+        )
+        .map_err(why)?;
+        Some(result)
+    } else {
+        None
+    };
     let mut rounds = Vec::new();
     if !options.qualify_only {
         let cpu_trace = cpu
@@ -1219,7 +1238,7 @@ pub fn run(
             "cpu_memory_usage": format!("{:?}", cpu.device.memory_usage()),
             "gpu_memory_usage": format!("{:?}", gpu.device.memory_usage())},
         "backends": {"cpu": backend_identity(&cpu), "gpu": backend_identity(&gpu)},
-        "qualification": qualification, "rounds": rounds,
+        "qualification": qualification, "cpu_cache_qualification": cache_qualification, "rounds": rounds,
         "boundary": "Complete expert contribution from RAM: resident graphs, or CPU imports / GPU blocking uploads and bank conversion; CPU includes activation and result transport. File service, routing, serving and contention excluded.",
         "limitations": ["Readout vectors are not actual routed-layer activation captures", "Canonical implementations only; no tuning or exclusion of other qualified CPU configurations", "GPU is otherwise idle during CPU work; no overlap or model contention is represented", "Traced operator intervals are diagnostic and do not establish a generation speedup"]});
     std::fs::write(
