@@ -15,6 +15,9 @@ pub struct ReplayOptions {
     /// Export raw CUDA accumulators after reconstructing routed publications.
     #[arg(long, requires = "grouped_cpu_recipe")]
     raw_gpu_projections: bool,
+    /// Round the scalar group partial after each 16-product half.
+    #[arg(long, requires = "grouped_cpu_recipe")]
+    half_group_rounding: bool,
 }
 
 fn string<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
@@ -268,7 +271,9 @@ pub fn run(
             .map_err(why)?
             .value;
         let grouped = activations.as_ref().map(|activation| {
-            let candidate = super::grouped::evaluate(&cpu,&weights,&input,&expected_gpu.product,activation)?;
+            let rounding = if options.half_group_rounding { seismic::cpu::weights::GroupRounding::Halves16 }
+                else { seismic::cpu::weights::GroupRounding::Whole32 };
+            let candidate = super::grouped::evaluate(&cpu,&weights,&input,&expected_gpu.product,activation,rounding)?;
             let raw = options.raw_gpu_projections.then(|| super::projections::observe(
                 &gpu,&candidate,&expected_gpu.product,&expected_gpu.result,activation,
                 &inputs.run.path("raw-projections"),path.file_stem().and_then(|s|s.to_str()).ok_or("invalid capture stem")?,h,f)).transpose()?;
@@ -278,7 +283,8 @@ pub fn run(
                 "gpu_silu_contribution":difference(&expected_gpu.result,&candidate.result_gpu_silu)?,
                 "down_same_gpu_product":difference(&expected_gpu.result,&candidate.result_same_gpu_product)?,
                 "raw_gpu_projections":raw,
-                "scope":"Scalar grouped coefficients, F64 group partials and F32 folds, one part; no serving or speed claim"}))
+                "partial_rounding":format!("{rounding:?}"),
+                "scope":"Scalar grouped coefficients, explicit F64 partial/F32 publication recipe and F32 folds, one part; no serving or speed claim"}))
         }).transpose()?;
         rows.push(json!({"capture":path.file_name().and_then(|s|s.to_str()),"sequence":sequence,"layer":record["layer"],"expert":record["expert"],"grouped_cpu_recipe":grouped,
             "retained_native_equal_fresh_import":native_equal,

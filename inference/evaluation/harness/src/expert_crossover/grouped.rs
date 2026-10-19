@@ -1,6 +1,8 @@
 //! A numerical recipe experiment on actual captured operands, not serving.
 use super::*;
-use seismic::cpu::weights::{Q4K, Q5G32M, Q5G32S, Q5K, Q8, Rows8, affine_grouped_dot};
+use seismic::cpu::weights::{
+    GroupRounding, Q4K, Q5G32M, Q5G32S, Q5K, Q8, Rows8, affine_grouped_dot,
+};
 use seismic::cpu::{Bf16, Dense};
 
 pub(super) struct Activations {
@@ -57,15 +59,25 @@ impl Activations {
     }
 }
 
-fn dot(weight: &Weight, native: &[u8], x: &[f32], out: &mut [f32]) -> Result<(), String> {
+fn dot(
+    weight: &Weight,
+    native: &[u8],
+    x: &[f32],
+    rounding: GroupRounding,
+    out: &mut [f32],
+) -> Result<(), String> {
     let rows = weight.shape[1] as usize;
     let k = weight.shape[2] as usize;
     let result = match weight.cpu.name() {
-        "q4k@rows8" => affine_grouped_dot::<Rows8<Q4K>>(native, rows, k, 0, x, 1, out),
-        "q5k@rows8" => affine_grouped_dot::<Rows8<Q5K>>(native, rows, k, 0, x, 1, out),
-        "q5g32s@rows8" => affine_grouped_dot::<Rows8<Q5G32S>>(native, rows, k, 0, x, 1, out),
-        "q5g32@rows8" => affine_grouped_dot::<Rows8<Q5G32M>>(native, rows, k, 0, x, 1, out),
-        "q8g32s@rows8" => affine_grouped_dot::<Rows8<Q8>>(native, rows, k, 0, x, 1, out),
+        "q4k@rows8" => affine_grouped_dot::<Rows8<Q4K>>(native, rows, k, 0, x, 1, rounding, out),
+        "q5k@rows8" => affine_grouped_dot::<Rows8<Q5K>>(native, rows, k, 0, x, 1, rounding, out),
+        "q5g32s@rows8" => {
+            affine_grouped_dot::<Rows8<Q5G32S>>(native, rows, k, 0, x, 1, rounding, out)
+        }
+        "q5g32@rows8" => {
+            affine_grouped_dot::<Rows8<Q5G32M>>(native, rows, k, 0, x, 1, rounding, out)
+        }
+        "q8g32s@rows8" => affine_grouped_dot::<Rows8<Q8>>(native, rows, k, 0, x, 1, rounding, out),
         _ => None,
     };
     result.ok_or_else(|| "grouped CPU recipe does not support this weight geometry".into())
@@ -88,6 +100,7 @@ pub(super) fn evaluate(
     input: &[u8],
     gpu_product: &Tensor,
     activation: &Activations,
+    rounding: GroupRounding,
 ) -> Result<Candidate, String> {
     let normalized: Vec<f32> = input
         .chunks_exact(2)
@@ -101,8 +114,8 @@ pub(super) fn evaluate(
     )?;
     let (h, f) = (weights[0].shape[2] as usize, weights[0].shape[1] as usize);
     let (mut gate, mut up) = (vec![0.0_f32; f], vec![0.0_f32; f]);
-    dot(&weights[0], &native[0], &normalized, &mut gate)?;
-    dot(&weights[1], &native[1], &normalized, &mut up)?;
+    dot(&weights[0], &native[0], &normalized, rounding, &mut gate)?;
+    dot(&weights[1], &native[1], &normalized, rounding, &mut up)?;
     let mut product = Vec::with_capacity(f);
     let mut gpu_silu = Vec::with_capacity(f);
     for (&g, &u) in gate.iter().zip(&up) {
@@ -122,7 +135,7 @@ pub(super) fn evaluate(
     let down = |product: &[u16]| -> Result<(Tensor, Vec<f32>), String> {
         let x: Vec<f32> = product.iter().map(|&v| Bf16::widen(v)).collect();
         let mut result = vec![0.0_f32; h];
-        dot(&weights[2], &native[2], &x, &mut result)?;
+        dot(&weights[2], &native[2], &x, rounding, &mut result)?;
         let bytes: Vec<u8> = result
             .iter()
             .map(|&v| 0.0_f32 + 1.0_f32.mul_add(Bf16::round(v), 0.0))

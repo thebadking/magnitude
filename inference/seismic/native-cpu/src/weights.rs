@@ -2144,8 +2144,18 @@ pub unsafe fn decode_row<W: Format>(
     }
 }
 
-/// A scalar numerical recipe for packed affine projections. Each 32-code
-/// partial and activation sum is accumulated in F64 and rounded once to F32;
+/// Explicit intermediate publications for the scalar grouped recipe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GroupRounding {
+    /// Sum all 32 products in F64, then publish one F32 partial.
+    Whole32,
+    /// Sum 16 products in F64; combine with the prior F32 partial and round
+    /// back to F32 after each half. This does not specify MMA's internal order.
+    Halves16,
+}
+
+/// A scalar numerical recipe for packed affine projections. Code products
+/// and activation sums use F64, with explicit F32 publications per `rounding`;
 /// scale and bias fold through separate F32 FMAs in group order. Consecutive
 /// 256-value ranges split into `parts` and reduce in part order. This is not
 /// the ordinary CPU dot and does not promise another backend's MMA bit pattern.
@@ -2156,6 +2166,7 @@ pub fn affine_grouped_dot<W: Format>(
     first: usize,
     x: &[f32],
     parts: usize,
+    rounding: GroupRounding,
     out: &mut [f32],
 ) -> Option<()> {
     if W::DENSE_BYTES != 0
@@ -2188,15 +2199,24 @@ pub fn affine_grouped_dot<W: Format>(
             for p in begin..end {
                 // SAFETY: p names a complete packet of this live row.
                 let packet = unsafe { W::affine_packet(row, &resolved, p, k) }?;
-                let mut dot = 0.0_f64;
-                let mut sum = 0.0_f64;
-                for (code, value) in packet.codes.iter().zip(&x[p * 32..(p + 1) * 32]) {
-                    dot += f64::from(*code) * f64::from(*value);
-                    sum += f64::from(*value);
+                let width = match rounding {
+                    GroupRounding::Whole32 => 32,
+                    GroupRounding::Halves16 => 16,
+                };
+                let (mut group_dot, mut group_sum) = (0.0_f32, 0.0_f32);
+                for begin in (0..32).step_by(width) {
+                    let (mut dot, mut sum) = (0.0_f64, 0.0_f64);
+                    for i in begin..begin + width {
+                        let value = f64::from(x[p * 32 + i]);
+                        dot += f64::from(packet.codes[i]) * value;
+                        sum += value;
+                    }
+                    group_dot = (f64::from(group_dot) + dot) as f32;
+                    group_sum = (f64::from(group_sum) + sum) as f32;
                 }
-                partial[part] = packet.scale.mul_add(dot as f32, partial[part]);
+                partial[part] = packet.scale.mul_add(group_dot, partial[part]);
                 if packet.has_bias {
-                    partial[part] = packet.bias.mul_add(sum as f32, partial[part]);
+                    partial[part] = packet.bias.mul_add(group_sum, partial[part]);
                 }
             }
         }

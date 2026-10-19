@@ -114,7 +114,8 @@ Rules for every measurement:
   replay and cross-backend differences grant neither numerical admission nor
   model quality or speed claims.
   A numerical recipe experiment may compare group-factored packed projections
-  on those retained operands. It records group-partial and fold precision
+  on those retained operands. It records group-partial precision, intermediate
+  subgroup publications and fold precision
   explicitly. An exhaustive scalar activation domain is independent of model
   inputs and can isolate pointwise publication differences; its generated
   function table is not model output or qualification evidence. Scalar recipes
