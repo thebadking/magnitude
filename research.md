@@ -2478,9 +2478,25 @@ generation. Retain this I/O imbalance explicitly; the run does not establish its
 cause or isolate a disk contribution to the timing gap. The thermal gate passes
 and recorded GPU temperature reaches at most 48 °C.
 
+RAM is already serving the warm source reads. Across the four candidate
+generation-delivery windows, Linux reports **56.432–56.569 GiB cached**, only
+**0.445–0.519 GiB free**, and **53.711–53.775 GiB available**, on a host with
+62.696 GiB usable RAM. Available includes reclaimable file cache; it is not
+additional unused capacity. Managed host expert retention is explicitly zero,
+but buffered source reads still use Linux's file cache. These are system-wide
+point samples, not a model-only residency census or a memory-pressure trace.
+The zero physical reads in every candidate window show that more RAM retention
+has no demonstrated disk-saving benefit for these warm requests. They do not
+qualify cold starts, longer contexts or wider routing coverage. A managed cache
+can avoid other source/import work, but its copies compete with the existing
+file cache; count the overlap and measure it rather than treating available RAM
+as an unoccupied extra tier. Remaining generation time is not attributed among
+host copies, transfer, launches and device work by these I/O samples.
+
 **Retain this as a qualified capacity/accounting prototype, without default
-promotion or a serving speedup claim.** Next measure prompt grouping on the same
-frozen candidate source. Separately audit startup phase overlap and the largest
+promotion or a serving speedup claim.** The next experiment compares prompt
+grouping on this frozen source (Stage 7b below). Separately audit startup phase
+overlap and the largest
 import contributors: source inspection places qualification fixtures before
 model import, but the current range bound retains the combined conservative
 startup/import allowance. Do not reduce it without verifying all retained
@@ -2498,6 +2514,37 @@ retains `analysis.json`, `analyze.py`, raw observations, I/O, RAM and temperatur
 samples, cache assessments and selected configurations. No unit or integration
 tests were added or run.
 
+### Stage 7b — Group 1 exposes a second-owner reservation failure
+
+Qualification run **`20261019T200146Z-stage7-grouping-strict-918530`** compares
+group 8 with group 1 on the exact frozen Stage 7a engine and harness, at context
+1024 and with the same fixtures and policies. Group 8 returns all three valid
+responses. Group 1 reaches readiness, then unloads on its first actual prose
+request with **`distributed target reservation: Output requires 1 units; 0
+available`**. The continuation and tool requests subsequently report the unloaded
+worker. No timing comparison or lifecycle qualification follows this failure.
+Selected GPU configurations are unchanged.
+
+Group 1's planner selects **205/211 records per layer**, versus group 8's
+201/206, and its ready census reports lower compute charges. These are planning
+and readiness observations only; they establish no serving benefit. The failed
+request is an output-lease reservation error, not evidence of RAM exhaustion or
+a device out-of-memory failure. Source inspection finds that the first owner's
+ordinary and speculative paths check their own launch leases, while the native
+family acquires the second owner's leases later during submission. Trace the
+fixed scratch and retained-output lifetimes and make admission cover both owners
+before either submits; do not hide the mismatch by disabling lookahead or
+weakening memory claims.
+
+The final memory query receives HTTP 503 after the worker unloads, so the outer
+failure report records that secondary error. The raw engine log and request
+observations retain the original output shortage; the checks file remains
+`running` because that query prevents normal finalization. Preserve these raw
+artifacts. Diagnostic assessment parsing must also distinguish prepare-only
+and actual-load records: group 1 logs both consistent owner pairs, whereas the
+initial script expects exactly one pair. That parser assumption did not cause
+the serving failure.
+
 ## Immediate next action
 
 Begin **Stage 7** using the frozen Stage 2b plain serving control. This is a
@@ -2510,13 +2557,16 @@ traffic without introducing a different CPU arithmetic path.
 
 The **Stage 7a** owner-budget candidate now passes its scoped serving/lifecycle
 gates and completes its comparison, with a measured capacity increase but no accepted speedup.
-Keep its exact source and binaries frozen. **Stage 7b** will compare prompt
-group **8 versus 1** on that same candidate build, at the existing 1024-token
-context and with unchanged fixtures and other policies. Declare it as an
-experimental profile comparison, with Stage 2b still the accepted reference for
-later cumulative qualification. Requalify text, tools, usage, lifecycle and
-native selections for group 1 before timing. Use the same thermal-gated A/B/B/A
-schedule, two warmups per fixture and launch, and the existing ordinary primary
+Keep its exact source and binaries frozen. **Stage 7b** first needs the
+second-owner reservation failure repaired in a separate source candidate.
+Preserve and hash-check independent copies of both current binaries before
+reusing their target directory. Requalify group **8 versus 1** on the repaired
+candidate at the existing 1024-token context, with unchanged fixtures and other
+policies. Declare it as an experimental profile comparison, with Stage 2b still
+the accepted reference for later cumulative qualification. Requalify text,
+tools, usage, lifecycle and native selections for group 1 before timing, and
+retain prepare-only and serving assessment records separately. Use the same
+thermal-gated A/B/B/A schedule, two warmups per fixture and launch, and the existing ordinary primary
 bar. Record actual capacity, RAM, I/O, prefill and generation costs, including any
 changed native choices. This measures a workload-specific profile; it does not
 authorize changing the default or extrapolating to long prompts.
