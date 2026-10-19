@@ -194,7 +194,7 @@ impl DecoderPlacement {
                         "fit_state_bytes":memory.exact_resident_bytes.checked_sub(candidate.weight_bytes()).ok_or("range resident charge differs from weights")?,
                         "host_shared_weight_bytes":memory.shared_weight_bytes,
                         "host_shared_graph_upload_bytes":memory.bounds.shared_upload_bytes,
-                        "fit_depth":definition.decoder.context_limit.min(100_000),"weight_cap":weight_cap,
+                        "fit_depth":charge.state_depth,"weight_cap":weight_cap,
                     })
                 );
                 return Ok(candidate);

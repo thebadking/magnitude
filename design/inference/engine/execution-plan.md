@@ -962,12 +962,16 @@ leases, unwritten-fill rollback, publication nor admission. Unset replacement
 policy retains ordinary recency.
 Startup sizes each local shared cache against that owner's complete allocation
 bound. It enumerates exact local inventories from full local expert capacity
-downward. Each candidate includes local slab-rounded state for the standard fit
-workload, checked range graphs, invocation storage, incoming boundary buffers
+downward. Each candidate includes local slab-rounded state for one conversation
+at the load's full configured context, including its in-flight recurrent banks,
+checked range graphs, invocation storage, incoming boundary buffers
 and the physical import/qualification peak. Host-shared staging and graph uploads
 are excluded from dedicated device charge. Each owner's stable capacity and
 ordinary reserve remain independent; a whole-decoder weight-only allowance is
-not a substitute for this bound. Explicit weight caps still constrain the
+not a substitute for this bound. The metadata assessment's capped workload does
+not authorize consuming capacity required for the loaded context's later history
+growth. This state allowance is an allocation bound, not eager slab allocation;
+every actual growth still requires the ordinary fresh claim. Explicit weight caps still constrain the
 physical inventory. Final range admission independently checks the sealed graphs,
 startup state, boundary buffers and import peak before allocation.
 

@@ -419,6 +419,7 @@ impl AssessmentGraphResourceBounds {
 pub(super) struct RangeMemoryCharge {
     pub memory: AssessmentMemoryCharge,
     pub preparation_bytes: u64,
+    pub state_depth: u64,
 }
 
 impl RangeMemoryCharge {
@@ -476,7 +477,11 @@ pub(super) fn range_memory_charge(
         Some(range.range().blocks.clone()),
     )
     .map_err(|error| error.to_string())?;
-    let fit = state.fit_state_bytes_by_owner(terms.fit_depth, terms.recurrent_banks)?;
+    // Cache placement consumes persistent capacity for this loaded context,
+    // rather than the capped workload used by metadata-only assessment.
+    // Later history growth must not compete with already admitted experts.
+    let state_depth = definition.decoder.context_limit;
+    let fit = state.fit_state_bytes_by_owner(state_depth, terms.recurrent_banks)?;
     let startup = state.startup_state_bytes_by_owner()?;
     // Import ends before the initial state is allocated. Preparation has
     // neither the model's physical weights nor its graph pools and is
@@ -491,6 +496,7 @@ pub(super) fn range_memory_charge(
     )?;
     Ok(RangeMemoryCharge {
         memory,
+        state_depth,
         preparation_bytes: range.preparation_peak_bytes(
             definition,
             policy.codec(),
