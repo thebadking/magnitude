@@ -2438,11 +2438,13 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "libc",
+ "magnitude-artifacts",
  "magnitude-chat",
  "magnitude-engine",
  "magnitude-executor",
  "magnitude-family-contracts",
  "magnitude-generation",
+ "magnitude-kernels",
  "magnitude-scheduler",
  "magnitude-serving",
  "magnitude-state",

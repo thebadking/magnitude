@@ -207,6 +207,16 @@ Active snapshot and read-only reproduction script:
 Controlled delivery-window counters and limits:
 `20261019T133130Z-stage5-comparison-2f88c4/analysis.json`.
 
+A read-only check at **2026-10-19 15:06:33 UTC**, after the Stage 6 operator
+job exited, found **53.141 GiB `Cached`, 7.232 GiB actually free and 60.579 GiB
+`MemAvailable`**. No Magnitude process was running and both GPUs were idle.
+This is not peak inference occupancy or a model-page inventory. Most available
+RAM remains reclaimable file cache; allocating another raw-weight cache would
+compete with it. The operator result below identifies a different possible use:
+retaining CPU-ready expert records could avoid both packing and GPU transfers,
+if a bounded selective CPU path passes serving qualification.
+Snapshot and reproduction script: `20261019T150633Z-idle-ram-diagnostic/`.
+
 ### Confirmed code observations
 
 - [CUDA upload](inference/seismic/backends/cuda/src/driver.rs) calls
@@ -533,6 +543,7 @@ before running it; fill measured fields only from saved artifacts.
 | Four-warp CUDA bank conversion | 5a | `356ab093` + `fd8ff569…`; frozen Stage 2b plain control | Build `20261019T131221Z-stage5-build-b663af`; serving `20261019T131615Z-stage5-strict-d25818` | Ordinary continuation changed from 60-token stop to 64-token length; three attention configurations also changed after module-wide tuning invalidation | Failed serving gate; conversion effect is not isolated. Revert launch declaration and defer this experiment; no speed comparison |
 | Shared extraction for packed low/high planes | 5b | `356ab093` + `f906f66c…`; frozen Stage 2b plain control | Build `20261019T132409Z-stage5-build-c23e98`; serving `20261019T132526Z-stage5-strict-3a0610`; lifecycle `20261019T132942Z-stage5-lifecycle-6aed11`; comparison `20261019T133130Z-stage5-comparison-2f88c4` | All gates and 24 benchmark responses exact, with identical unrelated kernel configurations. Repeat generation −4.515%, total −2.101%; ordinary generation −2.850%, total −1.551% | Keep experimental packing source; ordinary primary metric remains below the declared 3% bar. Preserve Stage 2b as the accepted plain control |
 | Separate source and blocking upload service | 6 diagnostic | `6572bbd2` + `e84abda8…`; accepted plain profile, Stage 5 frozen output controls | Build `20261019T135156Z-stage6-build-63ee63`; diagnostic `20261019T135740Z-stage6-source-service-5f527a`; trace-disabled lifecycle `20261019T140411Z-stage6-lifecycle-7f6abd` | Six exact responses and identical selected configurations; both owner traces present. Ordinary blocking uploads average 327.121 µs per 3.125 MB expert; trace-disabled retention/cancellation/recovery passes | Retain opt-in diagnostics. No speed or CPU-crossover claim; measure matched CPU work next |
+| Canonical expert operator crossover | 6 diagnostic | `513376a8` + `3ccacadb…`; fresh native feature export, real block 1 weights | Capture `20261019T144558Z-stage6-feature-capture-a916e2`; build `20261019T150219Z-stage6-crossover-build-7d6fd6`; timed comparison `20261019T150238Z-stage6-crossover-bd17b2` | All 32 groups pass per-backend path equality; 384 complete traced samples. CPU-ready one-expert pipeline 0.182 ms versus 0.811 ms GPU miss; CPU import 0.781 ms versus 0.799 ms with overlapping pass means | Retain harness. Prototype bounded CPU-ready retention and selective execution next; no CPU dispatch or serving speedup yet |
 
 
 ### Stage 0 progress — baseline and diagnostic correction
@@ -1797,7 +1808,7 @@ which must not be conflated with these warm delivery windows.
 Miss-bearing bank requests average **1.588/1.414 installed experts** for
 repeat/ordinary. A CPU study should start with small missed subsets rather than
 assume all ten selected experts miss. These averages do not provide the full
-per-layer miss-count or latency distribution. The CPU has existing rows8/rows16
+per-layer miss-count or latency distribution. The CPU has existing rows8
 packed paths and GGUF import code; compare compatible representations and
 include import cost instead of silently treating CUDA's `mma16` records as
 CPU-ready. Rotate enough real expert weights to distinguish cache-resident CPU
@@ -1822,18 +1833,112 @@ Artifacts include complete patches, source identities, native renders, raw
 observations, log/IO window offsets, thermal records, selected configurations,
 `source-service-analysis.json`, and the launcher/driver/summarizer.
 
+### Stage 6 canonical CPU/GPU expert crossover
+
+The harness now has an `expert-crossover` diagnostic and an untimed
+`--qualify-only` mode. It checks fixture/render/artifact identity before using
+retained native feature rows. Fresh capture
+**`20261019T144558Z-stage6-feature-capture-a916e2`** exports four finite BF16
+readout vectors at positions 395–398, width 2,560, from the canonical
+zero-history continuation conversation. Its native rendered digest is
+`cceb7907050d430f7aa56b3bca4808362d4aa871a900fa38e1e1a14ea62ef870`.
+These are readout vectors used as projection operands, **not captured routed
+activations**. This is an operator study, not a model-quality qualification.
+
+Final measured source is **`513376a8` + dirty digest
+`3ccacadbc6affa1690dc38ea90eb7238f24aedff4db6d9025d94ec14c813117e`**;
+build/provenance **`20261019T150219Z-stage6-crossover-build-7d6fd6`** passes.
+The native CPU defaults use rows8, `INT8=0`, AVX2 and the ordinary physical-core
+worker pool; zero worker parameters mean the pool's participants, not serial
+execution. CUDA uses canonical TPW=1 / KSPLIT=1. Neither backend is tuned in
+this study, and no alternatives are ruled out.
+
+The study rotates the first 32 real experts of block 1: Q4_K gate/up and Q5_1
+down, hidden width 2,560 and intermediate width 640. Raw records total
+**98,304,000 bytes**; each backend's packed set totals **98,959,360 bytes**.
+Both exceed this host's combined 64 MiB L3. CPU uses rows8 records and CUDA
+uses mma16 records. Each invocation selects one expert. Gate/up publishes BF16;
+down preserves the BF16 per-expert publication before returning its F32
+contribution with a unit coefficient. No router-selection or serving claim is
+made from these control coefficients.
+
+Both backends' native imports match their registered host packing reference.
+Across all 32 groups, CPU resident/import and GPU resident/miss paths produce
+byte-identical products and contributions, with finite outputs. Untimed
+qualification **`20261019T150147Z-stage6-crossover-qualification-4107ed`** passes;
+the final timed source repeats these checks before measuring. Cross-backend
+products are exact in 20/32 groups and contributions in 10/32. Maximum absolute
+differences are 0.001953125 / 0.015625, with maximum relative RMS
+0.000015803 / 0.000216196. These are retained diagnostics, not numerical
+admission thresholds or a greedy-parity result.
+
+Comparison **`20261019T150238Z-stage6-crossover-bd17b2`** passes the thermal gate
+under one exclusive lease. Three GPU/CPU/CPU/GPU comparisons cover resident
+operators, CPU resident versus GPU miss, and CPU import versus GPU miss. Each
+pass warms and rotates the full set. All **384 samples** have complete native
+submission traces, with exactly the expected imports/converter and expert
+launches. Each sample completes one graph submission. Conditioning, trace
+collection, setup and correctness checks are outside its pipeline interval.
+
+| Comparison | Path | Mean completed pipeline, µs | Range of two pass means, µs |
+| --- | --- | ---: | ---: |
+| Resident operators | GPU resident | 40.760 | 39.448–42.073 |
+| Resident operators | CPU resident, including transport | 184.372 | 183.795–184.948 |
+| CPU-ready crossover | GPU miss | 810.903 | 796.390–825.415 |
+| CPU-ready crossover | CPU resident, including transport | 181.967 | 181.776–182.158 |
+| Import crossover | GPU miss | 799.117 | 796.539–801.695 |
+| Import crossover | CPU import, execution and transport | 781.042 | 762.580–799.504 |
+
+The CPU-ready path is approximately **4.46× faster than a GPU miss** for this
+isolated one-expert work, beyond both sides' observed spread. CPU import has
+overlapping pass means with GPU miss; its nominal 2.26% reduction is **not a
+reliable win**. GPU-resident work remains substantially faster than CPU work.
+
+In the CPU-ready comparison, GPU uploads average **245.564 µs** for 3.072 MB
+over three synchronous pinned-source copies. Its graph averages **555.711 µs
+of device interval**, including bank conversion and both expert projections.
+CPU's graph averages **155.444 µs of device interval**, with approximately
+8.678 µs activation transport and 8.342 µs result transport. CPU return includes
+canonical host readback/staging and H2D. These are traced operator intervals;
+they do not attribute total generation latency or isolate individual GPU
+launch times. File service starts outside the interval with raw records in RAM.
+
+Read-only PCIe sampling during the operator job observes **16.0 GT/s, x8** on
+GPU 0, resolving the earlier idle Gen1 ambiguity. Both cards also report that
+link state during the job, but only GPU 0 runs measured expert work. CPU/GPU
+contention from a live model, other quantizations/layers, two simultaneous
+misses, actual routed activations and serving integration remain unmeasured.
+Per-device allocations are capped at 1 GiB; sampled peak process footprint is
+917,204,992 bytes. This does not establish headroom during full-model serving.
+
+Setup failures remain explicit: two oversized fixture attempts
+(`142725Z…f13ddd`, `143243Z…8e2313`), a driver syntax failure (`145422Z…85899c`),
+incorrect CPU transfer/host-window use (`145548Z…ea920f`, `145846Z…67c720`), and
+output-lease reuse (`150008Z…e2eca0`). All use the `20261019T` prefix in local
+results. The final harness uses supported CPU copies and recycles family output
+leases only after exported handles are released. No timing from a failed run
+is admitted. No unit or integration tests were added or run.
+
+Retain the diagnostic harness and the frozen measured source. Artifacts retain
+the exact patches, feature producer/bytes/digests, tensor names/record hashes,
+canonical configurations, per-group differences, all sample intervals, PCIe
+observations, thermal evidence and `analysis.json` / `summarize.py`. There is
+still **no serving CPU dispatcher, CPU payload cache or generation speedup**.
+
 ## Immediate next action
 
-Continue **Stage 6** using the frozen Stage 2b plain control. Source/upload
-service is now measured; obtain the **fixture-derived CPU/GPU expert crossover**
-on this AVX2 host next. Use real model weights, the actual semantic activation
-rounding and small missed subsets. Measure CPU resident execution and
-import-plus-execution separately, with weight rotation beyond last-level CPU
-cache. Include GPU conversion/execution and activation/result transport before
-deciding whether a selective CPU path is justified. Preserve normal numerical
-admission and the fixed tuning budget; retain GPU execution unless the crossover
-and affected serving measurements justify a CPU path. Do not infer CPU benefit
-merely from file-cache occupancy or low physical disk bytes.
+Continue **Stage 6** using the frozen Stage 2b plain serving control. The
+canonical CPU-ready crossover justifies a bounded CPU-format expert-cache
+prototype and selective execution for small GPU-missed subsets. Account for
+cache hit rate, import cost, file-cache displacement, worker contention and
+activation/result publication; retaining another copy of raw GGUF bytes alone
+does not obtain the measured CPU-ready cost. Keep original router choices,
+per-expert rounding and slot-order accumulation. Use actual routed work and
+normal numerical/greedy, tool and lifecycle gates before a serving comparison.
+Preserve the 30-second tuning budget and normal admission for any additional
+CPU configurations. Keep GPU execution as the default until affected serving
+measurements justify a CPU path. Two-miss work and other weight formats remain
+follow-ups, not established crossovers.
 
 Keep Stage 4's causal-head MTP and Stage 5's fragment-packing sources as separate
 experimental controls. Neither met its ordinary primary generation bar; do not

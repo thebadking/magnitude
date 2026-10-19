@@ -14,11 +14,13 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 libc.workspace = true
+magnitude-artifacts = { path = "../../engine/artifacts" }
 magnitude-chat = { path = "../../engine/chat" }
 magnitude-engine = { path = "../../engine" }
 magnitude-executor = { path = "../../engine/executor" }
 magnitude-family-contracts = { path = "../../engine/families/contracts" }
 magnitude-generation = { path = "../../engine/generation" }
+magnitude-kernels = { path = "../../engine/kernels" }
 magnitude-scheduler = { path = "../../engine/scheduler" }
 magnitude-serving = { path = "../../engine/serving" }
 magnitude-state = { path = "../../engine/state" }

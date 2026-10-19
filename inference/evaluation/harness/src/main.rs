@@ -30,6 +30,7 @@ mod development;
 mod digest;
 mod draft;
 mod engine;
+mod expert_crossover;
 mod fixture;
 mod logits;
 #[cfg(feature = "precision-probe")]
@@ -67,6 +68,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Compare canonical CPU and CUDA expert operators on fixture-derived features.
+    ExpertCrossover {
+        #[command(flatten)]
+        common: Common,
+        #[command(flatten)]
+        study: expert_crossover::Options,
+    },
     /// The engine's worker over standard streams: what the harness starts
     /// itself as for a model's Prepare, when a load finds tuning records
     /// missing.
@@ -508,6 +516,15 @@ fn tuned(
 
 fn run(command: Command) -> Result<(), String> {
     match command {
+        Command::ExpertCrossover { common, study } => {
+            let inputs = Inputs::read(&common, "harness.expert_crossover")?;
+            let rendered = inputs.render(study.context)?;
+            let digest = inputs.write_rendered(&rendered)?;
+            let (result, devices) = expert_crossover::run(&inputs, &study, &rendered, &digest)?;
+            let mut measurements = Map::new();
+            measurements.insert("expert_crossover".into(), result);
+            inputs.finish(digest, Some(devices), measurements, Map::new())
+        }
         Command::Worker {
             #[cfg(feature = "tuning-survey")]
             survey,

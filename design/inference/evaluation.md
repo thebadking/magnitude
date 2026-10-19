@@ -82,6 +82,16 @@ Rules for every measurement:
   converting their representation or changing sampling or acceptance. A packed
   projection may prepare its own features from the final hidden rows; exported
   features alone do not establish that its internal staging is identical.
+- An expert-operator crossover may consume retained native feature rows only
+  when their producer, model, rendered-input digest, row mapping, element and
+  bytes are recorded and match the fixture. Readout features used as projection
+  operands are identified as such, not as captured routed-layer activations.
+  CPU and GPU work preserves semantic activation rounding, uses the same real
+  weight records, and separates resident work, import work and transport. Weight
+  rotation records its physical footprint. Import parity and per-backend path
+  equality precede timing; cross-backend differences remain diagnostics, not
+  numerical admission or a serving-speed claim. Canonical-only studies state
+  their scope and cannot exclude unmeasured qualified alternatives.
 - **Tuning:** first-load tuning runs under an explicit budget. Fresh tuning ignores stored tuning results and keeps compiled kernels. The tuning trace and outcome are part of every measured run.
 
 ## Comparison
