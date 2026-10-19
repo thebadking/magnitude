@@ -401,7 +401,7 @@ against a reference require that reference to pass its sanity gate.
 | 5 | SM86 packed-kernel and representation improvements | Packing experiment qualified; repeat improves, ordinary gain below bar; four-warp declaration deferred after a confounded gate | 4 decision |
 | 6 | Selective CPU expert execution | Isolated crossover established; serving fails warmed parity; grouped arithmetic follow-up remains experimental | Transfer profiling, then compute crossover |
 | 7 | Adaptive placement and prompt grouping | Accounting, paired reservations and startup phases qualified experimentally; keep group 8. Capacity helps ordinary generation but exposes repeat source-page misses. Derived-cap RAM retention fails warm speed bars; no overall promotion | Recorded earlier-stage decisions |
-| 8 | Consolidated qualification and reference comparison | Pending | Selected candidates disposed |
+| 8 | Consolidated qualification and reference comparison | In progress: 32K retrieval and 4B single-GPU serving/lifecycle pass; current maximum-context and matched timing/reference checks pending | Selected candidates disposed |
 
 A dependency on a decision permits a recorded revert or deferral. It does not
 require forcing an unsuccessful optimization into the code. Reorder remaining
@@ -625,6 +625,8 @@ before running it; fill measured fields only from saved artifacts.
 | Startup phases, scoped qualification and complete invocation inventory | 7c | Initial `1fa4bd9a`; scoped scratch `a3735d40`; rejected handoff `c253c094`; incomplete inventory `305c23a2`; qualified complete inventory `7a0a1f30` | Build `20261019T214356Z-stage7-startup-attention-inventory-build-45cd2c`; serving/audit `20261019T214830Z-stage7-startup-attention-inventory-strict-a9ddbd`; lifecycle `20261019T215127Z-stage7-startup-attention-inventory-lifecycle-78561e`; comparison `20261019T215322Z-stage7-startup-attention-inventory-comparison-f330d9` | Exact text/tools, native choices, fixed charges and lifecycle pass; 24 comparison responses exact. Slots grow to 223/224; ordinary generation −11.157%, beyond both spreads. Repeat generation +27.734%, including a 1.061 GB physical-read window | Retain the qualified accounting/capacity implementation experimentally. No overall promotion: repeat total latency rises 10.655%. Diagnose source misses and retention before broadening performance claims |
 | Source-page residency and demand retention envelope | 7c diagnostic | Clean `935e3358`, derived from complete candidate `7a0a1f30` | Build `20261019T221010Z-stage7-source-pages-build-96b47b`; replay `20261019T221648Z-stage7-source-pages-trace-65d5f5` | Six exact responses and identical GPU choices. Repeat: 1,511 cold demand ranges, 1.365 GB physical reads, exact worker/process agreement; 1,497 ranges were last read in the prior repeat's generation. Existing quotas yield one 33 GiB cap for follow-up | Establishes loss of useful source pages; no speed claim. Preserve the observer and completed-read history; bounded-retention result follows |
 | Derived-cap host demand retention | 7c profile | Same frozen `7a0a1f30` binaries; cache off versus 35,433,480,192-byte cap | Serving `20261019T223532Z-stage7-host-retention-strict-ae8390`; lifecycle `20261019T223835Z-stage7-host-retention-lifecycle-849d09`; comparison `20261019T224145Z-stage7-host-retention-comparison-b6c6e9` | Serving/lifecycle and all 24 comparison responses exact; GPU choices/inventory identical. Retains 15.190 GiB, displacing file cache; logical reads −99.630%/−98.942%, generation −0.535%/+0.137% for repeat/ordinary | Neither generation bar passes. Keep retention opt-in; this run does not reproduce the costly cache-off miss or prove tail prevention. No larger-cap sweep |
+| Current 32K context retrieval | 8 qualification | Frozen complete candidate `7a0a1f30` | `20261019T230253Z-stage8-context-60e410` | Both 2226+37 and 31661+37 requests retrieve the first-block record exactly, with zero prefix reuse. Slots 221/223; invocation inventories agree on both owners | Affected 32K path passes. No renewed maximum-context or speed claim; qualify the larger declaration next |
+| Smaller dense model on one GPU | 8 qualification | Accepted Stage 2b versus `7a0a1f30`; catalog Qwen3.5 4B Q4, GPU0 | Acquisition `20261019T230015Z-stage8-acquire-small-e20ebb`; serving `20261019T230807Z-stage8-small-strict-104d5b`; lifecycle `20261019T230948Z-stage8-small-lifecycle-2f5e36` | Six exact responses and equal native choices/usage/stops; complete tool passes. Prefix reuse, cancellation, recovery and health pass; exactly one GPU in all censuses | Checked dense single-GPU behavior passes. No speed-regression bound or coverage of other smaller models yet |
 
 
 ### Stage 0 progress — baseline and diagnostic correction
@@ -3009,6 +3011,134 @@ Save completed-read history with `cold-record-history.py`: it reproduces all
 1,511 cold ranges and the 1,497/13/1 prior-read categories, with prior ages
 26.032–81.409 s. No unit or integration tests were added or run.
 
+### Stage 8 declaration — affected context and smaller single-GPU paths
+
+Start with frozen complete candidate `7a0a1f30`, plain decoding, lookahead on,
+group 8, decode-reuse policies and managed host retention zero. Its retained
+phase accounting changes shared preparation and memory admission, so the
+1024-context two-owner checks are insufficient coverage by themselves.
+
+First qualify exact canonical record retrieval at **32768 configured context**,
+using a whole-conversation fixture sized by the native renderer to leave 128
+output tokens. Capture readiness, actual rendered/evaluated lengths, host/device
+censuses and physical owner allocation bounds. Include a short retrieval in the
+same capacity before the long request. This is a correctness/capacity check,
+not a speed comparison or a renewed maximum-context claim. The earlier 260137
+input maximum run predates these changes and took 971 s of prefill with group
+32; decide whether another such run is necessary after the smaller affected
+path supplies its result.
+
+Only the large model is currently installed in Magnitude's catalog store.
+Acquire **`qwen3.5-4b:gguf:q4`** from the catalog's locked target/drafter
+revisions, including its declared projector; do not substitute the unrelated
+27B files available elsewhere. Compare accepted Stage 2b and the complete
+candidate on one explicit 3090 Ti with repeat prose, ordinary continuation and
+a canonical complete tool call. Keep the 30-second preparation allowance and
+ordinary numerical admission. Record exact outputs, usage, stops and native
+choices; any failure remains a result and blocks consolidation. Qualify prefix
+reuse/cancellation on the affected smaller path if the initial serving gate
+passes. No smaller-model speed claim is planned from these qualification jobs.
+
+### Stage 8 affected-context result — 32K exact retrieval passes
+
+**`20261019T230253Z-stage8-context-60e410`** runs the frozen complete candidate
+on both explicit 3090 Ti owners with the declared profile. Readiness reports
+32768 context tokens. The native renderer sizes the canonical first-record
+retrieval fixture to **31661 input tokens**, leaving the declared 128-token
+output allowance. A short **2226-input + 37-output** request and the long
+**31661-input + 37-output** request both return the exact first-block mapping,
+with no retained-prefix reuse. Terminal evaluated counts match rendered counts.
+
+The load selects **221/223 slots per routed layer**, versus 223/224 at 1024
+context. Both owners' complete physical allocation assessments remain within
+their declared capacity. Planned/retained/live invocation bytes are exactly
+**118/118/118 and 105/105/105**. Recorded memory snapshots show no refused device
+demand; endpoint device headroom is approximately **1.314/1.778 GiB**. These
+snapshots and counters are not proof of every unobserved instantaneous peak.
+Raw observations, phase assessments, invocation inventories and `analysis.json`
+with its reproduction script are preserved.
+
+The observed long request reports 111.211 s prefill and 3.172 s generation.
+These qualification observations have no thermal gate or matched control,
+so no improvement is inferred from them. This check does not renew the earlier
+262144-capacity / 260137-input maximum-context qualification.
+
+### Stage 8 smaller single-GPU result — exact serving and lifecycle pass
+
+Catalog acquisition **`20261019T230015Z-stage8-acquire-small-e20ebb`** succeeds
+using the preserved, source-verified catalog tool. It acquires
+`qwen3.5-4b:gguf:q4` target/projector revision
+**`86835bf9949e4d14d6860f7910b1340ad4f271a9`** and catalog DFlash revision
+**`0094e74a88676605d53b79c7c3d26096335c9746`**. The target is **2,990,664,000
+bytes**, SHA-256
+`d2bfbee4de17c74e6308a4dc750be4c2271f92ae2df1e28f5c5afa0dcdb6fccc`.
+The catalog projector/drafter remain recorded even though these text-only,
+plain-decoding jobs use neither. No artifact or model registry is overridden.
+
+The initial small-model preflight
+`20261019T230734Z-stage8-small-strict-1d1f45` stops **before model execution**:
+the executable-copy checker references a build provenance file that lists only
+the harness. Its `StopIteration` is a launcher bookkeeping failure, not a model
+failure. The original serving qualification's provenance verifies both exact
+candidate executables. Correct that link, retain the failed preflight, and
+restart with unchanged binaries. The independent-copy hashes are checked
+against these original source-verified records before model execution.
+
+Serving **`20261019T230807Z-stage8-small-strict-104d5b`** then compares fresh
+accepted Stage 2b and complete-candidate launches on **only GPU0**, context
+1024, group 8, lookahead on, drafting off and host retention zero. Both use
+ordinary precision/admission and the unchanged 30-second tuning allowance.
+Native rendering is identical across builds for every fixture; all **six
+responses are valid and exactly equal**, with equal usage and stops and
+identical native configurations.
+
+| Canonical 4B fixture | Prompt tokens | Output tokens | Stop / intrinsic check |
+| --- | ---: | ---: | --- |
+| Repeat prose | 758 | 64 | `length`; exact expected prefix |
+| Ordinary continuation | 396 | 64 | `length`; nonempty, exact build parity |
+| BFCL tool | 366 | 41 | `tool_calls`; complete function/arguments pass canonical validation |
+
+The 4B tool emits `calculate_triangle_area(base=10, height=5)`, which the
+canonical validator accepts. It is not required to serialize the larger
+model's optional `unit` argument or produce its token count. Cross-build parity
+uses the actual 4B outputs, not another model as a reference.
+
+All four ready/after censuses contain **exactly the intended one CUDA device**.
+Both builds classify **2,967,280,308 model bytes** and **121,514,432 context
+bytes** on it. Classified compute changes **337,278,312→331,368,757 bytes**
+(5,909,555 fewer bytes); this is a census finding, not a peak-RSS or speed
+measurement. The candidate's invocation inventory agrees at **53/53/53 bytes**.
+
+Lifecycle **`20261019T230948Z-stage8-small-lifecycle-2f5e36`** passes cold,
+retain, hit, cancellation, recovery and health on the same candidate/model/GPU.
+All four completed responses are the exact 308-character expected prefix;
+hit/recovery reuse **757 prompt tokens**. Cancellation closes after four
+content events / 15 exact characters before terminal delivery and recovery
+remains healthy. `analysis.json` and its reproduction script join these serving
+and lifecycle records. This establishes the checked dense 4B single-GPU behavior,
+not every smaller model, distributed quality or a speed regression bound.
+No unit or integration tests were added or run.
+
+### Stage 8 next gate — current maximum context and consolidated timing
+
+The 32K and smaller dense-model checks pass. Inspection shows that the placed
+fit assessment caps its state-depth estimate at **100000**, so 32K coverage
+does not exercise a larger declaration. The changed capacity/accounting path
+therefore warrants **one current 262144-capacity qualification**, with a native
+fixture sized near the limit and exact first-block retrieval. Preserve the
+candidate's group 8 and all ordinary reserves; do not infer a maximum from
+readiness or the shorter run alone. Use the prior 971 s full-context prefill to
+declare a bounded **1800-second job hold** and **1500-second request/stall
+limits**, with no change to the 30-second preparation allowance. This remains
+qualification, without a comparative speed claim.
+
+Then measure consolidated Stage 7c against accepted Stage 2b directly with
+fixed warm work and alternating launches. Add a short paired 4B timing check
+to quantify the single-GPU regression bound; exact outputs alone do not prove
+unchanged speed. Finally compare the retained configuration with Stage 0 and
+the independent llama.cpp setup. Keep RAM retention, MTP, packing and CPU
+dispatch outside this candidate; their previous dispositions remain in force.
+
 ## Immediate next action
 
 Continue with **Stage 8**, using frozen Stage 2b as the accepted plain serving
@@ -3038,14 +3168,15 @@ cap sweep or select a flag-only `NOREUSE` patch for the reviewed buffered path.
 Use the existing upload/service evidence before proposing another transfer
 change, and retain the earlier asynchronous-batching rejection.
 
-Begin **Stage 8** with the smallest affected context and smaller-model
-single-GPU qualification, preserving ordinary reserves and the 30-second tuning
-allowance. Compare a qualified consolidated candidate directly with accepted
-Stage 2b and then the initial/reference implementations in alternating sessions.
-Do not multiply separate-session improvements. Keep RAM retention, MTP and CPU
-dispatch outside the consolidated default unless their own declared gates pass.
-The capacity candidate's earlier repeat regression remains a limitation to
-resolve or explicitly reject in that comparison, not an accepted speed result.
+**Stage 8** now has passing 32K retrieval and 4B single-GPU serving/lifecycle
+evidence. Run the one declared current maximum-context check, preserving ordinary
+reserves and the 30-second tuning allowance. Then compare the consolidated
+candidate directly with accepted Stage 2b, quantify the smaller-model speed
+regression bound, and compare with initial/reference implementations in
+alternating sessions. Do not multiply separate-session improvements. Keep RAM
+retention, MTP, packing and CPU dispatch outside the consolidated default unless
+their own declared gates pass. The capacity candidate's earlier repeat regression
+remains a limitation to resolve or explicitly reject in that comparison.
 
 Before resuming Stage 6 timing, repair and qualify affected serving behavior.
 Account for cache hit rate, import cost, file-cache displacement, worker contention
