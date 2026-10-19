@@ -262,7 +262,7 @@ against a reference require that reference to pass its sanity gate.
 | 1 | Batched asynchronous expert transfers | Disposed: prompt candidate failed; decode candidate not promoted | 0 |
 | 2 | Trace-informed GPU expert retention | 2a and 2b retained as opt-in; controlled timing and tool gates passed | 1 decision |
 | 3 | Confidence-limited expert prefetch | Repeated-miss candidate rejected after no actionable predictions; other conditioning deferred | 2 decision |
-| 4 | MTP across the two owners | Isolated implementation built; full-acceptance lifecycle passed; rejection and timing gates next | 3 decision |
+| 4 | MTP across the two owners | Full-acceptance lifecycle passed; ordinary continuation diverged with rejections; diagnosis before timing | 3 decision |
 | 5 | SM86 packed-kernel and representation improvements | Pending | 4 decision |
 | 6 | Selective CPU expert execution | Exploratory | Measured transfer/compute crossover |
 | 7 | Adaptive placement and prompt grouping | Pending | Accepted earlier stages |
@@ -1049,25 +1049,71 @@ the frozen accepted plain build, requiring exact greedy parity and observed
 rejections, before a controlled timing comparison. Stale original build output
 was cleaned to recover about 32 GiB; the accepted Stage 2b executable was kept.
 
+### Stage 4 held-out gate — ordinary continuation diverges
+
+`20261019T094358Z-stage4-heldout-a51b91` compared the frozen Stage 2b plain
+profile with the same built MTP candidate, at context 1,024 and one fixed
+proposal. Rendered tokens/templates matched. Both engines passed each fixture's
+sanity gate, repeated the same 64-token passage, and made the same independently
+validated BFCL triangle-area call with identical function/argument text.
+
+The ordinary continuation **failed exact greedy parity**: plain ended naturally
+after 60 output tokens; MTP generated 64 different tokens. MTP recorded 36
+proposals, 26 accepted and 10 rejected on that request. The tool request accepted
+all 26 proposals and completed the same 53 output tokens as plain. Request-local
+tool-call IDs were excluded from comparison; names and argument text were kept.
+
+The copying and tool results do not qualify the failed continuation. Hold timing
+and promotion. First run the same canonical continuation with MTP's generated
+and verified budgets both zero, retaining raw residual export and head priming,
+to distinguish that path from multi-row verification/rejected-suffix repair.
+The divergence's cause is not yet established; do not label it a repair defect
+or ordinary floating variation without discriminating evidence.
+
+`20261019T095010Z-stage4-zero-3f82e1` completed that diagnostic with the same
+built candidate and rendered inputs. With zero generated/verified proposals,
+the repeated passage matched and the ordinary continuation was byte-identical
+to the saved plain reference, including its natural stop at 60 tokens. Both
+responses reported zero proposals. Raw residual export and head priming alone
+therefore reproduce this reference; next inspect the first differing verification
+decision and prior accepted-prefix resolutions. This does not yet distinguish
+verification numerics from a rejected-suffix state defect.
+
+Build `20261019T095412Z-stage4-build-b0cc40` adds an optional host round trace
+(`MAGNITUDE_TRACE_GENERATION_ROUNDS`) without changing proposal construction or
+acceptance. Its candidate digest is
+`ac2db9bba6a9240f1414b48c8e6faa06035aa53d8da42abaf81c4b94044497ea`.
+`20261019T095455Z-stage4-trace-2e7d29` reproduced the same differing continuation
+and the same 36/26/10 proposed/accepted/rejected counts. It is a diagnostic
+completion, not a passed parity gate.
+
+The first differing verification starts at target position 411 with 16 output
+tokens already emitted. Its inputs are token 8026 (the anchor) and token 11
+(the proposed comma); target selections are `[11, 3804]`. The comma is correctly
+accepted, then the target's bonus token 3804 produces ` went`, where plain
+produced ` and`. Seven rejected proposals preceded this round. The differing
+token is therefore a target selection, rather than an unchecked proposal
+published by acceptance. This does not establish whether prior state resolution
+or two-row target numerics caused the changed selection. `analysis.json` retains
+the exact trace line and the compared outputs.
+
 ## Immediate next action
 
-Implement **Stage 4: MTP across the two placed owners**, using the frozen Stage 2b
-profile as the accepted plain control. The isolated `placed-mtp` candidate starts
-at `47f852f5`. Its first scope is the catalog's causal prediction head with its
-own history: head weights, shared embedding/projection and head history on the
-first owner, with raw residual conditioning produced on the final target owner.
-Admit independent conditioning transfer slots before allocation, retain them
-through head completion, and copy representation bytes without narrowing F32
-residuals. Cached prompt boundaries remain independently owned on the head's
-device. Target-reading heads, vision and separate block drafters remain outside
-this first placement contract.
+Continue **Stage 4 qualification**, preserving the frozen Stage 2b plain control.
+The candidate's present scope is the catalog's causal head with its own history;
+target-reading heads, vision and separate block drafters need other placement
+contracts. Real proposals, full-acceptance prefix reuse and cancellation/recovery
+now work; the ordinary-continuation parity gate remains failed.
 
-Start with one proposed token and preserve the existing proposal/acceptance,
-accepted-prefix reconciliation, repair and physical lifetime contracts. Fully
-build and qualify actual proposals, accepted prefixes, rejected suffixes,
-prefix reuse and cancellation/recovery before timing. A startup-guard change or
-successful build alone is insufficient. Compare total time per committed token
-against plain execution and include a held-out ordinary continuation or tool
-fixture before any serving-speed claim. Then work through Stages 5–8.
+Carry decoder placement through the evaluation harness's engine configuration,
+then compare canonical teacher-forced target logits at verification widths 1
+and 2, without a drafter or rejected suffix. The harness already supports those
+widths but does not yet pass decoder ranges into its model load. This comparison
+will separate a target batching difference from rejection-dependent state
+handling before changing numerical kernels or repair. Keep inputs identical and
+inspect both argmax changes and logit differences. Requalify the failed serving
+case after a justified correction, then benchmark total time per committed token
+with all head, verification and repair costs. Work through Stages 5–8 after the
+Stage 4 decision.
 Stage 3's repeated-miss candidate is rejected; a differently conditioned predictor
 remains deferred. Full CUDA graph attribution is still unavailable.
