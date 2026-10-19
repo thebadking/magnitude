@@ -547,6 +547,7 @@ before running it; fill measured fields only from saved artifacts.
 | Actual miss/victim identities and bounded retention replay | 6 diagnostic | `2f7fbcc1` + `6186426f…`; same accepted plain profile | Build `20261019T152721Z-stage6-request-build-553dbd`; trace `20261019T152836Z-stage6-request-trace-26f7b0`; trace-disabled lifecycle `20261019T153420Z-stage6-request-lifecycle-fe37ac` | Six exact responses and unchanged configurations. 4 GiB payload-only demand replay hits 269/916 eligible completed repeat frames and 121/599 ordinary; victim replay hits 92/916 and 116/599 | Prefer demand retention for the prototype. Replay does not establish CPU execution, RAM admission or serving gain |
 | Physical CPU-ready cache and lease qualification | 6 prototype | `e2d68773` + `cf63e7ff…`; real block 1 weights and retained native fixture vectors | Build `20261019T160306Z-stage6-native-cache-build-d8953f`; qualification `20261019T160525Z-stage6-native-cache-qualification-10411b` | All 32 retained triples and CPU contributions exact; shared capacity, alias charges, pending/failed/withdrawn fills and owner lifetime pass | Retain on `two-gpu-native-cpu-cache-experimental`. Serving handoff, multi-layer integration, host admission at the modeled 4 GiB capacity and latency remain unmeasured |
 | CUDA/CPU activation and contribution exchange | 6 prototype | `29c77cf2` + `bc9e3058…`; same real weights and fixture readout operands | Build `20261019T163127Z-stage6-cpu-exchange-build-f2b8fc`; qualification `20261019T163154Z-stage6-cpu-exchange-qualification-b4ed4a` | 32 exact activation/contribution round trips across both GPUs, concurrent requests sharing one CPU cache, and failure/withdrawal/watchdog paths pass | Retain on `two-gpu-selective-cpu-experimental`. Production route selection, CPU program admission, full host accounting and serving performance remain pending |
+| Shared CPU expert dispatch in serving | 6 prototype | `d92f10c0` + `dd6fb7aa…`; retained as `d7958b29` on `two-gpu-cpu-dispatch-experimental` | Build `20261019T174442Z-stage6-cpu-dispatch-build-84bb82`; operators `20261019T174618Z-stage6-cpu-dispatch-operators-23bcae`; isolation `20261019T175458Z-stage6-cpu-dispatch-isolation-a505ab`; lifecycle `20261019T180054Z-stage6-cpu-dispatch-lifecycle-df0535`; incomplete comparison `20261019T180314Z-stage6-cpu-dispatch-comparison-ea41aa` | Shared native cache reaches about 3.93 GiB; 49 CPU dispatches in the isolated six-response qualification. Initial exact prose/ordinary/tool and lifecycle checks pass, but warmed ordinary continuation fails exact parity on response 12 of the alternating run, with identical GPU choices | No promotion or accepted speed result. Preserve the failed run; diagnose actual routed arithmetic and retention/handoff before another comparison |
 
 
 ### Stage 0 progress — baseline and diagnostic correction
@@ -2143,14 +2144,105 @@ claim. No unit or integration tests were added or run. The source patches,
 build identities, command, per-expert publications, both device identities and
 failure checks are retained in the local build and qualification directories.
 
+### Stage 6 shared CPU dispatch: qualified components and warmed failure
+
+The opt-in serving prototype now joins the planned CPU inventory, one shared
+native cache and serial CPU lane, per-owner mapped channels, and the routed GPU
+graph. **`MAGNITUDE_CPU_EXPERT_CACHE_BYTES=4294967296`** requests a 4 GiB native
+payload ceiling; unset/zero keeps ordinary GPU execution. Supported one-row,
+one-expert conversion misses can use a retained CPU record before GPU reservation.
+Original expert IDs, scores, BF16 publications and slot-order accumulation remain
+the contracts. GPU fallback remains available. Eligible cold retention imports
+the source triple after the ordinary upload; it does not issue another file read,
+but its synchronous CPU packing remains work on the watcher.
+
+The target shares one cache, program group and source/input/output workspace
+across both GPU owners. The lane reports **4,008,967 standing bytes** and a
+checked **79,616-byte invocation scratch bound**, separately from payload and
+cache controls. Header fit includes auxiliary host workspace and temporary
+program groups; optional payloads still need fresh surplus claims. Device
+consumption acknowledgement precedes publishing a CPU-only physical bank slot.
+The new programs form within the existing first-load allowance: the recorded
+preparation used **21.35 of 30 seconds**, with no overrun or second CPU budget.
+These runs exercised canonical parent arithmetic, not promoted nondefault
+companion configurations.
+
+The locked release build and 32-expert operator/cache/exchange qualification
+pass. The new single-submission CPU contribution equals its ordinary CPU control
+for all 32 groups. This does not make CPU and GPU contributions byte-identical;
+the earlier cross-backend rounding differences still apply. Initial CUDA helper
+formation failed because generated buffer arguments were outside helper scope;
+shared entry-body fragments fix that without changing the generated ABI.
+
+The first full comparison with frozen Stage 2b,
+**`20261019T174711Z-stage6-cpu-dispatch-strict-fdd8f9`**, fails ordinary exact
+parity and changes three unrelated attention configurations. It is confounded
+and remains failed. A separate same-source CPU-off/CPU-on comparison uses the
+candidate's stored choices, preserves the 30-second policy, and passes six exact
+responses: prose, ordinary continuation and BFCL tool calls on both sides.
+Selected GPU configurations, usage and stopping boundaries match. Its one shared
+service completes **49 CPU dispatches**, reports **2,123 fills**, and holds up to
+**4,217,569,280 native bytes**. These are cumulative service counters; snapshots
+from both owners must not be summed. Prefix retention/hits, cancellation after
+four content events, recovery and health also pass with tracing disabled.
+
+The subsequent thermal-gated **A/B/B/A** comparison plans two warmups per
+fixture and launch, then one measured repeat and ordinary request. Both sides
+use this same source and GPU choices; A disables CPU dispatch and B uses the
+4 GiB ceiling. It stops after **12 responses**, with 11 exact matches. The last
+request, B's warmed ordinary measurement, differs at character **68** and stops
+after **60 tokens** instead of the control's 64-token length boundary. GPU
+configuration parity still holds. Thus the cold qualification did not establish
+warmed serving fidelity. The cause remains unresolved: actual routed arithmetic,
+CPU record retention and source handoff need examination. Do not attribute it to
+rounding alone without that evidence. The remaining B/A launches were not run;
+there is **no accepted performance comparison or serving speedup**.
+
+The incomplete run nevertheless records a useful RAM observation:
+
+| Completed repeat measurement, identical 64-token output | CPU off | 4 GiB CPU cache |
+| --- | ---: | ---: |
+| Logical reads after first content delivery | 6.625 GB | 5.815 GB |
+| Process-attributed physical reads in that window | 50.618 MB | 1,400.558 MB |
+| Linux `Cached` after delivery | 55.908 GiB | 51.821 GiB |
+| Actually free after delivery | 0.396 GiB | 0.514 GiB |
+
+One completed pair is not an alternating comparison or causal attribution. It
+shows that the extra native cache reallocates already-used host RAM and can
+coincide with much more physical source traffic despite fewer logical reads.
+The ordinary candidate window also has different generated work, so it is not
+a matched latency or I/O comparison. Available memory does not establish that
+another cache creates additional useful capacity.
+
+At **18:00:04 UTC**, a separate active qualification sample found **53.150 GiB
+`Cached`, 0.379 GiB actually free and 51.029 GiB `MemAvailable`**, out of
+62.696 GiB. Engine RSS was approximately **9.40 GiB**, with **zero `VmSwap`**;
+the native CPU cache then held approximately 2.49 GiB. This is one sample,
+not peak occupancy. Shared/file pages overlap RSS and kernel cache accounting;
+do not add those totals. The read counter includes loading and earlier work.
+
+All evidence remains under the run IDs in the ledger, including raw outputs,
+`diagnosis.json`, selected configurations, delivery-window I/O and memory,
+`ram-active.json` / `ram-observer.py`, and reproduction scripts. The measured
+source is `d92f10c0` plus dirty digest
+`dd6fb7aa02255e13c493a420e5307ad107afe837a6a9ecd1aed5adb70084670a`.
+Published **`d7958b29ad9d07827d26efbd60daae168efee450`** preserves all 2,942
+inference source files and the gitlink byte-for-byte; the build directory retains
+the source manifest and equivalence record. The original measured identity is
+not relabelled. This branch is experimental and its warmed failure prevents
+promotion. No unit or integration tests were added or run.
+
 ## Immediate next action
 
 Continue **Stage 6** using the frozen Stage 2b plain serving control. The
 canonical CPU-ready crossover and retention replay justify a bounded CPU-format
 cache using eligible demand records. The physical storage/lease component and
 dual-GPU activation/contribution exchange now pass their scoped qualifications.
-Connect selective execution for one-expert misses to the planned routed graph
-and shared full-model inventory next. Account for
+The serving prototype is connected but fails warmed exact parity. First capture
+the actual routed activation and affected expert contribution around that
+failure, distinguish arithmetic differences from retention/source handoff, and
+repair the cause. Repeat affected semantic checks before restarting timing.
+Account for
 cache hit rate, import cost, file-cache displacement, worker contention and
 activation/result publication; retaining another copy of raw GGUF bytes alone
 does not obtain the measured CPU-ready cost. Keep original router choices,
