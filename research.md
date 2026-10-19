@@ -138,6 +138,16 @@ or an inventory of model pages; `Cached` includes other files. The snapshot and
 read-only reproduction script are retained in
 `20261019T191102Z-idle-ram-diagnostic/`.
 
+Stage 7's controlled comparison provides another active example: all four
+candidate generation-delivery windows have **zero physical read bytes**, with
+approximately **7.188 GB logical reads for repeat** and **3.878 GB for ordinary**.
+At delivery completion, Linux reports **56.432–56.569 GiB cached,
+0.445–0.519 GiB actually free and 53.711–53.775 GiB available**. This is
+reclaimable cache rather than unused RAM. The candidate adds GPU expert storage,
+not an anonymous host payload cache. These are delivery windows with possible
+lookahead, not exact device-step boundaries. Raw I/O and RAM observations are in
+`20261019T194631Z-stage7-owner-budget-comparison-a0f388/analysis.json`.
+
 Local evidence: `20261019T075917Z-stage2a-comparison-b3e32b/` contains
 `ram-residency.json`, its reproduction script, measured I/O windows and
 `memory-summary.json`. The residency snapshot was taken after qualification;
@@ -352,7 +362,7 @@ against a reference require that reference to pass its sanity gate.
 | 4 | MTP across the two owners | Qualified experimental capability; repeat generation improves, ordinary primary bar fails and total time regresses | 3 decision |
 | 5 | SM86 packed-kernel and representation improvements | Packing experiment qualified; repeat improves, ordinary gain below bar; four-warp declaration deferred after a confounded gate | 4 decision |
 | 6 | Selective CPU expert execution | Isolated crossover established; serving fails warmed parity; grouped arithmetic follow-up remains experimental | Transfer profiling, then compute crossover |
-| 7 | Adaptive placement and prompt grouping | Next: investigate the per-owner cache budget, then placement/grouping | Recorded earlier-stage decisions |
+| 7 | Adaptive placement and prompt grouping | Owner allocation bound qualified; capacity increases, speed bar fails; prompt grouping next | Recorded earlier-stage decisions |
 | 8 | Consolidated qualification and reference comparison | Pending | Selected candidates disposed |
 
 A dependency on a decision permits a recorded revert or deferral. It does not
@@ -571,6 +581,7 @@ before running it; fill measured fields only from saved artifacts.
 | Grouped CPU arithmetic on actual routed operands | 6 numerical proof of concept | `59b27255` + `9b0ba2cf…`; retained as `67a7a69a` on `two-gpu-cpu-grouped-experimental` | Build `20261019T184915Z-stage6-cpu-grouped-build-cbaf1b`; replay `20261019T185406Z-stage6-cpu-grouped-replay-54fe61` | Grouped scalar product agreement improves to 50/53, contribution agreement to 43/53, and down on the same GPU product to 44/53. All finite BF16 inputs have identical CPU/CUDA BF16 SiLU publication on this system; substituting GPU SiLU does not change replay results | Remaining projection differences require diagnosis before serving integration. No timing, numerical admission or serving-speed claim |
 | Verified raw CUDA projection accumulators | 6 diagnostic | `67a7a69a` + `786553b4…`; retained as `efd99574` | Build `20261019T191623Z-stage6-cpu-raw-projection-build-32773e`; replay `20261019T191741Z-stage6-cpu-raw-projection-replay-164fd7` | F32 observations reconstruct every normal GPU product and contribution exactly in all 53 records. Whole-group CPU partials differ after BF16 narrowing at 3/33,920 gate, 1/33,920 up and 11/135,680 down coordinates | Projection differences are directly observed before publication; the earlier warmed failure remains unreproduced. No serving/timing claim |
 | Intermediate half-group rounding | 6 numerical proof of concept | `efd99574` + `6e1a4556…`; retained as `394d3764` | Build `20261019T192052Z-stage6-cpu-half-rounding-build-3ea984`; replay `20261019T192208Z-stage6-cpu-half-rounding-replay-25e54b` | GPU raw bytes remain identical. Rounding each 16-product half leaves products at 50/53 exact and improves contributions only from 43/53 to 44/53; same-input down remains 44/53 | Intermediate rounding alone does not repair compatibility. Keep CPU serving experimental; investigate independent GPU capacity work next |
+| Complete per-owner expert-cache allocation bound | 7a | `d2b3b935` + `98a33646…`; published source-equivalent as `5e42c2a2` on `two-gpu-owner-budget-published` | Build `20261019T193611Z-stage7-owner-budget-build-b28ef8`; serving `20261019T193817Z-stage7-owner-budget-strict-3049d1`; lifecycle `20261019T194424Z-stage7-owner-budget-lifecycle-4f5d62`; comparison `20261019T194631Z-stage7-owner-budget-comparison-a0f388` | Six exact serving responses and lifecycle pass; all 24 comparison responses exact with identical kernel choices. Capacity grows from 200/203 to 201/206 records per layer, adding 289.102 MiB GPU payload. Ordinary generation −2.938%, total −4.465%; repeat generation −11.442%, total −11.267%, but neither generation difference exceeds control spread | Retain the capacity/accounting prototype without a speedup or default-promotion claim. Compare prompt grouping separately; preserve the measured source and binaries |
 
 
 ### Stage 0 progress — baseline and diagnostic correction
@@ -2402,6 +2413,91 @@ covering all 2,948 inference files and the gitlink, original build identities,
 independent harness binaries, raw arrays with digests and reproduction scripts.
 No unit or integration tests were added or run.
 
+### Stage 7a — Complete owner allocation rather than an inherited weight allowance
+
+The candidate starts from published Stage 2b **`d2b3b935`**, whose inference
+bytes match the frozen accepted control. It selects the largest exact local
+expert inventory whose complete allocation bound fits the owner's stable
+capacity after its ordinary reserve. The bound includes owner-partitioned
+history and recurrent slabs at the standard fit depth, checked range graphs,
+invocation storage, incoming transfer buffers and the physical import/startup
+peak. Shared host staging and graph uploads retain their host-domain charge;
+explicit weight caps still constrain the inventory. Final admission remains
+independent and checks the sealed resources before allocation.
+
+Checked graph drafts now expose their already constructed tensor descriptors.
+Range certification derives incoming hidden-buffer bytes from the actual first
+block port and combines them with the existing kept-row recipes. It does not
+invent a second boundary shape. The ordinary state-fit and owner-fit projections
+share their history/slab recipes and common recurrent bank indexing. No native
+kernel assets, numerical recipes, CPU dispatch or MTP implementation changes
+are included in this candidate.
+
+The release engine and harness build passes. The **1024-token context** serving
+qualification returns all six exact responses across repeated prose, ordinary
+continuation and the held-out BFCL tool fixture, with identical selected kernels,
+usage and stop boundaries. Prefix retention/reuse, cancellation after four
+content events, recovery and health also pass; hit/recovery report 757 cached
+prompt tokens. These checks do not qualify other contexts or models.
+
+Both comparison passes select **201 records per layer on blocks 0–23 and
+206 on blocks 24–47**, versus the control's **200/203**. The ready census shows
+**303,144,960 additional GPU model bytes (289.102 MiB)** across the owners,
+with **768 additional host model bytes** and unchanged reported compute charges.
+Observed headroom is not a peak measurement or a substitute for the allocation
+bound. The qualification's startup additional bounds are approximately
+2.167/1.957 GB; they limit capacity more than its approximately 0.793/0.788 GB
+fit-depth state charges.
+
+The thermal-gated **A/B/B/A** comparison uses two warmups per fixture and launch,
+then one measured request, for 24 total exact responses. Repeat renders 758
+tokens and generates 64; ordinary renders 396 and generates 60. Prefix reuse,
+managed host expert retention and drafting are disabled. Both sides use prompt
+group 8, lookahead and the accepted decode-reuse seed/replacement policies.
+Every launch selects identical kernels. The primary metric is ordinary
+generation milliseconds per output token; the declared bar remains at least
+3% and a difference exceeding both sides' observed spreads.
+
+| Fixture | Control mean generation | Candidate mean generation | Generation change | Mean total model-time change | Generation bar |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Repeat | 3709.941 ms | 3285.464 ms | −11.442% | −11.267% | Fails spread check |
+| Ordinary | 2319.754 ms | 2251.592 ms | −2.938% | −4.465% | Fails 3% and spread checks |
+
+Repeat's mean generation gap is **424.478 ms**, below the control's
+**799.654 ms** spread. Ordinary's gap is **68.162 ms**, below the control's
+**99.563 ms** spread; the candidate spreads are 4.412 and 5.500 ms respectively.
+The result is not an accepted generation speedup, and rounding 2.938% to 3%
+does not change the declared decision. Prefill means decrease by 11.106% and
+5.582%, but these two-pass observations do not establish a general prefill win.
+
+Mean logical generation-delivery reads decrease from **7.227 to 7.188 GB** for
+repeat and **3.965 to 3.878 GB** for ordinary. Every candidate window has zero
+physical reads. Control repeat windows have 13.312 and 356.983 MB, while control
+ordinary has 3.056 and 0.729 MB. The final control repeat also has the slowest
+generation. Retain this I/O imbalance explicitly; the run does not establish its
+cause or isolate a disk contribution to the timing gap. The thermal gate passes
+and recorded GPU temperature reaches at most 48 °C.
+
+**Retain this as a qualified capacity/accounting prototype, without default
+promotion or a serving speedup claim.** Next measure prompt grouping on the same
+frozen candidate source. Separately audit startup phase overlap and the largest
+import contributors: source inspection places qualification fixtures before
+model import, but the current range bound retains the combined conservative
+startup/import allowance. Do not reduce it without verifying all retained
+resources and the real import path.
+
+Measured source is `d2b3b935` plus
+`98a3364654dff06ffbbd133e608c89a7d8d0ef30e43fcfb2ea0b1f4b2d88d3ad`.
+Published **`5e42c2a2f865274c87b63fb6b09b2072dec865a8`** on
+**`two-gpu-owner-budget-published`** preserves all **2,915 inference files and
+the gitlinks**. Publication uses a separate index; the original measured
+worktree remains unchanged for the next profile comparison. The build directory
+retains its source manifest, equivalence proof and exact engine/harness paths
+and hashes. Preserve those binaries before reusing their target. The comparison
+retains `analysis.json`, `analyze.py`, raw observations, I/O, RAM and temperature
+samples, cache assessments and selected configurations. No unit or integration
+tests were added or run.
+
 ## Immediate next action
 
 Begin **Stage 7** using the frozen Stage 2b plain serving control. This is a
@@ -2412,15 +2508,18 @@ cache. Keep that implementation experimental and leave its numerical repair
 and warmed failure open. Independent GPU-capacity work can avoid more source
 traffic without introducing a different CPU arithmetic path.
 
-First audit the owner cache budget. Source inspection shows that startup chooses
-a whole-decoder plan, then bounds each range's local cache by that source plan's
-device weight charge. The range does not independently derive this budget from
-its complete local graph/state charge. Earlier sampled headroom is a reason to
-investigate, not proof that more cache fits. Evaluate exact local inventories,
-graph and state bounds, boundary storage, import peak and ordinary reserves
-against the owner's capacity before changing allocation. Preserve global state
-ownership and final range admission, then qualify and benchmark any candidate
-against the accepted control with unchanged unrelated choices.
+The **Stage 7a** owner-budget candidate now passes its scoped serving/lifecycle
+gates and completes its comparison, with a measured capacity increase but no accepted speedup.
+Keep its exact source and binaries frozen. **Stage 7b** will compare prompt
+group **8 versus 1** on that same candidate build, at the existing 1024-token
+context and with unchanged fixtures and other policies. Declare it as an
+experimental profile comparison, with Stage 2b still the accepted reference for
+later cumulative qualification. Requalify text, tools, usage, lifecycle and
+native selections for group 1 before timing. Use the same thermal-gated A/B/B/A
+schedule, two warmups per fixture and launch, and the existing ordinary primary
+bar. Record actual capacity, RAM, I/O, prefill and generation costs, including any
+changed native choices. This measures a workload-specific profile; it does not
+authorize changing the default or extrapolating to long prompts.
 
 Before resuming Stage 6 timing, repair and qualify affected serving behavior.
 Account for cache hit rate, import cost, file-cache displacement, worker contention
@@ -2455,8 +2554,8 @@ The four-warp Stage 5 experiment requires unchanged unrelated execution choices
 before it can isolate conversion. Preserve the fixed tuning budget and ordinary
 precision/greedy gates.
 
-Study the observed per-owner cache/headroom gap during Stage 7 before allocating
-more cache, then complete Stage 8's affected context and single-GPU qualification
+After the grouping decision, finish Stage 7's startup-peak and placement audit,
+then complete Stage 8's affected context and single-GPU qualification
 and cumulative/reference comparison. Stage 3's repeated-miss candidate is
 rejected; a differently conditioned predictor remains deferred. Full CUDA graph
 attribution is still unavailable.
