@@ -544,6 +544,7 @@ before running it; fill measured fields only from saved artifacts.
 | Shared extraction for packed low/high planes | 5b | `356ab093` + `f906f66c…`; frozen Stage 2b plain control | Build `20261019T132409Z-stage5-build-c23e98`; serving `20261019T132526Z-stage5-strict-3a0610`; lifecycle `20261019T132942Z-stage5-lifecycle-6aed11`; comparison `20261019T133130Z-stage5-comparison-2f88c4` | All gates and 24 benchmark responses exact, with identical unrelated kernel configurations. Repeat generation −4.515%, total −2.101%; ordinary generation −2.850%, total −1.551% | Keep experimental packing source; ordinary primary metric remains below the declared 3% bar. Preserve Stage 2b as the accepted plain control |
 | Separate source and blocking upload service | 6 diagnostic | `6572bbd2` + `e84abda8…`; accepted plain profile, Stage 5 frozen output controls | Build `20261019T135156Z-stage6-build-63ee63`; diagnostic `20261019T135740Z-stage6-source-service-5f527a`; trace-disabled lifecycle `20261019T140411Z-stage6-lifecycle-7f6abd` | Six exact responses and identical selected configurations; both owner traces present. Ordinary blocking uploads average 327.121 µs per 3.125 MB expert; trace-disabled retention/cancellation/recovery passes | Retain opt-in diagnostics. No speed or CPU-crossover claim; measure matched CPU work next |
 | Canonical expert operator crossover | 6 diagnostic | `513376a8` + `3ccacadb…`; fresh native feature export, real block 1 weights | Capture `20261019T144558Z-stage6-feature-capture-a916e2`; build `20261019T150219Z-stage6-crossover-build-7d6fd6`; timed comparison `20261019T150238Z-stage6-crossover-bd17b2` | All 32 groups pass per-backend path equality; 384 complete traced samples. CPU-ready one-expert pipeline 0.182 ms versus 0.811 ms GPU miss; CPU import 0.781 ms versus 0.799 ms with overlapping pass means | Retain harness. Prototype bounded CPU-ready retention and selective execution next; no CPU dispatch or serving speedup yet |
+| Actual miss/victim identities and bounded retention replay | 6 diagnostic | `2f7fbcc1` + `6186426f…`; same accepted plain profile | Build `20261019T152721Z-stage6-request-build-553dbd`; trace `20261019T152836Z-stage6-request-trace-26f7b0`; trace-disabled lifecycle `20261019T153420Z-stage6-request-lifecycle-fe37ac` | Six exact responses and unchanged configurations. 4 GiB payload-only demand replay hits 269/916 eligible completed repeat frames and 121/599 ordinary; victim replay hits 92/916 and 116/599 | Prefer demand retention for the prototype. Replay does not establish CPU execution, RAM admission or serving gain |
 
 
 ### Stage 0 progress — baseline and diagnostic correction
@@ -1925,11 +1926,92 @@ canonical configurations, per-group differences, all sample intervals, PCIe
 observations, thermal evidence and `analysis.json` / `summarize.py`. There is
 still **no serving CPU dispatcher, CPU payload cache or generation speedup**.
 
+### Stage 6 request identities and retention policy
+
+The optional **`MAGNITUDE_TRACE_EXPERT_REQUESTS`** trace records each physical
+owner's source inventory, local-layer to global-scope mapping, record geometry,
+route choices, initial GPU hit flags, resolved conversions and GPU victims.
+Owner-local ordinals detect missing records. Completion records distinguish
+fenced success from dropped work. Rows8 footprints come from the registered
+physical representations; they do not establish CPU execution support or
+numerical admission. Ordinary serving leaves this trace disabled.
+
+Source is **`2f7fbcc1` + dirty digest
+`6186426f628d78e9382637d3fe7ffb6047e19d12af29dc1110190298f413eb61`**;
+build/provenance **`20261019T152721Z-stage6-request-build-553dbd`** passes.
+The runtime's checked kernels, placement and cache policies are unchanged.
+
+Capture **`20261019T152836Z-stage6-request-trace-26f7b0`** runs the accepted plain
+profile with group 8, context 1,024, lookahead, decode-reuse seeding/replacement,
+no MTP, no managed raw cache and no retained prompt prefixes. It uses the prior
+two fixed warmups per repeat/ordinary fixture, then one diagnostic request each.
+All **six responses match the frozen control**, including usage and stop reason;
+all selected kernel configurations are identical. This untimed identity study
+does not use its recorded HTTP latencies as performance evidence.
+
+There are **7,526 miss-bearing bank frames**, covering both active owners and
+all 48 disjoint global routed layers. Each owner's ordinals are contiguous.
+Of these, **7,501 have successful completion fences**. The remaining 25 frames
+are final lookahead suffixes (5/20 by owner); neither owner has a later fenced
+frame. Completed-frame scores exclude that suffix. All-hit and scratch frames
+are absent, so this is not a full route trace.
+
+`retention-reproduce.py` models a **4 GiB native-payload ceiling** with
+proportional layer shares. Exact rows8 footprints allow 28 records per layer;
+rounding leaves **4,242,309,120 bytes (3.951 GiB)** of usable native capacity.
+This replay allocates no expert payloads. Metadata, packing transients, live
+leases, file-cache displacement, physical source I/O and actual host admission
+are outside its capacity model.
+
+Both policies use per-layer LRU and consider only frames with one activation
+row and exactly one distinct GPU conversion. The demand policy retains that
+missed expert; the victim policy retains its GPU victims instead. Lookup precedes
+insertion, so a frame cannot hit on its own fill. The model starts empty at
+engine startup and retains its state through the complete captured history.
+
+| Policy | Repeat: ready hits / eligible completed frames | Ordinary: ready hits / eligible completed frames |
+| --- | ---: | ---: |
+| Eligible demand | 269 / 916 = **29.367%** | 121 / 599 = **20.200%** |
+| Eligible GPU victims | 92 / 916 = **10.044%** | 116 / 599 = **19.366%** |
+
+These delivery windows contain 1,462 / 839 completed miss-bearing frames.
+Membership follows the request-record offset between first-content and terminal
+delivery snapshots, not exact device boundaries. Across all completed eligible
+frames, demand retention hits **657/4,554 (14.427%)**, versus **471/4,554
+(10.343%)** for victims. Peak modeled native holdings are 4,211,281,920 /
+4,202,106,880 bytes, below the requested payload ceiling.
+
+Demand retention models **3,905 fills** against those 657 completed hits;
+victim retention models 4,182 fills. Demand fills prepare 12.164 GB of raw
+records and 12.250 GB of native records over the whole trace. These are byte
+volumes, not additional disk reads or measured CPU packing time. Packing on the
+critical path could erase the CPU-ready advantage; this result does not justify
+synchronous packing of every miss.
+
+Prefer eligible demand retention for the first physical cache prototype. This
+choice applies to these two policies, this capacity and this fixed GPU
+trajectory. A CPU dispatcher would avoid some GPU installations and change
+future victims and misses. The replay cannot establish its eventual hit rate,
+contention, generation gain, or the benefit of another capacity/policy.
+
+Trace-disabled lifecycle **`20261019T153420Z-stage6-request-lifecycle-fe37ac`**
+passes: four complete 64-output responses match, hit/recovery reuse 757 prompt
+tokens, cancellation closes after four content events, and recovery/health pass.
+The adapter explicitly removes both trace switches and verifies no request or
+service trace appears. No unit or integration tests were added or run.
+
+Retain the opt-in diagnostic. Evidence includes the inventory and raw JSON
+events, ordinal/completion checks, exact-response/configuration checks, both
+per-event retention replays, `retention-analysis.json`, and the reproduction
+script. No native CPU cache has yet been allocated by serving and no CPU
+dispatcher is enabled.
+
 ## Immediate next action
 
 Continue **Stage 6** using the frozen Stage 2b plain serving control. The
-canonical CPU-ready crossover justifies a bounded CPU-format expert-cache
-prototype and selective execution for small GPU-missed subsets. Account for
+canonical CPU-ready crossover and retention replay justify a bounded CPU-format
+cache prototype using eligible demand records, followed by selective execution
+for one-expert misses. Account for
 cache hit rate, import cost, file-cache displacement, worker contention and
 activation/result publication; retaining another copy of raw GGUF bytes alone
 does not obtain the measured CPU-ready cost. Keep original router choices,
@@ -1939,6 +2021,21 @@ Preserve the 30-second tuning budget and normal admission for any additional
 CPU configurations. Keep GPU execution as the default until affected serving
 measurements justify a CPU path. Two-miss work and other weight formats remain
 follow-ups, not established crossovers.
+
+The first physical cache must share one host budget across both owners and
+protect ordinary runtime reserves. In-flight read leases retain their charges;
+dropping a cache entry cannot release its accounting while a tensor handle or
+submitted consumer still retains the storage. Publish only complete packed
+triples and bypass insertion when retained leases leave no capacity. Packing
+and source-storage ownership need a bounded handoff after ordinary readiness,
+with its overlap measured rather than assumed.
+
+CPU dispatch also needs explicit activation publication before the GPU parks.
+Ordinary tensor readback waits for the queued graph and cannot supply that
+handoff safely. Return each expert's already activation-rounded contribution
+before the original GPU slot-order fold, preserving routing and failure
+semantics. Canonical CPU preparation and any further tuning must fit the
+existing load allowance; no second CPU tuning budget is permitted.
 
 Keep Stage 4's causal-head MTP and Stage 5's fragment-packing sources as separate
 experimental controls. Neither met its ordinary primary generation bar; do not

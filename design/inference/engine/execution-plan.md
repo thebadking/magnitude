@@ -842,6 +842,12 @@ and adopted prefetches; its work may precede that consumer's step. Worker and ti
 times can overlap across ranges and owners and do not partition generation latency.
 Upload counters distinguish scratch and bank service and report requested bytes;
 logical source bytes remain separate from process-attributed physical disk reads.
+An additional opt-in request trace records each owner's exact source inventory,
+miss-bearing route frames, original hit flags, resolved conversions and GPU
+victims, with an owner-local ordinal and physical-completion outcome. All-hit
+and scratch frames are explicitly outside that trace. Replaying it evaluates
+retention on the recorded GPU trajectory; it cannot predict the changed
+trajectory, contention or serving speed of a CPU dispatcher.
 Dedicated CUDA owners of one loaded target may opt into a shared host cache of
 immutable compressed expert records. Its key includes the source file and
 complete record geometry; cached bytes use the same staging and conversion

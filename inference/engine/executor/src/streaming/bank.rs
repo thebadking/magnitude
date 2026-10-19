@@ -228,6 +228,7 @@ impl ResidentBank {
         let heartbeat = Heartbeat::new(words(&tensors.heartbeat)?);
         let runtime =
             StreamingRuntime::new(layers, scratch, heartbeat, pools, source, directory, loan)?;
+        runtime.trace_inventory(device, plan, &paths);
         Ok(Self {
             host_experts,
             tensors,

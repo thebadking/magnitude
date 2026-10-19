@@ -472,6 +472,9 @@ struct State {
     prompt: i32,
     /// Diagnostic observations only; absent on the ordinary serving path.
     trace: Option<HashMap<i32, StepTrace>>,
+    /// Request identities for bounded cache-policy replay; disabled in serving.
+    request_trace: bool,
+    request_ordinal: u64,
     reuse: Option<ReuseHistory>,
     reuse_seeds: bool,
     reuse_replacement: bool,
@@ -605,6 +608,8 @@ impl StreamingRuntime {
             prompt: 0,
             trace: std::env::var_os("MAGNITUDE_TRACE_EXPERT_STREAMING")
                 .is_some().then(HashMap::new),
+            request_trace: std::env::var_os("MAGNITUDE_TRACE_EXPERT_REQUESTS").is_some(),
+            request_ordinal: 0,
             reuse,
             reuse_seeds,
             reuse_replacement,
@@ -631,6 +636,38 @@ impl StreamingRuntime {
             stopping,
             watcher: Some(watcher),
         })
+    }
+
+    /// Match request-local layer indices to their exact source inventory.
+    pub(crate) fn trace_inventory(&self, device: &seismic::Device,
+        plan: &crate::ExpertBankPlan, paths: &[std::path::PathBuf]) {
+        let state = self.state.lock().expect("streaming state");
+        if !state.request_trace { return; }
+        let layers = plan.layers.iter().zip(&state.layers).enumerate().map(|(index, (planned, layer))| {
+            let sources = layer.stored.iter().enumerate().map(|(kind, stored)| {
+                let pool = &plan.pools[stored.pool];
+                // A physical footprint for replay, not CPU execution admission.
+                let cpu_name = match pool.source.name() {
+                    "gguf_q4_k" => Some("q4k@rows8"),
+                    "gguf_q5_k" => Some("q5k@rows8"),
+                    "gguf_q5_0" => Some("q5g32s@rows8"),
+                    "gguf_q5_1" => Some("q5g32@rows8"),
+                    "gguf_q8_0" => Some("q8g32s@rows8"),
+                    _ => None,
+                };
+                let cpu_bytes = cpu_name.and_then(seismic::Element::named).and_then(|element|
+                    element.canonical_byte_len(&[1, pool.matrix[0], pool.matrix[1]]).ok());
+                serde_json::json!({"kind": kind, "path": paths[stored.file], "offset": stored.base,
+                    "record_bytes": stored.bytes, "source_element": pool.source.name(),
+                    "matrix": pool.matrix, "cpu_rows8_element": cpu_name,
+                    "cpu_rows8_record_bytes": cpu_bytes})
+            }).collect::<Vec<_>>();
+            serde_json::json!({"layer": index, "scope": format!("{:?}", planned.scope),
+                "experts": plan.experts, "selected": plan.selected, "sources": sources})
+        }).collect::<Vec<_>>();
+        eprintln!("expert request {}", serde_json::json!({"kind": "inventory", "schema": 1,
+            "bank": format!("{:p}", Arc::as_ptr(&self.source)), "device": device.info().selector,
+            "layers": layers, "scope": "Miss-bearing bank requests only; all-hit and scratch frames are absent"}));
     }
 
     /// Steps `first..first + count` are about to be submitted, as one
@@ -679,6 +716,11 @@ impl StreamingRuntime {
         self.in_flight.0.fetch_sub(1, Ordering::AcqRel);
         let mut state = self.state.lock().expect("streaming state");
         if !fenced {
+            if state.request_trace {
+                eprintln!("expert request {}", serde_json::json!({"kind": "complete", "schema": 1,
+                    "bank": format!("{:p}", Arc::as_ptr(&self.source)), "sequence": sequence,
+                    "fenced": false, "failed": true}));
+            }
             if let Some(history) = &mut state.reuse {
                 history.steps.remove(&sequence);
             }
@@ -716,6 +758,11 @@ impl StreamingRuntime {
             state.progress = done;
         }
         release_past(&mut state, &self.source);
+        if state.request_trace {
+            eprintln!("expert request {}", serde_json::json!({"kind": "complete", "schema": 1,
+                "bank": format!("{:p}", Arc::as_ptr(&self.source)), "sequence": sequence,
+                "fenced": true, "failed": failed}));
+        }
         if let Some(trace) = state.trace.as_mut().and_then(|steps| steps.remove(&sequence)) {
             let (cache_hit_bytes, file_read_bytes) = self.source.counters();
             eprintln!("expert source bank={:p} sequence={sequence} cache_hit_bytes={cache_hit_bytes} file_read_bytes={file_read_bytes}",
@@ -1282,6 +1329,18 @@ fn serve(state: &mut State, source: &ExpertSource, layer: usize, sequence: i32) 
     } else {
         state.directory.begin(point, &routed)
     }.expect("validated shared route union");
+    if state.request_trace {
+        state.request_ordinal += 1;
+        let evicted = resolution.evicted.iter().map(|location| serde_json::json!({
+            "layer": location.key.layer.0, "expert": location.key.expert.0,
+        })).collect::<Vec<_>>();
+        eprintln!("expert request {}", serde_json::json!({"kind": "request", "schema": 1,
+            "bank": format!("{source:p}"), "ordinal": state.request_ordinal,
+            "sequence": sequence, "layer": layer, "choices": routed,
+            "initial_gpu_hits": choices.iter().map(|&choice| choice < 0).collect::<Vec<_>>(),
+            "needs_conversion": resolution.choices.iter().map(|choice| choice.needs_conversion).collect::<Vec<_>>(),
+            "evicted": evicted}));
+    }
     if let Some(steps) = &mut state.trace {
         let trace = steps.entry(sequence).or_default();
         trace.requests += 1;
