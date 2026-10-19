@@ -13,9 +13,9 @@
 
 use super::timeline::{TimelineInner, TimelineNode, TimelineOperation};
 use super::{
-    merge_access, submit, word_bytes, CallLaunches, Dispatch, DispatchList, LaunchGeometry,
-    NativePrepared, NativeSubmission, NativeTensorSpec, ScratchNeed, BUFFER_ALIGNMENT,
-    SYNC_SCRATCH_BYTES,
+    BUFFER_ALIGNMENT, CallLaunches, Dispatch, DispatchList, LaunchGeometry, NativePrepared,
+    NativeSubmission, NativeTensorSpec, SYNC_SCRATCH_BYTES, ScratchNeed, merge_access, submit,
+    word_bytes,
 };
 use crate::api::device::DeviceInner;
 use crate::api::kernel::{
@@ -24,7 +24,7 @@ use crate::api::kernel::{
 };
 use crate::api::tensor::TensorInner;
 use crate::api::{CallError, TensorError, WorkflowError};
-use crate::driver::{write_zeros, Allocation};
+use crate::driver::{Allocation, write_zeros};
 use crate::layout;
 use seismic_compiler::errors::{ExecutionError, InvocationError};
 use seismic_compiler::prepared::{ArgumentValue, DeviceIdentity, TensorDescriptor};
@@ -610,6 +610,18 @@ pub struct NativeGraphStorageBytes {
 }
 
 impl NativeGraphMetadataDraft {
+    /// Checked descriptors of a port or result already constructed in this draft.
+    pub fn tensor_metadata(&self, reference: WorkflowResultRef) -> Option<(RepresentationId, Vec<u64>)> {
+        if reference.workflow != self.identity { return None; }
+        if reference.node == INPUT_NODE {
+            let port = self.ports.get(reference.result as usize)?;
+            Some((port.representation, port.extents.clone()))
+        } else {
+            let result = self.results.get(reference.node as usize)?.get(reference.result as usize)?.as_ref()?;
+            Some((result.representation, result.extents.clone()))
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             identity: NEXT_NATIVE_GRAPH.fetch_add(1, Ordering::Relaxed),
@@ -2092,10 +2104,11 @@ impl NativeGraphFamily {
     }
 
     fn upload_regions(&self, sizes: &[u64]) -> Result<Vec<(u64, Arc<Allocation>)>, TensorError> {
-        sizes.iter().copied().filter(|&bytes| bytes != 0)
-            .map(|bytes| {
-                Ok((bytes, self.device.allocate_upload(bytes, BUFFER_ALIGNMENT)?))
-            })
+        sizes
+            .iter()
+            .copied()
+            .filter(|&bytes| bytes != 0)
+            .map(|bytes| Ok((bytes, self.device.allocate_upload(bytes, BUFFER_ALIGNMENT)?)))
             .collect()
     }
 }
@@ -2290,8 +2303,11 @@ impl NativeGraphSlot {
         if bytes.is_empty() && self.plan.ports[ordinal].byte_len == 0 {
             return Ok(());
         }
-        let upload = self.upload.as_ref().ok_or_else(|| TensorError::Execution(
-            ExecutionError::SubmissionFailed("host input has no upload region".to_owned())))?;
+        let upload = self.upload.as_ref().ok_or_else(|| {
+            TensorError::Execution(ExecutionError::SubmissionFailed(
+                "host input has no upload region".to_owned(),
+            ))
+        })?;
         self.plan
             .port_view(ordinal, upload, offset)
             .write_from_host(bytes)

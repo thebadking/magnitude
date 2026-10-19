@@ -176,6 +176,21 @@ impl AssessmentGraphResourceBounds {
         limits: super::ResourceLimits,
         backend: BackendName,
     ) -> Result<Self, GraphError> {
+        Self::derive_owned(
+            definition, load, state, method, codec, limits, backend, None,
+        )
+    }
+
+    fn derive_owned(
+        definition: &ModelDefinition,
+        load: &ModelLoadPlan,
+        state: &super::StateResourcePlan,
+        method: PlannedMethod,
+        codec: KvCodec,
+        limits: super::ResourceLimits,
+        backend: BackendName,
+        owned: Option<std::ops::Range<usize>>,
+    ) -> Result<Self, GraphError> {
         let plan = load
             .program_plan(definition, codec)
             .map_err(|error| error.to_string())?;
@@ -186,20 +201,37 @@ impl AssessmentGraphResourceBounds {
         }
         // The same startup slots a load commits: one request's need.
         let slots = limits.startup_slots();
-        let (target_graph, sealed_target_graphs, target_uploads) =
-            crate::programs::native_target_graph::checked_target_family(
-                backend,
-                load,
-                &definition.decoder,
-                state,
-                plan.target(),
-                limits,
-            )?;
+        let (target_graph, sealed_target_graphs, target_uploads, boundary_bytes) = match owned {
+            Some(owned) => {
+                crate::programs::native_target_graph::checked_target_range_with_boundary(
+                    backend,
+                    load,
+                    &definition.decoder,
+                    state,
+                    plan.target(),
+                    limits,
+                    owned,
+                )?
+            }
+            None => {
+                let (graph, sealed, uploads) =
+                    crate::programs::native_target_graph::checked_target_family(
+                        backend,
+                        load,
+                        &definition.decoder,
+                        state,
+                        plan.target(),
+                        limits,
+                    )?;
+                (graph, sealed, uploads, 0)
+            }
+        };
         let target = NativeGraphCharge::from_checked(
             target_graph.storage,
-            crate::programs::native_target_graph::target_runs_per_step(&definition.decoder),
+            target_uploads.len(),
             slots.target,
-        )?.with_upload_regions(target_uploads)?;
+        )?
+        .with_upload_regions(target_uploads)?;
         let readout = NativeGraphCharge::from_checked(
             crate::programs::graph::readout::checked_readout_family_storage(
                 backend,
@@ -365,6 +397,7 @@ impl AssessmentGraphResourceBounds {
             .collect::<Vec<_>>(),
         )?
         .checked_add(binding_constant_bytes)
+        .and_then(|bytes| bytes.checked_add(boundary_bytes))
         .ok_or("checked graph resource bound overflow")?;
         Ok(Self {
             target,
@@ -379,6 +412,64 @@ impl AssessmentGraphResourceBounds {
             sealed_state_graphs,
         })
     }
+}
+
+/// Complete allocation bound for one physical decoder owner. Graph metadata
+/// retains global topology; physical imports and state are charged locally.
+pub(super) fn range_memory_charge(
+    definition: &ModelDefinition,
+    draft: &super::ExecutionPlanDraft,
+    range: &super::DecoderRangeLoadPlan,
+    state: &super::StateResourcePlan,
+    owner: usize,
+) -> Result<AssessmentMemoryCharge, String> {
+    let policy = draft.policy();
+    let terms = AssessmentMemoryTerms::derive(
+        definition,
+        range.physical_load(),
+        policy.selection(),
+        policy.codec(),
+        policy.method(),
+        policy.limits(),
+    )?;
+    let programs = range
+        .graph_load()
+        .program_plan(definition, policy.codec())
+        .map_err(|error| error.to_string())?;
+    let header = AssessmentHeaderBounds {
+        prepared_program_bytes: AttestedPrograms::planned_invocation_workspace_bytes(
+            &programs,
+            draft.device().backend(),
+        )
+        .map_err(|error| error.to_string())?,
+        startup_additional_bytes: range.import_peak_bytes(),
+        staging_upload_bytes: source_import_peak_bytes(
+            range
+                .physical_load()
+                .weights()
+                .map(|weight| weight.source_bytes)
+                .max()
+                .unwrap_or(0),
+        )?,
+    };
+    let graph = AssessmentGraphResourceBounds::derive_owned(
+        definition,
+        range.graph_load(),
+        state,
+        policy.method(),
+        policy.codec(),
+        policy.limits(),
+        draft.device().backend(),
+        Some(range.range().blocks.clone()),
+    )
+    .map_err(|error| error.to_string())?;
+    let fit = state.fit_state_bytes_by_owner(terms.fit_depth, terms.recurrent_banks)?;
+    let startup = state.startup_state_bytes_by_owner()?;
+    terms.charge(
+        header.with_graph_resource_bound(&graph)?,
+        *fit.get(owner).ok_or("unknown fit state owner")?,
+        *startup.get(owner).ok_or("unknown startup state owner")?,
+    )
 }
 
 impl AssessmentHeaderBounds {

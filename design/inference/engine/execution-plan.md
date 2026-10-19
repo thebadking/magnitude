@@ -932,13 +932,16 @@ seeding retains its original replacement rule. This ranking shares bounded reuse
 history without enabling reuse-based seeds implicitly; it changes neither
 leases, unwritten-fill rollback, publication nor admission. Unset replacement
 policy retains ordinary recency.
-Startup sizes each local shared cache against that owner's assessed device
-weight budget. It enumerates exact local inventories from full local expert
-capacity downward, excluding host-shared staging from dedicated
-device charge. The source assessment preserves graph/state headroom; the final
-range admission independently checks graphs, state, boundary buffers and import
-peak before any allocation. Splitting decoder blocks does not divide the device's
-weight budget between owners.
+Startup sizes each local shared cache against that owner's complete allocation
+bound. It enumerates exact local inventories from full local expert capacity
+downward. Each candidate includes local slab-rounded state for the standard fit
+workload, checked range graphs, invocation storage, incoming boundary buffers
+and the physical import/qualification peak. Host-shared staging and graph uploads
+are excluded from dedicated device charge. Each owner's stable capacity and
+ordinary reserve remain independent; a whole-decoder weight-only allowance is
+not a substitute for this bound. Explicit weight caps still constrain the
+physical inventory. Final range admission independently checks the sealed graphs,
+startup state, boundary buffers and import peak before allocation.
 
 Graph enumeration and resource certification accept the same global block range.
 A graph may be shared only with an equivalent earlier block inside that range;
@@ -964,6 +967,8 @@ most constrained owner; capacity on a peer never pays a local allocation.
 Startup charge projections group recurrent components by owner and include each
 group's alignment and address table. Allocation verifies the opened selectors
 against placement and compares physical backing with those projections.
+Fit-depth projections use those same owner groups, common bank indexing and slab
+recipes; neither per-token byte slopes nor a peer's capacity pay an owner's state.
 Aggregate state fit and single-device admission reject distributed state plans.
 
 A range's graph load metadata retains outside layers in their resident form for

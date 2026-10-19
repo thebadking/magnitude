@@ -41,6 +41,10 @@ impl PlannedDevice {
         self.assessment_capacity_bytes
     }
 
+    pub fn shared_in_host(&self) -> bool {
+        self.shared_in_host
+    }
+
     /// Whether the device forms Metal tensor operations
     /// (`SelectedDevice::tensor_operations`).
     pub fn tensor_operations(&self) -> bool {
@@ -183,7 +187,6 @@ impl ExecutionPlanDraft {
         Ok(self)
     }
 
-
     /// The weight cap (spec 6.1). The resident plan when the standard
     /// workload fits the device with every weight resident and `cap` (when
     /// given) covers every weight; otherwise the streamed plan with the
@@ -291,7 +294,6 @@ impl ExecutionPlanDraft {
             "the smallest expert bank ({smallest} slots) needs {weights} weight bytes and {allocation} total allocation bytes; weight cap {cap:?}, device capacity {capacity}"
         )))
     }
-
 
     /// Prepare one owner's exact program bindings while retaining global
     /// decoder indices. The paired inventory remains the import authority.

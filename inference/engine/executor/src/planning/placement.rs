@@ -71,15 +71,28 @@ impl DecoderRangeLoadPlan {
 }
 
 impl DecoderPlacement {
-    /// Spend this owner's already assessed weight budget on its local cache.
-    /// The source plan reserves graph/state headroom independently; final range
-    /// admission still checks the complete physical allocation and import peak.
+    /// Select the largest local cache whose complete owner allocation fits.
+    /// State and graph bounds use the same placement and physical inventory as
+    /// final admission; another owner's capacity cannot fund this cache.
     pub fn load_range_with_cache_budget(
         &self,
         owner: usize,
-        load: &super::ModelLoadPlan,
-        shared_in_host: bool,
+        definition: &magnitude_family_contracts::ModelDefinition,
+        draft: &super::ExecutionPlanDraft,
+        capacities: &[super::ResourceCapacity],
+        weight_cap: Option<u64>,
     ) -> Result<DecoderRangeLoadPlan, String> {
+        let load = draft.load();
+        let shared_in_host = draft.device().shared_in_host();
+        let capacity = capacities
+            .get(owner)
+            .ok_or("unknown range capacity owner")?
+            .domain_bytes;
+        if self.ranges.get(owner).map(|range| range.device) != Some(draft.device().selector())
+            || capacity != draft.device().assessment_capacity_bytes()
+        {
+            return Err("range cache capacity differs from the selected owner".into());
+        }
         let initial = self.load_range(owner, load, None)?;
         let Some(bank) = initial.physical_load.expert_bank() else {
             return Ok(initial);
@@ -89,28 +102,72 @@ impl DecoderPlacement {
         };
         let device_weights = |load: &super::ModelLoadPlan| -> Result<u64, String> {
             let bytes = super::weight_bytes_by_component(load)?[0];
-            let host = if shared_in_host { load.shared_weight_bytes()? } else { 0 };
-            bytes.checked_sub(host).ok_or_else(|| "host weights exceed weight charge".into())
+            let host = if shared_in_host {
+                load.shared_weight_bytes()?
+            } else {
+                0
+            };
+            bytes
+                .checked_sub(host)
+                .ok_or_else(|| "host weights exceed weight charge".into())
         };
-        let budget = device_weights(load)?;
+        let source_budget = device_weights(load)?;
+        let state = super::ResourcePlanner::state_plan_placed(
+            definition,
+            load,
+            draft.policy().codec(),
+            draft.policy().limits(),
+            self,
+            capacities,
+        )?;
         let minimum = crate::operators::routed::fused_graph::DECODE_ROWS
-            .checked_mul(bank.selected).ok_or("route union overflow")?.min(bank.experts);
+            .checked_mul(bank.selected)
+            .ok_or("route union overflow")?
+            .min(bank.experts);
         // Evaluate exact inventories, including directory and staging changes.
         // Do not extrapolate physical charge from a per-record payload slope.
         for slots in (bank.slots..=bank.experts).rev() {
-            let records = shared.groups.iter().map(|group| {
-                slots.checked_mul(group.layers.len() as u64)
-                    .map(|records| records.max(minimum))
-                    .ok_or("local expert record count overflow")
-            }).collect::<Result<Vec<_>, _>>()?;
+            let records = shared
+                .groups
+                .iter()
+                .map(|group| {
+                    slots
+                        .checked_mul(group.layers.len() as u64)
+                        .map(|records| records.max(minimum))
+                        .ok_or("local expert record count overflow")
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             let candidate = self.load_range(owner, load, Some(&records))?;
-            if device_weights(candidate.physical_load())? <= budget {
-                eprintln!("magnitude-engine: decoder range {:?}: {slots} cache records per layer, {} local weight bytes (device weight budget {budget})",
-                    candidate.range.blocks, candidate.weight_bytes);
+            if device_weights(candidate.physical_load())? > capacity
+                || weight_cap.is_some_and(|cap| candidate.weight_bytes() > cap)
+            {
+                continue;
+            }
+            let charge = super::assessment::range_memory_charge(
+                definition, draft, &candidate, &state, owner,
+            )?;
+            let allocation = charge.device_allocation_bytes(shared_in_host)?;
+            if allocation <= capacity {
+                eprintln!(
+                    "magnitude-engine: range cache assessment {}",
+                    serde_json::json!({
+                        "blocks":candidate.range.blocks,"slots_per_layer":slots,
+                        "physical_weight_bytes":candidate.weight_bytes(),"source_device_weight_budget":source_budget,
+                        "device_allocation_bound_bytes":allocation,"device_capacity_bytes":capacity,
+                        "prepared_resource_bound_bytes":charge.bounds.prepared_resource_bytes,
+                        "startup_additional_bound_bytes":charge.bounds.startup_additional_bytes,
+                        "fit_state_bytes":charge.exact_resident_bytes.checked_sub(candidate.weight_bytes()).ok_or("range resident charge differs from weights")?,
+                        "host_shared_weight_bytes":charge.shared_weight_bytes,
+                        "host_shared_graph_upload_bytes":charge.bounds.shared_upload_bytes,
+                        "fit_depth":definition.decoder.context_limit.min(100_000),"weight_cap":weight_cap,
+                    })
+                );
                 return Ok(candidate);
             }
         }
-        Ok(initial)
+        Err(format!(
+            "no local expert cache fits owner {owner}'s complete allocation at capacity {capacity}, weight cap {weight_cap:?}"
+        ))
     }
 
     pub fn new(blocks: usize, ranges: Vec<DecoderRange>) -> Result<Self, String> {

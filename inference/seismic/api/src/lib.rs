@@ -173,12 +173,12 @@ pub use seismic_runtime::api::{CallError, OutputError, TensorError, WorkflowErro
 pub use seismic_runtime::native::recorded_graph_device_bytes;
 mod slab;
 pub use seismic_runtime::devices::{
-    Availability, CapacityBasis, DISPLACEMENT_HISTORY, DeviceId, DeviceInfo, DeviceKind, DeviceMeasurements,
-    DeviceMemory, DeviceMemoryInfo, DeviceMemoryStatus, DeviceSelector, DeviceTopology,
-    DiscoveryDiagnostic, DiscoveryError, DisplacementWindow, HeadroomBasis, HeadroomEstimate,
-    HostDisplacement, HostMeasurements, HostMemoryStatus, KernelPressure, LimitVisibility,
-    MemoryPoolId, MemoryPoolInfo, MemoryPoolKind, MemoryUsage, ObservationError, OpenError,
-    ProcessLimitKind, ProcessMemoryLimit, ResolveError, SelectorParseError,
+    Availability, CapacityBasis, DISPLACEMENT_HISTORY, DeviceId, DeviceInfo, DeviceKind,
+    DeviceMeasurements, DeviceMemory, DeviceMemoryInfo, DeviceMemoryStatus, DeviceSelector,
+    DeviceTopology, DiscoveryDiagnostic, DiscoveryError, DisplacementWindow, HeadroomBasis,
+    HeadroomEstimate, HostDisplacement, HostMeasurements, HostMemoryStatus, KernelPressure,
+    LimitVisibility, MemoryPoolId, MemoryPoolInfo, MemoryPoolKind, MemoryUsage, ObservationError,
+    OpenError, ProcessLimitKind, ProcessMemoryLimit, ResolveError, SelectorParseError,
 };
 pub use slab::{Slab, SlabLayout, SlabRegion, SlabTensor};
 
@@ -2397,6 +2397,14 @@ fn record(request: impl FnOnce() -> KernelRequest) {
 }
 
 impl NativeGraphMetadata {
+    /// Allocation-free observation of this draft's checked tensor descriptors.
+    pub fn tensor_metadata(&self, tensor: &WorkflowTensor) -> Option<NativeTensorMetadata> {
+        let (representation, extents) = self.inner.tensor_metadata(tensor.inner)?;
+        let element = Element(representation);
+        let canonical_bytes = element.canonical_byte_len(&extents).ok()?;
+        Some(NativeTensorMetadata { element, extents, canonical_bytes })
+    }
+
     pub fn new(backend: BackendName) -> Self {
         Self {
             backend,

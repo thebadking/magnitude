@@ -231,6 +231,10 @@ native workflow derives intermediate storage lifetimes from the checked root ABI
 compatible storage after its last consumer. Results exported beyond workflow completion have
 distinct ownership and capacity from reusable scratch. Backends consume this complete ABI without
 exposing destination parameters or storage planes in Seismic source.
+Checked native graph drafts expose their already constructed tensor descriptors
+through the same observation as sealed plans. The observation derives element,
+extents and canonical bytes from the checked port or result, rejects another
+graph's handles, and creates no allocation or physical-selection authority.
 
 A result-bearing capability intrinsic produces one fresh owned logical value. The compiler
 preserves that operation atomically through checked and logical IR with a distinct owned

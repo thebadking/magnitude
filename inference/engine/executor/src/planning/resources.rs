@@ -1,4 +1,4 @@
-use super::{source_import_peak_bytes, weight_bytes_by_component, ModelLoadPlan, PlannedMethod};
+use super::{ModelLoadPlan, PlannedMethod, source_import_peak_bytes, weight_bytes_by_component};
 use crate::{
     PreparedDrafterGraphs, PreparedStateCopyGraphs, PreparedTargetGraphs,
     PreparedTargetReadoutGraphs, PreparedVisionGraphs,
@@ -408,11 +408,17 @@ impl NativeGraphCharge {
         {
             return Err("upload regions differ from the family's admitted runs".into());
         }
-        let per_activation = regions.iter().try_fold(0u64, |total, &bytes|
-            total.checked_add(bytes)).ok_or("upload region sum overflows")?;
-        self.committed_bytes = per_activation.checked_mul(self.activations as u64)
-            .and_then(|bytes| self.output_bytes.checked_mul(self.output_slots as u64)
-                .and_then(|outputs| bytes.checked_add(outputs)))
+        let per_activation = regions
+            .iter()
+            .try_fold(0u64, |total, &bytes| total.checked_add(bytes))
+            .ok_or("upload region sum overflows")?;
+        self.committed_bytes = per_activation
+            .checked_mul(self.activations as u64)
+            .and_then(|bytes| {
+                self.output_bytes
+                    .checked_mul(self.output_slots as u64)
+                    .and_then(|outputs| bytes.checked_add(outputs))
+            })
             .ok_or("graph charge overflows")?;
         self.upload_regions = regions;
         Ok(self)
@@ -469,9 +475,11 @@ pub(crate) fn arena_bytes(charges: &[&NativeGraphCharge]) -> u64 {
 }
 
 pub(crate) fn graph_shared_upload_bytes(charges: &[&NativeGraphCharge]) -> Result<u64, String> {
-    charges.iter().try_fold(0u64, |total, charge| total
-        .checked_add(charge.shared_upload_bytes()?)
-        .ok_or_else(|| "graph upload total overflows".to_owned()))
+    charges.iter().try_fold(0u64, |total, charge| {
+        total
+            .checked_add(charge.shared_upload_bytes()?)
+            .ok_or_else(|| "graph upload total overflows".to_owned())
+    })
 }
 
 /// Every graph byte a load commits: the workspace arena, and each family's
@@ -549,11 +557,10 @@ impl HistoryStorePlan {
     /// the launch needs.
     pub fn listed_tile_classes(&self, form: DecodedHistoryForm) -> Result<Vec<u64>, String> {
         let most = self.launch_tiles(1)?;
-        let mut classes = std::iter::successors(form.smallest_listing_tiles(), |tiles| {
-            tiles.checked_mul(2)
-        })
-            .take_while(|tiles| *tiles < most)
-            .collect::<Vec<_>>();
+        let mut classes =
+            std::iter::successors(form.smallest_listing_tiles(), |tiles| tiles.checked_mul(2))
+                .take_while(|tiles| *tiles < most)
+                .collect::<Vec<_>>();
         classes.push(most);
         Ok(classes)
     }
@@ -659,17 +666,22 @@ impl StateStorePlan {
     }
 
     pub fn bank_slab_layout(&self) -> Result<Option<SlabLayout>, String> {
-        if self.recurrent_components.is_empty() {
-            return Ok(None);
-        }
-        let regions = self
-            .recurrent_components
-            .iter()
+        self.bank_slab_layout_for(self.recurrent_components.iter())
+    }
+
+    fn bank_slab_layout_for<'a>(
+        &self,
+        components: impl Iterator<Item = &'a ComponentSpec>,
+    ) -> Result<Option<SlabLayout>, String> {
+        let regions = components
             .map(|component| SlabRegion {
                 element: Element::dense(component.dtype),
                 row_shape: component.shape.iter().map(|&size| size as u64).collect(),
             })
             .collect::<Vec<_>>();
+        if regions.is_empty() {
+            return Ok(None);
+        }
         let logical_banks = self
             .bank_capacity
             .storage_total()
@@ -709,31 +721,100 @@ impl StateStorePlan {
     /// independent of the depth; each rounded to whole slabs of its domain.
     pub fn history_bytes_at_depth(&self, depth: u64) -> Result<u64, String> {
         self.domains.iter().try_fold(0u64, |total, domain| {
-            let layout = domain.slab_layout()?;
-            let rows = match domain.kind {
-                HistoryDomainKind::Token => depth,
-                kind => u64::try_from(
-                    kind.row_limit(
-                        usize::try_from(depth).map_err(|_| "fit depth exceeds host range")?,
-                        self.max_advance,
-                    )
-                    .map_err(|error| error.to_string())?,
-                )
-                .map_err(|_| "window rows exceed u64")?,
-            };
-            // Whole pages: a history's first page may be partial once a
-            // window releases the rows before it, its last page always may.
-            let page = u64::from(domain.page_rows);
-            let front = u64::from(matches!(domain.kind, HistoryDomainKind::Window { .. }));
-            let pages = rows.max(1).div_ceil(page) + front;
-            let slabs = (pages * page).div_ceil(u64::from(domain.slab_rows));
-            layout
-                .slab_bytes
-                .checked_mul(slabs)
-                .and_then(|bytes| bytes.checked_add(layout.address_table_bytes))
-                .and_then(|bytes| total.checked_add(bytes))
+            total
+                .checked_add(Self::history_domain_bytes_at_depth(
+                    domain,
+                    self.max_advance,
+                    depth,
+                )?)
                 .ok_or_else(|| "history slab fit charge overflows".into())
         })
+    }
+
+    fn history_domain_bytes_at_depth(
+        domain: &HistoryStorePlan,
+        max_advance: usize,
+        depth: u64,
+    ) -> Result<u64, String> {
+        let layout = domain.slab_layout()?;
+        let rows = match domain.kind {
+            HistoryDomainKind::Token => depth,
+            kind => u64::try_from(
+                kind.row_limit(
+                    usize::try_from(depth).map_err(|_| "fit depth exceeds host range")?,
+                    max_advance,
+                )
+                .map_err(|error| error.to_string())?,
+            )
+            .map_err(|_| "window rows exceed u64")?,
+        };
+        // Whole pages: a history's first page may be partial once a
+        // window releases the rows before it, its last page always may.
+        let page = u64::from(domain.page_rows);
+        let front = u64::from(matches!(domain.kind, HistoryDomainKind::Window { .. }));
+        let pages = rows.max(1).div_ceil(page) + front;
+        let slabs = (pages * page).div_ceil(u64::from(domain.slab_rows));
+        layout
+            .slab_bytes
+            .checked_mul(slabs)
+            .and_then(|bytes| bytes.checked_add(layout.address_table_bytes))
+            .ok_or_else(|| "history slab fit charge overflows".into())
+    }
+
+    /// The same slab recipes as ordinary fit, partitioned by physical owner.
+    pub fn fit_bytes_by_owner(
+        &self,
+        depth: u64,
+        banks: u64,
+        history_owners: &[usize],
+        recurrent_owners: &[usize],
+        owner_count: usize,
+    ) -> Result<Vec<u64>, String> {
+        if history_owners.len() != self.domains.len()
+            || recurrent_owners.len() != self.recurrent_components.len()
+            || history_owners
+                .iter()
+                .chain(recurrent_owners)
+                .any(|&owner| owner >= owner_count)
+        {
+            return Err("fit state owners differ from the planned domains and banks".into());
+        }
+        (0..owner_count)
+            .map(|owner| {
+                let history = self
+                    .domains
+                    .iter()
+                    .zip(history_owners)
+                    .filter(|(_, assigned)| **assigned == owner)
+                    .try_fold(0u64, |total, (domain, _)| {
+                        total
+                            .checked_add(Self::history_domain_bytes_at_depth(
+                                domain,
+                                self.max_advance,
+                                depth,
+                            )?)
+                            .ok_or_else(|| String::from("owner history fit charge overflows"))
+                    })?;
+                let components = self
+                    .recurrent_components
+                    .iter()
+                    .zip(recurrent_owners)
+                    .filter_map(|(component, &assigned)| (assigned == owner).then_some(component));
+                let recurrent = self
+                    .bank_slab_layout_for(components)?
+                    .map_or(Ok(0), |layout| {
+                        let slabs = banks.max(1).div_ceil(u64::from(self.bank_slab_banks()?));
+                        layout
+                            .slab_bytes
+                            .checked_mul(slabs)
+                            .and_then(|bytes| bytes.checked_add(layout.address_table_bytes))
+                            .ok_or_else(|| String::from("owner bank fit charge overflows"))
+                    })?;
+                history
+                    .checked_add(recurrent)
+                    .ok_or_else(|| "owner fit state charge overflows".into())
+            })
+            .collect()
     }
 
     pub fn bank_bytes_at_count(&self, banks: u64) -> Result<u64, String> {
@@ -907,8 +988,6 @@ impl StateStorePlan {
         }
         Ok(bindings)
     }
-
-
 }
 
 impl ResourceBytes {
@@ -1059,7 +1138,6 @@ impl ResourcePlan {
         }
         Ok(self)
     }
-
 
     pub fn target_graph(&self) -> NativeGraphCharge {
         self.target_graph.clone()
@@ -1236,6 +1314,20 @@ impl StateResourcePlan {
             .checked_add(head_history)
             .and_then(|bytes| bytes.checked_add(target_banks))
             .ok_or_else(|| "state fit charge overflows".into())
+    }
+
+    pub fn fit_state_bytes_by_owner(&self, depth: u64, banks: u64) -> Result<Vec<u64>, String> {
+        let placement = self
+            .placement
+            .as_ref()
+            .ok_or("per-owner fit requires placed state")?;
+        self.target_state.fit_bytes_by_owner(
+            depth,
+            banks,
+            &self.history_owners,
+            &self.recurrent_owners,
+            placement.ranges().len(),
+        )
     }
 
     /// The state slabs a load commits at startup, before any request.
@@ -1893,7 +1985,6 @@ impl ResourcePlanner {
         }
         .validate()
     }
-
 }
 
 /// The row reservations of a store's history domains.
@@ -2059,35 +2150,77 @@ mod slab_plan_tests {
         use crate::{DecoderPlacement, DecoderRange};
         use seismic::DeviceSelector;
         let (definition, load, limits) = placed_qwen_fixture();
-        let placement = DecoderPlacement::new(4, vec![
-            DecoderRange { device: DeviceSelector::Cuda { uuid: [1; 16] }, blocks: 0..2 },
-            DecoderRange { device: DeviceSelector::Cuda { uuid: [2; 16] }, blocks: 2..4 },
-        ]).unwrap();
+        let placement = DecoderPlacement::new(
+            4,
+            vec![
+                DecoderRange {
+                    device: DeviceSelector::Cuda { uuid: [1; 16] },
+                    blocks: 0..2,
+                },
+                DecoderRange {
+                    device: DeviceSelector::Cuda { uuid: [2; 16] },
+                    blocks: 2..4,
+                },
+            ],
+        )
+        .unwrap();
         let capacities = [
-            ResourceCapacity { domain_bytes: 64 << 20, tensor_operations: TensorOperations::Absent },
-            ResourceCapacity { domain_bytes: 128 << 20, tensor_operations: TensorOperations::Absent },
+            ResourceCapacity {
+                domain_bytes: 64 << 20,
+                tensor_operations: TensorOperations::Absent,
+            },
+            ResourceCapacity {
+                domain_bytes: 128 << 20,
+                tensor_operations: TensorOperations::Absent,
+            },
         ];
-        let state = ResourcePlanner::state_plan_placed(&definition, &load, KvCodec::Dense,
-            limits, &placement, &capacities).unwrap();
+        let state = ResourcePlanner::state_plan_placed(
+            &definition,
+            &load,
+            KvCodec::Dense,
+            limits,
+            &placement,
+            &capacities,
+        )
+        .unwrap();
         assert_eq!(state.placement(), Some(&placement));
         assert_eq!(state.history_owners(), [0, 1]);
         assert!(state.recurrent_owners().contains(&0));
         assert!(state.recurrent_owners().contains(&1));
-        assert_eq!(state.capacity_bytes.domain_bytes, capacities[0].domain_bytes);
-        let owner_row_bytes: u64 = state.target_state().domains.iter().zip(state.history_owners())
-            .filter(|(_, owner)| **owner == 0).map(|(domain, _)| domain.row_bytes).sum();
-        assert_eq!(state.capacity().history_rows as u64, capacities[0].domain_bytes / owner_row_bytes);
+        assert_eq!(
+            state.capacity_bytes.domain_bytes,
+            capacities[0].domain_bytes
+        );
+        let owner_row_bytes: u64 = state
+            .target_state()
+            .domains
+            .iter()
+            .zip(state.history_owners())
+            .filter(|(_, owner)| **owner == 0)
+            .map(|(domain, _)| domain.row_bytes)
+            .sum();
+        assert_eq!(
+            state.capacity().history_rows as u64,
+            capacities[0].domain_bytes / owner_row_bytes
+        );
         let startup = state.startup_state_bytes_by_owner().unwrap();
         assert_eq!(startup.len(), 2);
         assert!(startup.iter().all(|&bytes| bytes > 0));
-        assert_eq!(startup.iter().sum::<u64>(), state.startup_state_bytes().unwrap());
+        assert_eq!(
+            startup.iter().sum::<u64>(),
+            state.startup_state_bytes().unwrap()
+        );
         assert!(state.fit_state_bytes(128, 2).is_err());
         assert!(state.allocate_target_state_placed(&[]).is_err());
         for (owner, range) in placement.ranges().iter().enumerate() {
             // Independent device assessments can differ by one seed slot.
             // The state layout still describes the same model inventory.
-            let source = if owner == 0 { load.clone() } else {
-                load.resident_inventory().with_shared_expert_bank(10, 2).unwrap()
+            let source = if owner == 0 {
+                load.clone()
+            } else {
+                load.resident_inventory()
+                    .with_shared_expert_bank(10, 2)
+                    .unwrap()
             };
             let range_load = placement.load_range(owner, &source, Some(&[32])).unwrap();
             assert_eq!(range_load.derives_from(&load), owner == 0);
@@ -2101,15 +2234,28 @@ mod slab_plan_tests {
             let local = range_load.graph_load();
             let physical = range_load.physical_load();
             assert_eq!(range_load.decoder_blocks(), definition.decoder.blocks.len());
-            assert_eq!(range_load.weight_bytes(), super::weight_bytes_by_component(physical).unwrap()[0]);
+            assert_eq!(
+                range_load.weight_bytes(),
+                super::weight_bytes_by_component(physical).unwrap()[0]
+            );
             assert!(physical.target().len() < local.target().len());
-            assert!(range_load.import_peak_bytes() >= physical.target().iter().map(|weight| weight.source_bytes).max().unwrap());
+            assert!(
+                range_load.import_peak_bytes()
+                    >= physical
+                        .target()
+                        .iter()
+                        .map(|weight| weight.source_bytes)
+                        .max()
+                        .unwrap()
+            );
             for weight in physical.target() {
                 use magnitude_family_contracts::WeightScope;
                 match weight.role.scope {
-                    WeightScope::Target => {},
-                    WeightScope::TargetSublayer(index) | WeightScope::TargetBranch { sublayer: index, .. } =>
-                        assert!(range.blocks.contains(&(index.block as usize))),
+                    WeightScope::Target => {}
+                    WeightScope::TargetSublayer(index)
+                    | WeightScope::TargetBranch {
+                        sublayer: index, ..
+                    } => assert!(range.blocks.contains(&(index.block as usize))),
                     _ => panic!("non-target weight in range inventory"),
                 }
             }
@@ -2117,9 +2263,15 @@ mod slab_plan_tests {
             assert_eq!(bank.layers.len(), 2);
             let programs = local.program_plan(&definition, KvCodec::Dense).unwrap();
             crate::programs::native_target_graph::checked_target_family_in_range(
-                BackendName::Cuda, &local, &definition.decoder, &state, programs.target(),
-                limits, range.blocks.clone(),
-            ).unwrap();
+                BackendName::Cuda,
+                &local,
+                &definition.decoder,
+                &state,
+                programs.target(),
+                limits,
+                range.blocks.clone(),
+            )
+            .unwrap();
             for weight in local.target() {
                 if let Some(original) = load.expert_bank().unwrap().resident_plan(weight.role) {
                     if bank.holds(weight.role) {
