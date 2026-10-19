@@ -1191,6 +1191,52 @@ output into the external evaluation cache, retaining its original path through
 a symlink, allowed the same unmodified audit to verify it. Both failed records
 and controller logs are retained. No provenance or numerical gate was relaxed.
 
+### Stage 4 raw block localization
+
+An isolated diagnostic now captures completed raw block rows at a bounded logical
+position range. It flushes and observes producer completions while retaining the
+ordinary graph, state and stored-table leases. Reading allocates no device
+storage. An optional mixer-boundary export belongs to both checked and prepared
+graph layouts, admission charges and graph-sharing identity. These diagnostic
+changes remain in the candidate, with full patches in their build results.
+
+Build `20261019T104107Z-stage4-build-dc5106` (base `47f852f5`, dirty digest
+`fba25c0a3c72e3c8a35423555ec942aeb2123919697986bbf9a54b73fdc3b6f6`)
+and probe `20261019T104221Z-stage4-blocks-818d25` captured position 395 at
+every block's input and output. The same four scored positions, context 581,
+fixture and two owners were preserved. Both widths' logits match the earlier
+probe exactly. All raw rows were finite.
+
+- Block 0's input and the outputs of blocks 0–2 match byte-for-byte across widths.
+- Block 3 has identical input but differing output: RMS difference
+  **7.140004e-6**, maximum absolute difference **6.954372e-5**.
+- Within each width, block 23's output equals block 24's input exactly. The
+  initial difference precedes this GPU handoff; `handoff-check.json` retains
+  the boundary comparison.
+- By block 47's output, the RMS difference is **0.06008935**, with maximum
+  absolute difference **0.7457142**. This is a diagnostic row, not a model-quality
+  or timing result.
+
+Build `20261019T104639Z-stage4-build-5377c3` (same base, dirty digest
+`67faba0d007a6dfd528ae5e452de9e77237fb5fe3cfe13a24bed8e292b3c38ef`)
+adds the admitted mixer-boundary export for block 3. Probe
+`20261019T104747Z-stage4-middle-66c44f` confirms that this intermediate already
+differs: RMS **6.751721e-7**, maximum absolute difference **3.686594e-5**.
+Its execution trace identifies blocks 0–2 as recurrent and block 3 as attention.
+The first observed difference is therefore inside block 3's attention mixer,
+before its feed-forward, rather than first appearing in vocabulary projection.
+That mixer includes stream mixing, attention projections, history/attention and
+the residual join; the specific operation is not yet identified.
+
+The added export reproduced all 96 earlier raw rows, logits and exported features
+byte-for-byte at both widths (`observer-check.json`). The recorded attention
+configuration is the same for both row regimes and both widths: MATRIX=1,
+PARTS=12, WARPS=4, COLUMNS=1, QREG=1, SLICES=1, STAGES=2. Different selected
+parameters are therefore not supported as the explanation for this probe.
+This does not establish arithmetic parity inside that configuration. Both runs
+are untimed diagnostics with pinned launchers and archived input/output data;
+the MTP serving parity gate remains failed.
+
 ## Immediate next action
 
 Continue **Stage 4 qualification**, preserving the frozen Stage 2b plain control.
@@ -1199,13 +1245,13 @@ target-reading heads, vision and separate block drafters need other placement
 contracts. Real proposals, full-acceptance prefix reuse and cancellation/recovery
 now work; the ordinary-continuation parity gate remains failed.
 
-Localize the earliest decoder/readout difference on the same bounded canonical
-input at verification widths 1 and 2. The harness now carries decoder ranges,
-keeps context fixed, and retains exact exported feature rows. The target-only
-difference reproduces on plain main and with dense KV, so do not attribute it
-solely to drafting, rejected-suffix repair or compression. Exported features
-also differ, but packed projection has a separate preparation path; capture
-completed raw block outputs if needed to locate the first changing operation.
+Separate block 3's attention input projection, history/softmax and output
+projection on the same bounded canonical input at verification widths 1 and 2.
+Its input matches exactly; its mixer output already differs. Retain exact
+projected query/key/value and attended rows through admitted graph exports as
+needed, and verify that observation preserves the saved logits. The target-only
+difference reproduces on plain main and with dense KV, before the GPU handoff;
+do not attribute it solely to drafting, rejected-suffix repair or compression.
 Preserve graph/state leases and every owner's completion, keep diagnostics
 opt-in, and make no timing claim from an instrumented run. Do not serialize
 verification or relax precision/greedy parity to obtain a pass. Requalify the
