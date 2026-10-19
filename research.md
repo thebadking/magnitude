@@ -2646,6 +2646,49 @@ delivery latencies, ready census, owner assessments, logical/physical reads,
 RAM, temperatures, `analysis.json` and `analyze.py`. No unit or integration tests
 were added or run.
 
+### Stage 7c — Separate startup phases and audit retained qualification storage
+
+Initial candidate **`1fa4bd9aec5d5dec58b4cebf9b9b9ba973c74ee8`** starts from
+the repaired group 8 control. Source inspection confirms that preparation
+consumes the tuner and its weight/input caches before graph allocation and
+physical model import. CUDA replay records retain formed kernels/plans and
+timelines, not those bound weight tensors. Bulk import completes before initial
+state allocation. The candidate therefore bounds preparation separately and
+combines persistent holdings with the maximum of import, initial state and the
+fit workload, preserving every fresh heap claim and ordinary reserve.
+
+The release build passes in **4m42s**. Qualification
+**`20261019T205119Z-stage7-startup-phases-strict-41746a`** returns all six exact
+prose/ordinary/tool responses, with equal usage, stop boundaries and selected
+GPU choices. Both sides use group 8 and context 1024. The candidate selects
+**223/224 records per layer**, versus 201/206. Its largest physical import
+source on both owners is `output.weight`, **675,430,400 bytes** at shape
+`[248320, 2560]`; the existing two-page allowance makes its source-window bound
+**675,438,592 bytes**. Qualification of the actual graph inventory remains
+**2,166,655,616 bytes** on each owner, separate from physical model weights.
+The initial-state charge samples are **260,585,040/260,104,592 bytes**, below
+the fit-state bounds of **792,502,032/788,332,880 bytes**.
+
+**The complete memory audit is still open; do not time or promote this initial
+candidate.** Post-preparation samples show **42,439,840/42,439,827 charged
+bytes**, while the factory's fixed planned invocation charge is only **78
+bytes**. Source inspection finds that qualification calls grow each prepared
+kernel's cached standalone scratch after the factory compares its invocation
+charge with the plan. Those arenas remain retained across readiness, and the
+cached attested charge is not rechecked. Separating the weight-fixture phase
+does not dispose this additional persistent storage.
+
+The follow-up must give one-shot qualification calls scratch owned through that
+call's completion, preserve scalar-result serialization and returned-tensor
+ownership, and recheck the fixed retained charge after qualification. Ordinary
+cached standalone calls keep their existing lifetime. Rebuild and requalify
+the complete candidate before lifecycle/timing. The initial source remains
+frozen in `startup-phases`, with independent engine/harness copies in
+`startup-phases-initial-control`; the build and qualification retain raw
+observations, memory points, `preserved-binaries.json`, and the limited phase
+arithmetic derivation. `phase-audit.json` explicitly records the outstanding
+workspace finding. No unit or integration tests were added or run.
+
 ## Immediate next action
 
 Continue **Stage 7** using the frozen Stage 2b plain serving control. This is a
@@ -2665,16 +2708,15 @@ the repaired independent copies are hash-checked and the shared Cargo target is
 cleaned. Use `grouping-reservations-control` for the next comparison's repaired
 group 8 binaries. Stage 2b remains the accepted serving reference.
 
-Next audit **Stage 7c startup phase accounting** with the repaired group 8 build
-as its experimental control. Identify the largest actual source/import and
-qualification contributors and all resources surviving each phase. Preparation
-precedes bulk model import, while the current bound adds the combined
-qualification/import allowance beside persistent holdings. Derive a complete
-maximum over actual overlapping phases before changing that bound; retain fresh
-heap claims and ordinary reserves throughout allocation. Do not credit a
-readiness sample as unused peak capacity. Requalify text, tools, lifecycle,
-native choices and memory admission before the same thermal-gated comparison.
-Only then broaden affected context and single-GPU coverage for Stage 8.
+Continue **Stage 7c startup phase accounting** with repaired group 8 as the
+experimental control. The initial phase candidate passes scoped serving, but
+the charge audit exposes retained standalone qualification arenas. Finish the
+call-scoped workspace repair and the post-qualification charge check, then
+rebuild and requalify the complete candidate. Retain fresh heap claims and
+ordinary reserves throughout allocation; readiness samples are not unused peak
+capacity. Text, tools, lifecycle, native choices and complete memory admission
+must precede the same thermal-gated comparison. Only then broaden affected
+context and single-GPU coverage for Stage 8.
 
 Before resuming Stage 6 timing, repair and qualify affected serving behavior.
 Account for cache hit rate, import cost, file-cache displacement, worker contention
