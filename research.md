@@ -174,6 +174,18 @@ required records and source stalls; another anonymous cache competes for that
 same RAM. The model's 103.688 GiB source still exceeds host memory. Full results
 are in `20261019T215322Z-stage7-startup-attention-inventory-comparison-f330d9/`.
 
+The derived-cap follow-up now measures the alternative directly, on the same
+frozen `7a0a1f30` binary. A **33 GiB cap** retains **15.190 GiB** more classified
+host model storage after the repeat/ordinary request sequence. Linux file cache
+falls from **56.490–56.833 GiB to 41.355–41.524 GiB**, while actually free RAM
+stays **0.406–0.480 GiB** with retention enabled. This uses RAM previously
+holding file pages. Logical generation-delivery reads fall **99.630% for repeat
+and 98.942% for ordinary**, but generation changes only **−0.535% / +0.137%**,
+failing both 3% bars. Both cache-off measured repeat windows already have few or
+no physical reads; this comparison cannot establish prevention of the earlier
+costly miss. Keep the managed cache opt-in. Full qualifications, alternating
+comparison, memory census and limits are recorded under Stage 7c below.
+
 Local evidence: `20261019T075917Z-stage2a-comparison-b3e32b/` contains
 `ram-residency.json`, its reproduction script, measured I/O windows and
 `memory-summary.json`. The residency snapshot was taken after qualification;
@@ -388,7 +400,7 @@ against a reference require that reference to pass its sanity gate.
 | 4 | MTP across the two owners | Qualified experimental capability; repeat generation improves, ordinary primary bar fails and total time regresses | 3 decision |
 | 5 | SM86 packed-kernel and representation improvements | Packing experiment qualified; repeat improves, ordinary gain below bar; four-warp declaration deferred after a confounded gate | 4 decision |
 | 6 | Selective CPU expert execution | Isolated crossover established; serving fails warmed parity; grouped arithmetic follow-up remains experimental | Transfer profiling, then compute crossover |
-| 7 | Adaptive placement and prompt grouping | Owner allocation bound and paired reservation repair qualified; group 1 comparison fails the speed bar and increases total time; keep group 8, audit startup phases next | Recorded earlier-stage decisions |
+| 7 | Adaptive placement and prompt grouping | Accounting, paired reservations and startup phases qualified experimentally; keep group 8. Capacity helps ordinary generation but exposes repeat source-page misses. Derived-cap RAM retention fails warm speed bars; no overall promotion | Recorded earlier-stage decisions |
 | 8 | Consolidated qualification and reference comparison | Pending | Selected candidates disposed |
 
 A dependency on a decision permits a recorded revert or deferral. It does not
@@ -610,9 +622,9 @@ before running it; fill measured fields only from saved artifacts.
 | Complete per-owner expert-cache allocation bound | 7a | `d2b3b935` + `98a33646…`; published source-equivalent as `5e42c2a2` on `two-gpu-owner-budget-published` | Build `20261019T193611Z-stage7-owner-budget-build-b28ef8`; serving `20261019T193817Z-stage7-owner-budget-strict-3049d1`; lifecycle `20261019T194424Z-stage7-owner-budget-lifecycle-4f5d62`; comparison `20261019T194631Z-stage7-owner-budget-comparison-a0f388` | Six exact serving responses and lifecycle pass; all 24 comparison responses exact with identical kernel choices. Capacity grows from 200/203 to 201/206 records per layer, adding 289.102 MiB GPU payload. Ordinary generation −2.938%, total −4.465%; repeat generation −11.442%, total −11.267%, but neither generation difference exceeds control spread | Retain the capacity/accounting prototype without a speedup or default-promotion claim. Compare prompt grouping separately; preserve the measured source and binaries |
 | Group 1 on the frozen owner-budget build | 7b failure | Exact Stage 7a source and binaries; group 8 versus 1 | `20261019T200146Z-stage7-grouping-strict-918530` | Group 8 returns three valid responses; group 1 reaches readiness then unloads on the first request because its second owner has no residual output lease. GPU choices unchanged | Preserve the failure; repair reservation and scratch lifetimes before timing |
 | Paired lease repair and prompt-group comparison | 7b | Clean `783f5422`; group 8 versus 1 on the same repaired build | Build `20261019T201621Z-stage7-grouping-reservations-build-871588`; serving `20261019T201819Z-stage7-grouping-reservations-strict-c53c5e`; lifecycle `20261019T202218Z-stage7-grouping-reservations-lifecycle-e0af93`; comparison `20261019T202414Z-stage7-grouping-reservations-comparison-9716a0` | Six exact serving responses, prior group 8 parity and lifecycle pass; all 24 comparison responses exact with identical GPU choices. Group 1 adds 650.227 MiB GPU model storage, but ordinary generation rises 9.084% and total model time 19.233%; repeat generation falls 2.152%, total rises 9.734% | Retain the reservation repair on its experimental branch. Keep group 8; group 1 fails the primary bar and has material prefill/total regressions. No default or cumulative speedup claim |
-
-
 | Startup phases, scoped qualification and complete invocation inventory | 7c | Initial `1fa4bd9a`; scoped scratch `a3735d40`; rejected handoff `c253c094`; incomplete inventory `305c23a2`; qualified complete inventory `7a0a1f30` | Build `20261019T214356Z-stage7-startup-attention-inventory-build-45cd2c`; serving/audit `20261019T214830Z-stage7-startup-attention-inventory-strict-a9ddbd`; lifecycle `20261019T215127Z-stage7-startup-attention-inventory-lifecycle-78561e`; comparison `20261019T215322Z-stage7-startup-attention-inventory-comparison-f330d9` | Exact text/tools, native choices, fixed charges and lifecycle pass; 24 comparison responses exact. Slots grow to 223/224; ordinary generation −11.157%, beyond both spreads. Repeat generation +27.734%, including a 1.061 GB physical-read window | Retain the qualified accounting/capacity implementation experimentally. No overall promotion: repeat total latency rises 10.655%. Diagnose source misses and retention before broadening performance claims |
+| Source-page residency and demand retention envelope | 7c diagnostic | Clean `935e3358`, derived from complete candidate `7a0a1f30` | Build `20261019T221010Z-stage7-source-pages-build-96b47b`; replay `20261019T221648Z-stage7-source-pages-trace-65d5f5` | Six exact responses and identical GPU choices. Repeat: 1,511 cold demand ranges, 1.365 GB physical reads, exact worker/process agreement; 1,497 ranges were last read in the prior repeat's generation. Existing quotas yield one 33 GiB cap for follow-up | Establishes loss of useful source pages; no speed claim. Preserve the observer and completed-read history; bounded-retention result follows |
+| Derived-cap host demand retention | 7c profile | Same frozen `7a0a1f30` binaries; cache off versus 35,433,480,192-byte cap | Serving `20261019T223532Z-stage7-host-retention-strict-ae8390`; lifecycle `20261019T223835Z-stage7-host-retention-lifecycle-849d09`; comparison `20261019T224145Z-stage7-host-retention-comparison-b6c6e9` | Serving/lifecycle and all 24 comparison responses exact; GPU choices/inventory identical. Retains 15.190 GiB, displacing file cache; logical reads −99.630%/−98.942%, generation −0.535%/+0.137% for repeat/ordinary | Neither generation bar passes. Keep retention opt-in; this run does not reproduce the costly cache-off miss or prove tail prevention. No larger-cap sweep |
 
 
 ### Stage 0 progress — baseline and diagnostic correction
@@ -2795,15 +2807,217 @@ context, single-GPU, cumulative Stage 2b and llama.cpp comparisons remain
 outstanding. Raw observations, source identities, retained hashes, audit and
 analysis scripts are preserved. No unit or integration tests were added or run.
 
+
+#### Source-page diagnostic and bounded retention envelope
+
+Diagnostic **`935e33583708d483a84be709814147201fdfbe0a`** starts from the frozen
+complete candidate. It reuses the previously qualified source-versus-upload
+observations and adds the opt-in Linux
+`MAGNITUDE_TRACE_EXPERT_SOURCE_PAGES` observer. Each completed range records
+its pre-read `mincore` residency, worker physical-read delta, queue/service
+span and file/tensor identity. The probe maps with `PROT_NONE`, without
+population, and never reads payloads. Errors remain unknown residency; it
+changes no read policy, routing, retention or GPU arithmetic. Ticket completion
+is published before metadata logging.
+
+The release build passes in
+`20261019T221010Z-stage7-source-pages-build-96b47b`. Replay
+`20261019T221648Z-stage7-source-pages-trace-65d5f5` uses the same six-request
+pattern as the comparison: repeat/ordinary warmup 1, repeat/ordinary warmup 2,
+then repeat/ordinary observations, group 8, context 1024, host cache zero,
+lookahead on and drafting off. **All six responses exactly match the qualified
+complete candidate**, with equal usage, stops and selected GPU configurations.
+
+The trace contains **188,755 complete reads**, keyed to all **144 routed
+tensors**, with no residency-probe error or failed read. Each range is exactly
+one expert's tensor record. One partially written final log record is produced
+during engine shutdown; both its start and end are after the final captured
+request. The analysis records and excludes only this out-of-window EOF record.
+Raw logs, request boundary snapshots, file identities, analysis and reproduction
+scripts remain with the run.
+
+| Generation-delivery observation | Repeat | Ordinary |
+| --- | ---: | ---: |
+| Source ranges | 6,285 | 2,868 |
+| Requested source payload | 6.530 GB | 2.992 GB |
+| Reads with nonresident pages | 1,511 | 6 |
+| Physical reads, worker sum and process delta | 1,365.402 MB | 7.578 MB |
+| Instrumented physical-read worker service sum | 7759.434 ms | 31.574 ms |
+| Union of instrumented physical-read intervals | 2434.164 ms | 13.304 ms |
+
+Every physical read in these two windows is **demand**, with no speculative or
+bulk source ranges completing in them. The worker physical-byte sums exactly
+match their process deltas. Repeat's cold records cover **573 expert identities**
+and both owners: 675.205/690.196 MB physically. All **1,511 record ranges are
+distinct**. Of them, **1,497 were last read during repeat warmup 2 generation**;
+13 were last read during its prefill and one during repeat warmup 1 prefill.
+This establishes loss of previously accessed useful records across later
+requests, without identifying the exact kernel eviction time or proving which
+intervening access caused eviction.
+
+Repeat's endpoint has **56.482 GiB cached, 0.566 GiB free and 53.798 GiB
+available**; ordinary has 56.537/0.445/53.732 GiB. Both windows have zero global
+swap-outs; repeat observes only 14 swap-in pages. These are system-wide paging
+counters, not engine-specific swap attribution. The large physical payload is
+accounted for by GGUF source reads. This instrumented replay does not supply a
+speed comparison: probes, logging and altered scheduling have costs; worker
+sums overlap and interval unions are not critical-path delay.
+
+An offline envelope counts all distinct demand record ranges across this
+six-request trace. Their modeled record charge is **16,305,742,720 bytes**
+(15.187 GiB), including 64 bytes per record for the measured x86-64 structure
+and Arc counters. Existing proportional layer quotas need a global cap of at
+least **34,900,920,372 bytes** to cover every observed layer, with block 0 the
+limiting share. Rounding to the next whole GiB selects **33 GiB
+(35,433,480,192 bytes)** for one bounded cache-profile experiment. A configured
+cap is not preallocation or a memory grant; actual retention remains subject to
+fresh ordinary host claims and may be much smaller. This is a quota envelope,
+not an eviction simulation, file-cache-displacement result or speed prediction.
+It is retained as `demand-capacity-envelope.json` with its derivation script.
+
+The host runs **Linux 6.8.0-142-generic**. A flag-only `FADV_NOREUSE` change is
+not selected: the reviewed upstream 6.8
+[buffered read path](https://raw.githubusercontent.com/torvalds/linux/v6.8/mm/filemap.c)
+marks accessed folios without consulting `FMODE_NOREUSE`, while the
+[mapping recency helper](https://raw.githubusercontent.com/torvalds/linux/v6.8/include/linux/mm_inline.h)
+checks that flag for VMAs. The
+[manual](https://www.man7.org/linux/man-pages/man2/fadvise64.2.html) documents
+mapped-page recency effects from Linux 6.3. This is a pinned upstream review,
+not a complete vendor-kernel audit. Changing the read mechanism would need its
+own memory and failure-lifetime qualification.
+
+The existing compressed-record cache already distinguishes demand retention
+from bulk scans. The derived cap is compared against zero below on the **same
+frozen `7a0a1f30` binary**, with all source instrumentation disabled. Preserve
+the historical automatic-cache regression; this short-request envelope does
+not replace that result or justify a default. The diagnostic binaries are copied
+independently to `source-pages-control` with recorded hashes. Locked cleanup
+`20261019T223217Z-stage7-source-pages-reclaim-build-cache-14a2c5` removes the
+regenerable Cargo target. No unit or integration tests were added or run.
+
+#### Derived-cap host retention — qualified, without a useful warm speed gain
+
+Both profiles use the independent complete-candidate engine/harness copies,
+with exactly the same source, native choices, group 8, context 1024,
+decode-reuse policies, lookahead enabled and drafting disabled. The only intended
+difference is `MAGNITUDE_HOST_EXPERT_CACHE_BYTES=0` versus `35433480192`.
+Streaming, source-page and other inference tracing are disabled. The cap is a
+ceiling under ordinary host admission, not an up-front allocation.
+
+Serving qualification
+**`20261019T223532Z-stage7-host-retention-strict-ae8390`** compares three fresh
+retention-enabled responses with explicitly archived, previously validated
+cache-off references from `20261019T214830Z-stage7-startup-attention-inventory-strict-a9ddbd`.
+Repeat prose, ordinary continuation and the complete tool call match exactly,
+including usage/stops and selected GPU configurations. The log confirms the
+33 GiB setting and 48 layer shares. After these three requests, additional
+classified host model storage is **21.982 GiB**, with **31.802 GiB** observed
+host headroom remaining. This larger footprint includes the held-out tool
+transition; it is not the shorter timing sequence's footprint or a peak.
+
+Lifecycle **`20261019T223835Z-stage7-host-retention-lifecycle-849d09`** passes
+cold, retain, prefix hit, cancellation, recovery and health. Hit/recovery reuse
+757 prompt tokens. Cancellation closes after four content events / 15 exact
+characters before terminal delivery. The actual engine log and qualification
+record both confirm the cap. No reserve, precision gate or 30-second tuning
+allowance is relaxed.
+
+Comparison **`20261019T224145Z-stage7-host-retention-comparison-b6c6e9`** runs
+four fresh launches in A/B/B/A order under one lease and a passing thermal gate
+(maximum observed GPU temperature **47°C**). Each launch has two warmups per
+fixture before fixed measured work. All **24 responses are exact** and both
+profiles have identical kernel selections and physical GPU inventory, including
+223/224 expert slots per layer. Independent preserved binaries avoid rebuilding
+or changing the measured source.
+
+| Fixture | Cache-off generation | Retained generation | Generation change | Off / retained spread | Prefill change | Model-total change |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Repeat, 64 outputs | 3094.390 ms | 3077.846 ms | −0.535% | 4.833 / 7.175 ms | −1.318% | −0.932% |
+| Ordinary, 60 outputs | 1982.308 ms | 1985.031 ms | +0.137% | 17.510 / 0.551 ms | −1.149% | −0.643% |
+
+**Neither fixture clears the declared 3% generation bar.** Repeat's 16.544 ms
+mean gap exceeds both observed spreads but remains below that bar. Ordinary
+generation is effectively unchanged, with a small mean regression. HTTP mean
+TTFT changes 3253.829→3200.376 ms for repeat and 3088.602→3053.492 ms for
+ordinary; these remain separate from model time and do not qualify a generation
+win.
+
+| Generation-delivery evidence | Cache off, two passes | Retention, two passes |
+| --- | ---: | ---: |
+| Repeat logical read bytes | 6.531 / 6.587 GB | 24.271 / 24.271 MB |
+| Repeat physical read bytes | 1.442 / 0 MB | 0 / 0 MB |
+| Ordinary logical read bytes | 2.998 / 3.005 GB | 31.747 / 31.747 MB |
+| Ordinary physical read bytes | 0 / 0 MB | 0 / 0 MB |
+| Linux file cache at measured endpoints | 56.490–56.833 GiB | 41.355–41.524 GiB |
+| Actually free RAM at measured endpoints | 0.434–0.457 GiB | 0.406–0.480 GiB |
+| Classified host model storage after six requests | 2,471,018,496 bytes | 18,781,619,912 bytes |
+
+The retained model-storage increase is **16,310,601,416 bytes / 15.190 GiB**
+in both B launches, close to the trace's 15.187 GiB distinct-demand envelope.
+Host compute and GPU physical inventories are unchanged. File cache falls as
+anonymous retention grows: this rearranges occupied RAM. Mean logical file-read
+traffic falls **99.630% / 98.942%** for repeat/ordinary, without a useful warm
+generation change. Retention still copies retained payloads and does not remove
+GPU uploads, conversion or routed computation; `read_chars` is not a counter
+for those operations.
+
+Both cache-off measured repeat windows already have few or no physical reads.
+This run therefore **does not prove prevention of the earlier 1.061/1.365 GB
+physical-miss stalls**. First warmups after fresh launches are expensive on
+both sides and remain in the raw findings: final A's first repeat has
+17.846 s prefill / 10.993 s generation. Do not infer a unique cause from restart
+order or substitute these warmups for a controlled cold-start comparison.
+Two measured passes per side, short contexts and one sequence limit the result.
+
+**Keep host retention opt-in and do not increase its cap again for warm speed.**
+The source-page diagnostic establishes a real disk-miss case; the untraced
+comparison shows that eliminating almost all file-read traffic is insufficient when
+source pages are already hot. A future tail-protection claim needs a declared
+churn workload and matched timing. Keep the original slow capacity pass and
+historical managed-cache regression; no overall capacity/default promotion is
+established by this follow-up. Raw memory censuses, request I/O, thermal records,
+source/binary proofs, `analysis.json` and reproduction scripts are preserved.
+
+#### Existing service trace — use it before another device run
+
+The source-page replay already includes completed source-versus-upload groups.
+Offline reuse of the Stage 6 summarizer adds `source-service-analysis.json`
+without running another model. Repeat has 126 complete owner steps and ordinary
+117, with zero partial groups excluded and both owners represented. Delivery
+boundaries can cut through a step; these counts need not equal a token-count
+multiple or the independent per-read completion inventory.
+
+| Instrumented delivery window | Expert installs | Requested upload bytes | Blocking upload host time | Watcher polling sleep | Other watcher service |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Repeat with physical misses | 2,082 | 6.492 GB | 688.034 ms | 2805.882 ms | 145.034 ms |
+| Ordinary, mostly hot pages | 889 | 2.785 GB | 286.175 ms | 320.792 ms | 61.678 ms |
+
+There are three uploads per installed expert. Ordinary's blocking upload host
+mean is **321.907 µs per expert**, versus Stage 6's 327.121 µs observation;
+these separate instrumented sessions do not establish a timing improvement.
+Upload host time includes CUDA submission and synchronization, and is not
+transfer-engine time. Polling sleep and source worker/ticket sums overlap
+between owners and with GPU execution; they do not partition generation time.
+The repeat polling observation is consistent with exposed service wait, while
+the ordinary window retains appreciable upload/control work despite few disk
+bytes. A full CUDA critical-path attribution is still unavailable.
+
+Use these observations to guide further transfer/control investigation. Stage
+1's asynchronous-batching attempt already failed its promotion bar; lower file
+traffic or fewer synchronization calls alone are insufficient reasons to repeat it.
+Save completed-read history with `cold-record-history.py`: it reproduces all
+1,511 cold ranges and the 1,497/13/1 prior-read categories, with prior ages
+26.032–81.409 s. No unit or integration tests were added or run.
+
 ## Immediate next action
 
-Continue **Stage 7** using the frozen Stage 2b plain serving control. This is a
-recorded change in order: Stage 6 has an isolated CPU-ready crossover but no
-qualified serving benefit; both grouped scalar recipes still differ from the
-actual CUDA projections, and another native cache competes with Linux file
-cache. Keep that implementation experimental and leave its numerical repair
-and warmed failure open. Independent GPU-capacity work can avoid more source
-traffic without introducing a different CPU arithmetic path.
+Continue with **Stage 8**, using frozen Stage 2b as the accepted plain serving
+reference. Stage 7 was performed before completing Stage 6 because the CPU-ready
+crossover has no qualified serving benefit: both grouped scalar recipes still
+differ from actual CUDA projections, and another native cache competes with
+Linux file cache. Keep CPU dispatch experimental and its numerical repair and
+warmed failure open. The independent capacity/accounting work now has qualified
+sources and recorded performance limits.
 
 **Stage 7a** establishes a qualified owner-allocation bound and capacity increase,
 without an accepted speedup. **Stage 7b** repairs paired admission and residual
@@ -2811,21 +3025,27 @@ scratch lifetimes, qualifies group 1, and completes its same-source comparison.
 Keep group 8: group 1 fails the primary generation bar and increases both
 fixtures' total latency. Preserve both candidates' exact sources and binaries;
 the repaired independent copies are hash-checked and the shared Cargo target is
-cleaned. Use `grouping-reservations-control` for the next comparison's repaired
-group 8 binaries. Stage 2b remains the accepted serving reference.
+cleaned. `grouping-reservations-control` preserves repaired group 8 binaries;
+`startup-attention-inventory-control` preserves the complete Stage 7c candidate.
+Stage 2b remains the accepted serving reference.
 
-Continue **Stage 7c source-miss diagnosis** with repaired group 8 as the
-experimental control and complete candidate `7a0a1f30`. Scoped qualification,
-complete retained invocation accounting, phase admission, lifecycle and the
-same-session comparison now pass their correctness gates. Ordinary generation
-improves 11.157% beyond both spreads, but the second repeat pass has a 1.061 GB
-physical-read window and a material total-latency regression. Preserve that
-observation and identify the required records' residency and source-service
-stalls with the canonical repeat fixture before changing retention. Most spare
-RAM already serves Linux file cache; a larger anonymous allocation is not an
-established remedy. Keep the ordinary reserves and 30-second tuning allowance.
-Resolve the regression and then broaden affected context and single-GPU
-coverage for Stage 8, followed by cumulative and llama.cpp comparisons.
+**Stage 7c's declared source-miss and bounded-retention experiments are now
+disposed.** Preserve qualified complete candidate `7a0a1f30` experimentally;
+Stage 2b remains the accepted plain reference. The 33 GiB profile qualifies but
+fails both warm generation bars while retaining 15.190 GiB and displacing file
+cache. It does not establish prevention of costly misses. Do not run another
+cap sweep or select a flag-only `NOREUSE` patch for the reviewed buffered path.
+Use the existing upload/service evidence before proposing another transfer
+change, and retain the earlier asynchronous-batching rejection.
+
+Begin **Stage 8** with the smallest affected context and smaller-model
+single-GPU qualification, preserving ordinary reserves and the 30-second tuning
+allowance. Compare a qualified consolidated candidate directly with accepted
+Stage 2b and then the initial/reference implementations in alternating sessions.
+Do not multiply separate-session improvements. Keep RAM retention, MTP and CPU
+dispatch outside the consolidated default unless their own declared gates pass.
+The capacity candidate's earlier repeat regression remains a limitation to
+resolve or explicitly reject in that comparison, not an accepted speed result.
 
 Before resuming Stage 6 timing, repair and qualify affected serving behavior.
 Account for cache hit rate, import cost, file-cache displacement, worker contention
@@ -2860,8 +3080,8 @@ The four-warp Stage 5 experiment requires unchanged unrelated execution choices
 before it can isolate conversion. Preserve the fixed tuning budget and ordinary
 precision/greedy gates.
 
-After the grouping decision, finish Stage 7's startup-peak and placement audit,
-then complete Stage 8's affected context and single-GPU qualification
-and cumulative/reference comparison. Stage 3's repeated-miss candidate is
+Stage 7's startup-peak/placement audit and the one derived-cap experiment now
+have recorded dispositions. Complete Stage 8's affected context and single-GPU
+qualification and cumulative/reference comparison. Stage 3's repeated-miss candidate is
 rejected; a differently conditioned predictor remains deferred. Full CUDA graph
 attribution is still unavailable.
