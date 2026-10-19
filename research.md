@@ -124,6 +124,32 @@ Local evidence: `20261019T075917Z-stage2a-comparison-b3e32b/` contains
 `memory-summary.json`. The residency snapshot was taken after qualification;
 it did not interfere with timed A/B/B/A requests.
 
+A fresh read-only check at **2026-10-19 09:22 UTC**, with no inference process
+running and both GPUs idle, found the following:
+
+| Host RAM observation | GiB |
+| --- | ---: |
+| OS-usable total | 62.696 |
+| Actually free | 6.892 |
+| Linux `Cached` | 53.508 |
+| `MemAvailable`, including reclaimable cache | 60.664 |
+| Main GGUF pages resident, measured with `mincore` | 46.313 |
+
+This idle snapshot does not establish peak inference occupancy. It confirms that
+the apparent 60.7 GiB available is largely RAM already serving as file cache.
+The remaining free RAM can absorb additional pages, subject to runtime reserves;
+an explicit cache also competes with existing cached pages. More useful retention
+can help cold reads and broad prompt scans, but simply allocating more RAM has
+not demonstrated a warm-generation win. In the Stage 2b candidate's measured
+generation delivery windows, roughly 4.84 GB of logical reads corresponded to
+only 6.14 MB of process-attributed physical reads. Investigate RAM copies,
+host-to-device uploads, conversion and expert reuse alongside physical misses;
+these counters alone do not isolate which remaining operation dominates latency.
+The managed-cache historical comparison above remains the reason it is opt-in.
+
+Fresh snapshot and its non-warming reproduction script are under
+`inference/evaluation/results/20261019T092219Z-idle-ram-diagnostic/`.
+
 ### Confirmed code observations
 
 - [CUDA upload](inference/seismic/backends/cuda/src/driver.rs) calls
