@@ -193,8 +193,8 @@ against a reference require that reference to pass its sanity gate.
 | Stage | Work | Current status | Depends on |
 | --- | --- | --- | --- |
 | 0 | Current baseline and critical-path measurement | Baseline established; attribution limits recorded | Current checkout |
-| 1 | Batched asynchronous expert transfers | Implementation next | 0 |
-| 2 | Trace-informed GPU expert retention | Pending | 1 decision |
+| 1 | Batched asynchronous expert transfers | Disposed: prompt candidate failed; decode candidate not promoted | 0 |
+| 2 | Trace-informed GPU expert retention | Ready: protect useful decode residency during prompt seeding | 1 decision |
 | 3 | Confidence-limited expert prefetch | Pending | 2 decision |
 | 4 | MTP across the two owners | Pending | 3 decision |
 | 5 | SM86 packed-kernel and representation improvements | Pending | 4 decision |
@@ -400,6 +400,9 @@ before running it; fill measured fields only from saved artifacts.
 | --- | --- | --- | --- | --- | --- |
 | Historical RAM cache comparison | Background | Recorded build/digest above | `20261018T194603Z-host-cache-comparison-8c3f34` | No reliable managed-cache win | Keep retention opt-in |
 | Current baseline and attribution | 0 | `5cac0a6f`, verified executable `d5fff37c0b29…` | `20261019T063546Z-stage0-transfer-profile-92e02a`, 758 + 64 | Exact output; measured prefill 12.994 s, generation 8.509 s; native counters below | Preserve control; implement and compare Stage 1; no full GPU breakdown claimed |
+| Full prompt + decode transfer batching | 1 | Control `d5fff37c0b29…`; candidate `5cac0a6f` + `f888a58f…` | Build `20261019T065412Z-stage1-build-c35edb`; short lifecycle and A/B/B/A next | Build/provenance passed; first cold request failed with `BackwardClock` | Reject prompt batching; qualify decode-only revision before timing |
+| Decode-only transfer batching | 1 | `5cac0a6f` + `09325a64…`; preserved control unchanged | Build `20261019T072428Z-stage1-build-a8119e`; lifecycle `20261019T072541Z-stage1-lifecycle-72e4ea` | Lifecycle and all 12 comparison outputs passed; mean difference below control spread | Not promoted; preserve synchronous control and candidate patch |
+
 
 ### Stage 0 progress — baseline and diagnostic correction
 
@@ -441,6 +444,134 @@ expert counters. A complete GPU arithmetic/wait breakdown remains unmeasured;
 no incomplete trace authorizes such a breakdown. Capture settings follow the
 [NVIDIA Nsight Systems guide](https://docs.nvidia.com/nsight-systems/UserGuide/index.html).
 
+### Stage 1 first qualification — failed, preserved for diagnosis
+
+`20261019T065835Z-stage1-lifecycle-b7732a` failed its first cold request before
+valid output. The expert watcher panicked in scratch-directory admission with
+`BackwardClock`; poisoned-state cleanup then aborted the worker. The HTTP client
+reported an incomplete chunked response. Build/provenance success did not qualify
+this candidate. Preserve the log, failed observation, source identity and initial
+candidate patch; do not benchmark or promote it. The reduced 758 + 16 reproduction
+`20261019T070532Z-stage1-clock-repro-a9f421` also failed: scratch sequence 3 at
+local layer 0 was requested after the directory had already observed sequence 3
+at layer 2, both in group 2. Progress agreed with that later observed clock.
+The bounded event trace in `20261019T071145Z-stage1-clock-repro-0103ef`
+shows failure words already set: scratch sequence 2 at layer 0 was followed by
+sequence 3 at layers 1 and 2 with failure=3, then the stale layer-0 request.
+Thus the backward-clock panic is secondary to an earlier scratch failure. Expose
+that first stored failure before changing clock semantics. Do not suppress or
+relax the clock invariant to admit the candidate. The control source/executable remain unchanged.
+
+### Stage 1 revision — restore prompt copies, isolate generation batching
+
+The final diagnostic `20261019T071713Z-stage1-clock-repro-e6d0c0` preserves
+`failed-candidate.patch` and the first stored failures. Layer 0, scratch round 2
+waited for sequence 2 at arrival 1 but observed 3. The next stored error was CUDA
+illegal memory access (700) during a later source upload; the clock panic followed.
+The exact cause of that prompt protocol violation remains unresolved. Do not
+label the clock panic as the original fault or claim it is fixed.
+
+Reject asynchronous batching in the prompt scratch path for this candidate.
+Restore its original per-tensor synchronous copies exactly and narrow the next
+experiment to decode transfers only. This is a revised experiment, not a repair
+claim for prompt batching. Keep the failed patch/artifacts available for later
+protocol work. The owned completion API and ready-expert decode queue remain;
+qualification and alternating timing must pass before either is promoted.
+
+### Stage 1 decode-only qualification and comparison declaration
+
+The revision with the original prompt scratch copy loop restored has source
+identity `5cac0a6f` + dirty digest
+`09325a64dae075188d80d22426dbb4edbc52c61ef553fe6f2a29ec84fd054e07`.
+Its release build and both candidate/control executable proofs passed in
+`20261019T072428Z-stage1-build-a8119e`. The source patch is saved with that run.
+
+Lifecycle `20261019T072541Z-stage1-lifecycle-72e4ea` passed cold, retained,
+prefix-hit, cancelled-stream and recovery checks. Completed answers were the
+same exact 308-character / 64-token prefix. The hit and recovery reported 757
+cached prompt tokens; cancellation closed after four content events (15 exact
+characters) before terminal delivery, and recovery remained healthy. These are
+correctness observations, not controlled performance results.
+
+Next comparison: unchanged 758-input + 64-output fixture, plain decoding,
+lookahead on, prompt group 8, configured context 1,024, placement 24 + 24,
+managed cache disabled, and prefix reuse disabled on every request. Use two
+fixed warmups before one measured request per launch, in A/B/B/A order, under
+one canonical lock and thermal gate. The extra warmup is justified by Stage 0's
+large run-order/cache effects. Compare identical rendered tokens/templates and
+greedy output. Start with two measured requests per side and apply the declared
+3%/noise and secondary-regression bars before any promotion.
+
+### Stage 1 measured decision — keep the synchronous control
+
+**Verdict: no promotion.** The decode-only revision passed correctness, but its
+speed benefit was not established beyond the observed variation. Do not present
+the mean difference below as a repeatable improvement.
+
+Controlled comparison: `20261019T072922Z-stage1-comparison-ab56d2`. Canonical lock
+and thermal gate passed; all eight warmups and four measured responses were
+identical exact prefixes with 758 input and 64 output tokens. Both harnesses
+rendered identical tokens and template identities. No source/executable changes
+occurred during the run. `comparison.json`, `observations.jsonl`,
+`timing-summary.json`, `decision.json`, both executable identities, I/O snapshots,
+allocation samples, and reproduction scripts are saved with the run.
+
+| Order / condition | Measured prefill | Measured generation | Model total | Physical reads after first token |
+| --- | ---: | ---: | ---: | ---: |
+| A / original control | 12.742 s | 6.308 s | 19.051 s | 1,191,325,696 B |
+| B / decode-only events | 5.072 s | 4.648 s | 9.720 s | 21,671,936 B |
+| B / decode-only events | 9.522 s | 4.785 s | 14.307 s | 106,840,064 B |
+| A / original control | 4.906 s | 4.564 s | 9.470 s | 21,671,936 B |
+
+Mean generation was 5.436336 s for A and 4.716696 s for B, an apparent 13.2376%
+reduction. The 0.719640 s difference is below A's 1.744034 s spread; B's spread
+was 0.136865 s. The last control was faster than both candidate measurements,
+including the candidate with the same 21,671,936-byte physical-read delta.
+Substantial OS-cache/run-order effects remain despite two fixed warmups. These
+observations do not establish either a repeatable gain or a general regression.
+No extra comparison is needed to reject default promotion under the declared bar.
+
+Logical reads after first token were approximately 12.963 GB in every measured
+condition. Moving these bytes through file-cache service and H2D remains work
+even when physical disk traffic is small. Delivery-window counters include
+possible lookahead. Across the four launches, minimum sampled device headroom
+was 2,825,519,104 B on owner 0 and 2,297,167,872 B on owner 1. Minimum host
+headroom was 57,681,203,200 B; process RSS peaks were 7.319–7.344 GB. No memory
+pressure refusal was observed in this bounded comparison.
+
+Keep the original source and executable as the accepted baseline. The full
+prompt/decode patch remains rejected for correctness. The decode-only patch,
+which qualified but did not meet the performance bar, remains an unmerged
+experiment in its isolated worktree and in the saved build artifact. Neither
+implementation is promoted to the working branch. No new default or runtime
+knob is introduced by this stage's disposition.
+
+### Stage 2a next experiment — preserve useful decode experts at prompt seeding
+
+**Hypothesis:** The transition from broad prompt routing to generation replaces
+useful decode residency. Recording bounded decode reuse and using it when the
+prompt seeds its last scratch member can reduce subsequent expert movement.
+This targets source bytes rather than another transfer-completion refinement.
+
+- Start from the accepted synchronous-transfer implementation.
+- First change prompt seeding only. Keep ordinary arena victim selection as LRU;
+  evaluate a frequency-based replacement rule separately after this decision.
+- Count observed decode uses from GPU slot stamps, including all-hit steps.
+  Observation only at host misses would bias the history. Deduplicate repeated
+  observations of the same slot/step, retain ownership/generation checks, and
+  bound metadata by admitted slot/expert counts. Report its overhead.
+- Keep prompt scans from increasing decode-use counts. Preserve actual GPU use,
+  conversion commits, active readers/fills and accepted state semantics. Cache
+  history is a placement hint, never permission to read uncommitted weights.
+- At seeding, consider resident experts with useful decode history as well as
+  the prompt's routed candidates. A retained expert outside the prompt union
+  needs no new source read. With no history, preserve the original prompt rank.
+- Use a bounded decay so old topics can lose priority. Declare one initial decay
+  rule; avoid a parameter sweep before measuring whether the mechanism helps.
+- Primary metric remains uninstrumented generation latency, with logical source
+  bytes and misses as mechanism evidence. Qualify lifecycle first, use the same
+  short A/B/B/A case, and broaden to code/tool behavior only after a useful result.
+
 ### Stage 0 decision — use owned completion per ready transfer batch
 
 Final diagnostic: `20261019T064804Z-stage0-graph-profile-5d6cd6`, with exact output,
@@ -469,8 +600,8 @@ Its saved `attribution.json` and `logs/magnitude-profile.log` record:
 The baseline and existing counters justify the first bounded implementation:
 queue the three ready tensor copies for an expert before waiting; let other
 already-ready experts enqueue while those copies run; publish each expert only
-on successful event completion. A scratch round can share one completion after
-its existing source-ready boundary. Keep file/expert policies and kernels fixed.
+on successful event completion. The initial scratch-round batching attempt was
+subsequently rejected; its original synchronous path is restored in the qualified revision. Keep file/expert policies and kernels fixed.
 A completion owns both source and destination allocations, and dropping one
 must finish its queued copies before either staging or device slots can be reused.
 The comparison's primary metric is uninstrumented generation time; the 3% and
@@ -510,7 +641,8 @@ and hardware and are not forecasts for this system.
 
 ## Immediate next action
 
-Implement **Stage 1** in the isolated candidate worktree. Build fully, qualify
-completion/cancellation/recovery, and compare against the preserved main-checkout
-control in an A/B/B/A session before advancing. Full CUDA graph attribution is
-still unavailable and must not be implied by the current evidence.
+Begin **Stage 2a: prompt seeding informed by decode reuse**, from the accepted
+synchronous-transfer baseline. Preserve the rejected transfer patches and their
+measurements. Complete and qualify the new policy, then benchmark it before
+trying a separate replacement-policy change. Full CUDA graph attribution remains
+unavailable; do not imply a complete wait/arithmetic breakdown.
