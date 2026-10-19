@@ -300,7 +300,7 @@ impl ExecutionPlanDraft {
     ) -> Result<Self, PlanError> {
         if self.device.selector != range.range().device || !range.derives_from(&self.load)
             || range.decoder_blocks() != definition.decoder.blocks.len()
-            || self.policy.method != PlannedMethod::Plain {
+            || !matches!(self.policy.method, PlannedMethod::Plain | PlannedMethod::Mtp { .. }) {
             return Err(PlanError::Topology("range differs from the selected model/device"));
         }
         self.load = range.graph_load().clone();

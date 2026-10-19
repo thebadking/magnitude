@@ -208,8 +208,21 @@ impl TargetLaunchInputs {
                     let (accepted, _) =
                         crate::domain::accepted_history(store, advance, domain, row)
                             .map_err(invalid)?;
-                    if visible.len() < accepted.len()
-                        || visible[..accepted.len()] != accepted
+                    let slab_rows = store.history_slab_rows(domain);
+                    let accepted_matches = visible.len() >= accepted.len()
+                        && accepted.iter().zip(visible).enumerate().all(
+                            |(part, (&[start, end], &[actual_start, actual_end]))| {
+                                if part + 1 < accepted.len() {
+                                    return [start, end] == [actual_start, actual_end];
+                                }
+                                // Only the last accepted span can grow into
+                                // adjacent tentative rows of this same slab.
+                                start == actual_start && actual_end >= end
+                                    && start as usize / slab_rows == (actual_end - 1) as usize / slab_rows
+                                    && appended.covers(end, actual_end)
+                            },
+                        );
+                    if !accepted_matches
                         || !visible[accepted.len()..]
                             .iter()
                             .filter(|range| **range != [0, 0])
@@ -293,7 +306,12 @@ impl TargetLaunchInputs {
                         // The row's first fresh row in the slot, as
                         // `accepted_history` reports it.
                         let fresh_start = from.saturating_sub(advance.position());
-                        prepared.extend(appended.causal_prior(fresh_start, row).map_err(invalid)?);
+                        crate::domain::append_within_slabs(
+                            &mut prepared,
+                            &appended.causal_prior(fresh_start, row).map_err(invalid)?,
+                            u32::try_from(store.history_slab_rows(domain))
+                                .map_err(|_| invalid("slab rows exceed u32".into()))?,
+                        );
                     }
                     // Media rows retain their declared dense fresh block;
                     // causal compressed rows may additionally see exactly

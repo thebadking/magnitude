@@ -994,11 +994,7 @@ impl<'a> Preparation<'a> {
                 feature_copy,
                 "activation",
                 feature_copy::Elements {
-                    A: plan
-                        .head()
-                        .and_then(|head| head.blocks().first())
-                        .map_or(plan.target().embedding().activation, |head| head
-                            .conditioning)
+                    A: plan.conditioning_element()
                 }
             ),
             copy_rows_f32: copy(&mut self.spec, Element::f32(), "A=f32")?,
@@ -1010,11 +1006,7 @@ impl<'a> Preparation<'a> {
     }
 
     fn target(&mut self, plan: &ProgramPlan) -> Result<(), CatalogFailure> {
-        if plan.head().is_some_and(|head| {
-            head.blocks()
-                .iter()
-                .any(|head| head.conditioning == Element::f32())
-        }) {
+        if plan.target().residual_conditioning().is_some() {
             self.target.residual_features = fixed!(
                 self.spec,
                 feature_rows,
@@ -1539,17 +1531,27 @@ impl<'a> Preparation<'a> {
                     )
             }
             magnitude_state::HistoryEncoding::Affine => {
+                // A wide CUDA query group can occupy one matrix tile by
+                // itself. Give decode and verification one arithmetic
+                // choice, qualified over their complete shared row domain.
+                // Independent units can otherwise pick different split-KV
+                // reductions for the same causal row.
+                let shared_decode = self.spec.backend() == seismic::BackendName::Cuda
+                    && (9..=16).contains(&shape.group)
+                    && shape.width <= 256;
                 let split_decode = matches!(
                     self.spec.backend(),
                     seismic::BackendName::Metal
                         | seismic::BackendName::Vulkan
                         | seismic::BackendName::Cuda
-                ) && self.limits.max_rows >= 2;
+                ) && self.limits.max_rows >= 2 && !shared_decode;
                 let mut single = mix();
                 // The base kernel serves only single-row decode when the
                 // graph binds separate verification kernels. Pricing their
                 // rows here as well would duplicate the same served work.
-                if split_decode {
+                if shared_decode {
+                    single.decode_rows = Some(1..crate::operators::attention::graph::DECODE_ROWS + 1);
+                } else if split_decode {
                     single.decode_rows = Some(1..2);
                 }
                 let decode = self

@@ -128,6 +128,7 @@ pub use resident_weights::{
     ResidentVision,
 };
 pub use resources::{
+    HeadConditioningTransfer,
     AllocatedResources, AllocationError, GraphOutputOwner, GraphOutputTensor, ImportWorkspaceLease,
     NativeGraphOutputLease, NativeGraphPool, NativeGraphWorkspaceLease, PoolClass,
     ResourceAllocator, TargetGraphOutputLease, TargetGraphPool, TargetGraphWorkspaceLease,

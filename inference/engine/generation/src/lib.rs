@@ -978,6 +978,13 @@ impl Generation {
         let mut acceptance = round
             .clone()
             .reconcile(samples, &self.options.stop_tokens)?;
+        if std::env::var_os("MAGNITUDE_TRACE_GENERATION_ROUNDS").is_some()
+            && acceptance.inputs.len() <= 16 {
+            eprintln!("generation round request={request:?} position={} output={} inputs={:?} samples={samples:?} proposed={} accepted={} committed={} emitted={:?}",
+                self.resident_position, self.generated.len(), acceptance.inputs,
+                acceptance.proposed, acceptance.accepted_proposals,
+                acceptance.committed_rows, acceptance.emitted);
+        }
         if self.finish.is_some() && !causal_reconciliation {
             acceptance.emitted.clear();
             acceptance.committed_rows = 0;

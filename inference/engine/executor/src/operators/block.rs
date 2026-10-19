@@ -369,6 +369,7 @@ impl BlockSublayers<'_> {
         hidden: &WorkflowTensor,
         weights: &mut Vec<(WeightPort, NativePort)>,
         constants: &mut Vec<GraphConstant>,
+        mut diagnostics: Option<&mut Vec<(&'static str, WorkflowTensor)>>,
     ) -> Result<(WorkflowTensor, BlockStatePorts, BlockControlPorts), GraphError> {
         let Self {
             paired,
@@ -401,6 +402,9 @@ impl BlockSublayers<'_> {
             rows: &input_rows,
             form,
         };
+        if let Some(diagnostics) = diagnostics.as_mut() {
+            diagnostics.push(("mixer-input", input_rows.clone()));
+        }
         Ok(match (paired.mixer, entries) {
             (Mixer::Attention(operator), MixerEntries::Attention(entries)) => {
                 let shape = attention_operator::shape(geometry.hidden, operator)
@@ -478,6 +482,7 @@ impl BlockSublayers<'_> {
                         })
                         .transpose()?,
                     },
+                    diagnostics,
                 )?;
                 (
                     mixed,

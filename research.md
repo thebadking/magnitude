@@ -192,10 +192,11 @@ Snapshot and its reproduction script:
   `cuMemcpyHtoDAsync` and then synchronizes the transfer stream before returning.
   The [expert streaming runtime](inference/engine/executor/src/streaming/runtime.rs)
   invokes this path separately for each fetched expert tensor.
-- [Placed startup](inference/engine/src/execution/placed.rs) currently requires
-  two ranges and plain text execution. Prediction-head support exists in
-  [the Qwen4 family](inference/engine/families/qwen4exp/src/head.rs), but that does
-  not establish MTP support across the two owners.
+- In the frozen plain control, [placed startup](inference/engine/src/execution/placed.rs)
+  requires two ranges and plain text execution. Prediction-head support in
+  [the Qwen4 family](inference/engine/families/qwen4exp/src/head.rs) did not by
+  itself establish MTP across owners. Stage 4 adds that capability on the
+  experimental branch described below.
 - [Expert prediction](inference/engine/executor/src/operators/routed/fused_graph.rs)
   is disabled for mixed or unnormalized residual forms. The previous predictor
   wasted source traffic on this model; re-enabling it unchanged is not a plan.
@@ -507,6 +508,7 @@ before running it; fill measured fields only from saved artifacts.
 | Decode reuse during prompt seeding | 2a | `801a56be` + `60459c8a…` | Build `20261019T075226Z-stage2a-build-75b7e4`; lifecycle `20261019T075554Z-stage2a-lifecycle-2c4074`; comparison `20261019T075917Z-stage2a-comparison-b3e32b`; tools `20261019T081041Z-stage2a-tools-99971b` | All lifecycle and semantic gates passed; generation time −26.585%, logical generation reads −46.570%; prefill +28.945% | Retain optional decode-reuse profile for repeated requests; preserve original default |
 | Reuse-weighted decode victims | 2b | `c9cbfcbf` + `07b58952…`; control is frozen Stage 2a | Build `20261019T082201Z-stage2b-build-5a6f9f`; lifecycle `20261019T082536Z-stage2b-lifecycle-eed91a`; comparison `20261019T082747Z-stage2b-comparison-baab09`; tools `20261019T083547Z-stage2b-tools-4a56cc` | Lifecycle, all 12 comparison outputs and held-out tools passed; generation −16.496%, logical generation reads −30.102%, prefill +0.219%, total −6.319% | Retain optional replacement alongside Stage 2a seeds; preserve prompt/LRU defaults |
 | Bounded repeated-miss prefetch | 3 | `d2b3b935` + `67eae120…`; frozen Stage 2b control | Build `20261019T085958Z-stage3-build-a9e8ac`; lifecycle/admission `20261019T090124Z-stage3-lifecycle-562553` | All six checks passed; 6,921 repeat trials, zero repeated misses or issued bytes, including the third independent request | Reject this inactive heuristic; no timing claim or source promotion; defer differently conditioned prediction |
+| Placed MTP with one CUDA affine decode choice | 4 | Candidate `47f852f5` + `da537eff…`; frozen Stage 2b plain control | Build `20261019T122031Z-stage4-build-87d1df`; generated prefix `20261019T122157Z-stage4-shared-prefix-f881f0`; serving `20261019T122452Z-stage4-shared-strict-heldout-c073bf`; lifecycle `20261019T123227Z-stage4-shared-lifecycle-8d6b29`; comparison `20261019T123708Z-stage4-comparison-626259` | All correctness gates and 24 benchmark responses exact. Repeat generation −21.911%, total −0.268%; ordinary generation −2.940%, total +11.129% | Keep experimental capability; do not promote the fixed-budget profile as a general speedup. Continue Stage 5 with the plain control |
 
 
 ### Stage 0 progress — baseline and diagnostic correction
@@ -1480,34 +1482,149 @@ The MTP implementation and history correction remain candidate-only. All run
 artifacts above are local under `inference/evaluation/results/`; model jobs were
 untimed diagnostics under the machine lock. No speed improvement is claimed.
 
+### Stage 4 shared decode unit passes strict serving qualification
+
+The candidate now prepares one CUDA affine decode tuning unit for query groups
+of 9–16 heads per K/V head and widths at most 256. Both single-row decoding and
+verification bind that choice. The unit's normal numerical contract includes
+all served row and history shapes; other backends keep their row bands. Its
+initial search hint comes from head geometry, and all declared configurations,
+native-default numerical admission and the fixed tuning budget remain intact.
+The original CUDA kernel sources are unchanged. This uses the normal tuner,
+without a development pin or an independent startup qualification allowance.
+
+Build `20261019T122031Z-stage4-build-87d1df` completed (base `47f852f5`,
+dirty digest `da537eff49fa7ed66bd13fb41191db2a728fbc3c143534ecb9816771c02d37b5`).
+The new `M=1..9` unit measured 84 configurations and passed its numerical
+coverage, including untimed witnesses. Its 30 points cover row classes 1, 2, 4
+and 8, single and multiple sequences, and histories 0, 256 and 1,024. The
+target-only diagnostic's performance demand was single-row; zero-demand
+verification points still supplied required numerical coverage. The chosen
+parameters are MATRIX=1, PARTS=48, WARPS=2, COLUMNS=4, QREG=0, SLICES=1,
+STAGES=2. This is a newly qualified shared choice, not reuse of the old
+single-row qualification as evidence for wider rows.
+
+`20261019T122157Z-stage4-shared-prefix-f881f0` passes without a pin. Its sampled
+prefix and sequential selections remain identical to the saved original-kernel
+control. Both sequential and paired execution select comma at 411 and token
+321 (` and`) at 412. The run also requires the shared unit's qualified status
+and passing coverage; a matching point under an unqualified fallback cannot pass.
+
+The full serving comparison
+`20261019T122452Z-stage4-shared-strict-heldout-c073bf` passes exact text/tool
+parity **and** prompt/output/total token counts and stop reasons:
+
+| Fixture | Output tokens and stop | MTP proposed / accepted / rejected |
+| --- | --- | --- |
+| Repeated passage | 64, length limit | 31 / 31 / 0 |
+| Ordinary continuation | 60, natural stop | 34 / 24 / 10 |
+| Tool call | 53, tool call | 26 / 26 / 0 |
+
+Both tool outputs passed BFCL validation with exactly
+`calculate_triangle_area({"base":10,"height":5,"unit":"units"})`.
+Ordinary continuation now matches the frozen Stage 2b plain control despite ten
+rejected proposals. This qualifies these requests, not arbitrary prompts or
+independent distributional quality. The run is instrumented and untimed.
+
+The declared comparison uses untraced A/B/B/A rounds in one thermal-gated lease,
+with repeated passage and ordinary continuation, two warmups per fixture per
+launch and two measured passes per side and fixture. Ordinary generation time
+per output token is primary; require at least 3% and a difference beyond both
+observed spreads. Prefill, complete model time, acceptance and memory costs
+remain separate results. Results and the resulting disposition follow.
+
+### Stage 4 lifecycle and controlled performance decision
+
+`20261019T123227Z-stage4-shared-lifecycle-8d6b29` passes on the same candidate:
+cold, retention, reuse and recovery outputs are identical 64-token expected
+prefixes, with 31/31 proposals accepted each. Usage and stop reasons are checked.
+Reuse and recovery each reuse 757 prompt tokens. The client closes cancellation
+after four content events, before terminal delivery; recovery remains exact and
+the health check passes. This covers retained-prefix recovery on the full-accept
+fixture. Rejected rows are exercised by ordinary continuation in the separate
+strict serving gate; these runs do not establish retained-prefix behavior for
+every rejection history.
+
+`20261019T123708Z-stage4-comparison-626259` completes the declared thermal-gated,
+untraced A/B/B/A comparison. **All 24 responses match the qualification controls**
+in text, usage and stop reason. Both conditions use decode-reuse seeding and
+replacement, no retained prefixes, managed host cache off and context 1,024.
+The OS file cache is not dropped. Loading and warmups are excluded from the
+following model times, which include the candidate's head, verification and
+repair work. These compare the complete Stage 4 variant with the frozen Stage
+2b plain build, not just a method flag on one binary.
+
+| Fixture / condition | Mean prefill | Mean generation | Generation ms/output token | Mean total model time |
+| --- | ---: | ---: | ---: | ---: |
+| Repeat, plain | 3.700 s | 3.367 s | 52.610 | 7.067 s |
+| Repeat, MTP | 4.419 s | 2.629 s | 41.083 | 7.048 s |
+| Ordinary, plain | 3.084 s | 2.260 s | 37.663 | 5.344 s |
+| Ordinary, MTP | 3.746 s | 2.193 s | 36.555 | 5.939 s |
+
+Repeated-passage generation improves **21.911%**, exceeding both observed
+generation spreads (129.721 ms plain, 63.277 ms MTP). Its 718.769 ms prefill
+increase absorbs almost all the 737.741 ms generation saving: total model time
+changes by only **−0.268%**, within the observed total-time spreads.
+
+Ordinary generation improves **2.940%**, a 66.438 ms difference exceeding the
+observed spreads (34.057 ms plain, 2.134 ms MTP), but **below the declared 3% bar**.
+It must not be rounded up to a pass. Prefill increases 661.188 ms (**21.437%**),
+and total model time regresses **11.129%**, or 594.750 ms. Its accepted/proposed
+ratio is 24/34, versus 31/31 on the repeated passage. Two measured passes per
+side and fixture support this scoped decision, not a broad workload claim.
+
+Measured ordinary-generation delivery windows show **zero process-attributed
+physical read bytes on both sides**. Logical reads average 3.878 GB plain and
+4.685 GB MTP: roughly **20.8% more logical traffic** for the candidate. Those
+windows include lookahead and are not exact device-step boundaries. They give
+no evidence that additional host RAM would remove this warm-generation cost.
+They do not separately attribute RAM copies, uploads, conversion or head compute.
+
+The sampled allocation census also warrants later placement investigation.
+Plain uses 200/203 cache records per layer on owners 0/1; MTP uses 135/175.
+MTP carries 2,668,104,704 auxiliary bytes on GPU 0. Its minimum sampled device
+headroom is about 3.62/3.83 GiB, versus 2.63/2.14 GiB plain. Headroom is not an
+authorization to allocate all remaining bytes: startup/import peaks, graph and
+state reserves still apply. The range cache budget is inherited from full-model
+assessment, so Stage 7 should examine exact per-owner peaks before changing it.
+No safe additional cache capacity or speedup has been established here.
+
+Source inspection rules out one proposed shortcut: causal-only MTP priming
+already stops after K/V publication and binds no post-attention/FFN/readout
+weights (`native_head`'s zero-step graph). The added prefill time cannot simply
+be blamed on an unnecessary full-head FFN pass. Further attribution is required.
+
+**Decision:** preserve the qualified implementation as an experimental capability
+on [the MTP experiment branch](https://github.com/thebadking/magnitude/tree/two-gpu-mtp-experimental).
+Do not promote this fixed-budget configuration as a general serving optimization;
+keep the accepted plain profile as the control for Stage 5. Repeated generation
+has a real scoped benefit, while ordinary short-request total time regresses.
+Longer-output amortization is a possible future experiment, not a measured gain.
+Maximum context, smaller-model single-GPU regression and cumulative comparison
+remain Stage 8 obligations before broader configuration claims.
+
+The measured source identity remains `47f852f5` plus the full `da537eff…` digest
+above; publication does not relabel the experiment as a measurement of a later
+commit. Complete patches, input/output controls, thermal gate, per-pass timing,
+I/O windows and memory census are retained under the comparison directory.
+An earlier launch, `20261019T123507Z-stage4-comparison-cc4bb0`, stopped during
+setup because the driver lacked an import; it performed no model measurements.
+That failed setup and its exact script are retained separately.
+
 ## Immediate next action
 
-Continue **Stage 4 qualification**, preserving the frozen Stage 2b plain control.
-The candidate's present scope is the catalog's causal head with its own history;
-target-reading heads, vision and separate block drafters need other placement
-contracts. Real proposals, full-acceptance prefix reuse and cancellation/recovery
-now work; the ordinary-continuation parity gate remains failed.
+Continue **Stage 5** with the frozen Stage 2b plain control. Use the current
+warm I/O evidence to distinguish source service, copies/transfers, conversion
+and resident execution before choosing one SM86 kernel or representation change.
+Inspect actual packed formats and shapes, preserve the fixed tuning budget and
+normal numerical gates, and benchmark the justified change under matched work.
 
-Implement matched attention arithmetic for single-row decoding and paired
-verification on the original CUDA kernels, guided by the successful controlled
-replay. Reuse the existing production specialization/dependency mechanism where
-appropriate; preserve normal numerical qualification and resource admission on
-the served verification rows. Keep configuration provenance explicit. Do not
-copy a development tuning pin into production or label single-row qualification
-as coverage of unmeasured widths. Preserve the frozen Stage 2b plain control,
-its qualified single-row choice, and the candidate's canonical history joins.
-Queries must remain parallel; the query-tile experiment is discarded.
-
-First repeat the bounded generated-prefix comparison without a development pin.
-Then requalify the original plain/MTP serving fixtures, including ordinary
-continuation, exact tool arguments, acceptance/rejection, prefix reuse and
-cancellation/recovery. A matching point does not qualify the whole continuation.
-If serving still differs, localize that actual difference before changing repair.
-Preserve graph/state leases and every owner's completion, keep diagnostics
-opt-in, and make no timing claim from an instrumented run. Do not serialize
-verification or relax precision/greedy parity to obtain a pass. Requalify the
-failed serving case after a justified correction, then benchmark total time per
-committed token with all head, verification and repair costs. Work through
-Stages 5–8 after the Stage 4 decision.
+Keep Stage 4's source and artifacts as the experimental MTP control. Its current
+scope is the catalog's causal head with its own history; target-reading heads,
+vision and separate block drafters need other placement contracts. Queries remain
+parallel; the query-tile experiment is discarded. Do not serialize verification
+or relax precision/greedy parity to obtain a pass. Study the observed per-owner
+cache/headroom gap during Stage 7 before allocating more cache, then complete
+Stage 8's affected context and single-GPU qualification and cumulative comparison.
 Stage 3's repeated-miss candidate is rejected; a differently conditioned predictor
 remains deferred. Full CUDA graph attribution is still unavailable.

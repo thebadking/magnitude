@@ -469,6 +469,7 @@ fn shared_head_graph<'a, G: GraphDraft + 'a>(
                 &residual,
                 &mut weights,
                 &mut constants,
+                None,
             )?;
             let (
                 BlockStatePorts::Attention(planes, None),
@@ -1255,7 +1256,7 @@ impl NativeSharedHeadProgram {
 
 impl HeadProgram for NativeSharedHeadProgram {
     type Submission =
-        DeviceSubmission<HeadLaunchCore, NativeGraphWorkspaceLease, Option<GraphOutputTensor>>;
+        DeviceSubmission<HeadLaunchCore, (NativeGraphWorkspaceLease, Option<crate::HeadConditioningTransfer>), Option<GraphOutputTensor>>;
 
     fn submit(
         &mut self,
@@ -1276,7 +1277,7 @@ impl HeadProgram for NativeSharedHeadProgram {
         Ok(DeviceSubmission::new(
             self.waiter.completion(vec![completion]),
             core,
-            workspace,
+            (workspace, None),
             selections,
         ))
     }

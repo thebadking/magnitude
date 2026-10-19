@@ -99,6 +99,7 @@ pub trait ProgramFamily: 'static {
 
 pub struct NativeFamily {
     peer: Option<(Box<NativeFamily>, Rc<std::cell::RefCell<crate::AllocatedResources>>)>,
+    conditioning: Option<crate::resources::HeadConditioningPool>,
     programs: Rc<AttestedPrograms>,
     resident: ResidentTarget,
     target: crate::programs::native_target::NativeTargetProgram,
@@ -112,6 +113,7 @@ impl NativeFamily {
         programs: Rc<AttestedPrograms>, resident: ResidentTarget,
         peer_programs: Rc<AttestedPrograms>, peer_resident: ResidentTarget,
         peer_resources: Rc<std::cell::RefCell<crate::AllocatedResources>>,
+        conditioning: Option<crate::resources::HeadConditioningPool>,
         geometry: Decoder,
     ) -> Result<Self, String> {
         let first = programs.target_graphs().ok_or("first owner lacks target graphs")?.owned_blocks();
@@ -123,6 +125,7 @@ impl NativeFamily {
         let mut family = Self::new(programs, resident, geometry.clone())?;
         let peer = Self::new(peer_programs, peer_resident, geometry)?;
         family.peer = Some((Box::new(peer), peer_resources));
+        family.conditioning = conditioning;
         Ok(family)
     }
 
@@ -144,6 +147,7 @@ impl NativeFamily {
         let state = programs.bind_state();
         Ok(Self {
             peer: None,
+            conditioning: None,
             programs,
             resident,
             target,
@@ -168,17 +172,21 @@ impl ProgramFamily for NativeFamily {
         resident: ResidentHead,
         definition: &ModelDefinition,
     ) -> Result<(), String> {
-        if self.peer.is_some() { return Err("distributed target does not yet support drafting".into()); }
+        if self.peer.is_some() && !definition.head.as_ref().is_some_and(|head|
+            head.history == magnitude_family_contracts::HeadHistory::Own) {
+            return Err("placed drafting requires a causal head with its own history".into());
+        }
         if self.head.is_none() {
             let binding_constants = self
                 .programs
                 .drafter_graphs()
                 .ok_or("head graph family was not prepared")?
                 .binding_constant_bytes()?;
-            let head = self
+            let mut head = self
                 .programs
                 .bind_head(resident, definition)
                 .map_err(|error| error.to_string())?;
+            if let Some(pool) = &self.conditioning { head.install_conditioning(pool.clone())?; }
             if head.constant_bytes()? != binding_constants {
                 return Err("bound head graph constants differ from the claimed charge".into());
             }

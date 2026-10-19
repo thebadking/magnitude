@@ -117,6 +117,13 @@ and static values reuses the load's first tuning result; its rotations already s
 of several layers. Disjoint row-class workloads may prepare distinct configurations of the same
 entry contract; each is tuned and validated on the classes it serves, and the exact graph class
 binds its prepared configuration.
+CUDA affine attention with 9–16 query heads per K/V head and heads no wider
+than 256 columns uses one decode tuning unit across single-row and verification
+classes. Its choice has numerical coverage on that complete row domain; a
+single-row record cannot supply missing verification evidence. The shared
+unit's search may start from an independent-query matrix tile, with column and
+history partitions sized from the head geometry. This changes neither the
+admissible native configurations nor the first-load allowance.
 Row partitions follow a native form's supported geometry rather than a model identity. In
 particular, an affine Metal form that shares a history tile across four rows has a distinct
 four-row objective throughout its supported head geometry; shorter and wider row bands cannot
@@ -428,6 +435,7 @@ head's residual form determines its mix/scatter entries and its conditioning wid
 element. Raw residual conditioning is exported before the target's exit mix and remains
 F32 through selection, prefix-boundary retention, and chained head steps. Vocabulary
 readout features are computed separately. Both exports and every mix/gather entry belong
+to the target's declared output requirements even on an owner with no local head. They belong
 to the same checked graph topology and resource plan used for execution. Linear
 projection stages use cooperative subgroup reductions for the smallest row classes and subgroup
 matrix operations above them. A projection entry that reads packed weights has one
@@ -819,6 +827,18 @@ recurrent components carry their block owner explicitly, including n-gram state.
 A Shared history reader must reside with its source unless a separate history
 transport is implemented. A residual transfer does not authorize remote history
 bindings.
+
+A placed target may use a causal prediction head with its own history on the
+first owner. Its head weights and history are admitted there, sharing that
+owner's target embedding and vocabulary projection. The final target owner
+publishes the head's declared conditioning representation, including raw F32
+residual streams. Prompt priming transports those bytes into independently
+admitted head input slots after producer completion and retains the slots until
+head completion. Prompt-boundary features are copied into independent storage
+on the head owner before publication. Verification, acceptance and rejected-suffix
+repair retain the ordinary logical transaction across every target owner and
+the head; placement never changes proposal acceptance. Heads reading target
+history and separate block drafters require additional placement contracts.
 
 Expert cache projection retains only the routed layers of one range. Its staging
 pools and scratch forms are compacted and remapped, compatible cache groups are

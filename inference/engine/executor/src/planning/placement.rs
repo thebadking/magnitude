@@ -92,7 +92,9 @@ impl DecoderPlacement {
             let host = if shared_in_host { load.shared_weight_bytes()? } else { 0 };
             bytes.checked_sub(host).ok_or_else(|| "host weights exceed weight charge".into())
         };
-        let budget = device_weights(load)?;
+        let budget = device_weights(load)?.checked_add(if owner == 0 { 0 } else {
+            super::weight_bytes_by_component(load)?[1]
+        }).ok_or("range device weight budget overflows")?;
         let minimum = crate::operators::routed::fused_graph::DECODE_ROWS
             .checked_mul(bank.selected).ok_or("route union overflow")?.min(bank.experts);
         // Evaluate exact inventories, including directory and staging changes.
@@ -151,12 +153,16 @@ impl DecoderPlacement {
             .get(owner)
             .ok_or("unknown decoder range owner")?
             .clone();
-        if load.head.is_some() || load.vision.is_some() || load.residual_conditioning.is_some() {
+        if load.vision.is_some() {
             return Err(
-                "decoder range import currently requires plain text target execution".into(),
+                "decoder range import requires text execution".into(),
             );
         }
-        let graph_load = load.for_decoder_graph_range(range.blocks.clone(), records)?;
+        let mut graph_load = load.for_decoder_graph_range(range.blocks.clone(), records)?;
+        // Only the entry owner imports the head and shares its embedding and
+        // projection. Every target owner retains the conditioning annotation:
+        // the final owner's readout must publish the original residual streams.
+        if owner != 0 { graph_load.head = None; }
         let mut physical_load = graph_load.clone();
         let owns = |scope| match scope {
             WeightScope::Target => true,
@@ -186,6 +192,7 @@ impl DecoderPlacement {
             physical_load
                 .target
                 .iter()
+                .chain(physical_load.head.iter().flatten())
                 .map(|weight| weight.source_bytes)
                 .max()
                 .unwrap_or(0),

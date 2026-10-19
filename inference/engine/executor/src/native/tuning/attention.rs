@@ -82,6 +82,32 @@ fn decode_starts(
     let mut starts = match backend {
         seismic::BackendName::Cuda
             if mix.shape.width <= 256
+                && (9..=16).contains(&mix.shape.group)
+                && mix.decode_rows.as_ref().is_some_and(|rows| rows.start == 1 && rows.end > 2)
+                && limits.max_rows >= 2 =>
+        {
+            // The shared decode/verify unit starts with one query per tile.
+            // Column warps divide a wide head into about 64 columns, while
+            // split-KV partitions expose roughly DECODE_GRID blocks before
+            // multiplying the grid by verification rows. This is a search
+            // hint: the declared domain and every numerical witness remain.
+            let columns = mix.shape.width.div_ceil(64).max(1);
+            let parts = DECODE_GRID.div_ceil(mix.shape.kv_heads.max(1));
+            nearest(
+                implementation,
+                statics,
+                |choice| choice.param("MATRIX") == Some(1)
+                    && choice.param("QREG") == Some(1)
+                    && choice.param("WARPS").is_some_and(|warps| warps * 16 / mix.shape.group == 1),
+                |choice| (
+                    choice.param("COLUMNS").unwrap_or(1).abs_diff(columns),
+                    choice.param("PARTS").unwrap_or(1).abs_diff(parts),
+                    choice.param("STAGES").unwrap_or(2).abs_diff(2),
+                ),
+            )
+        }
+        seismic::BackendName::Cuda
+            if mix.shape.width <= 256
                 && mix.decode_rows.as_ref().is_some_and(|rows| rows.start >= 2)
                 && limits.max_rows >= 2 =>
         {

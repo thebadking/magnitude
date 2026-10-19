@@ -253,6 +253,12 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
             .as_ref()
             .map(|readout| readout.features.clone())
             .ok_or_else(|| DomainError::invariant("a primed prompt chunk publishes no features"))?;
+        if !features.tensor().belongs_to(self.domain.device()) {
+            // Physical producer completion is separate from reconciliation:
+            // the launch keeps its target state and graph-output leases while
+            // the head copies the raw conditioning into admitted local inputs.
+            work.submission.completion().result().map_err(DomainError::Device)?;
+        }
         let store = self
             .head_store
             .clone()
@@ -1105,7 +1111,11 @@ pub(super) fn row_histories(
             .as_ref()
             .filter(|_| end(domain.0).is_none())
         {
-            visible.extend(appended.causal_prior(fresh_start, index)?);
+            super::draft::append_within_slabs(
+                &mut visible,
+                &appended.causal_prior(fresh_start, index)?,
+                u32::try_from(store.history_slab_rows(domain)).map_err(|_| "slab rows exceed u32")?,
+            );
             fresh_start = index;
         }
         let destination = binding.destinations[domain.0]
@@ -1198,7 +1208,11 @@ pub(crate) fn indexer_history(
             ])
         })
         .collect::<Result<Vec<_>, String>>()?;
-    visible.extend(appended.causal_prior(prior.start, prior.end)?);
+    super::draft::append_within_slabs(
+        &mut visible,
+        &appended.causal_prior(prior.start, prior.end)?,
+        u32::try_from(store.history_slab_rows(domain)).map_err(|_| "slab rows exceed u32")?,
+    );
     Ok(RowHistory {
         visible,
         fresh_start: i32::try_from(index).map_err(|_| "fresh start exceeds i32")?,
@@ -1504,7 +1518,11 @@ fn shared_read_history(
     bidirectional_end: Option<usize>,
 ) -> Result<RowHistory, String> {
     let (mut visible, fresh_start) = accepted_history(store, advance, domain, index)?;
-    visible.extend(appended.shared_appended(fresh_start, bidirectional_end.unwrap_or(index + 1))?);
+    super::draft::append_within_slabs(
+        &mut visible,
+        &appended.shared_appended(fresh_start, bidirectional_end.unwrap_or(index + 1))?,
+        u32::try_from(store.history_slab_rows(domain)).map_err(|_| "slab rows exceed u32")?,
+    );
     Ok(RowHistory {
         visible,
         fresh_start: i32::try_from(index).map_err(|_| "fresh start exceeds i32")?,

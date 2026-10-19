@@ -70,6 +70,11 @@ maintenance dispatches each pinned plane through that plane's opened device and
 its local graph workspace; an unknown owner is refused before copying any plane.
 All plane copies finish before the logical maintenance result is returned. A
 failed handoff aborts the logical advance across all owners.
+An own-history prediction head may keep its store on the entry owner. Its prompt
+boundary is captured there only after final-owner feature production completes;
+the raw conditioning representation is unchanged. Head priming and target
+verification keep their original tentative advances, and an interior accepted
+prefix remains unpublished until repair has completed on every affected owner.
 
 A selected attention read's indexer (`LayerRef::Indexer`) keeps its raw keys, each with its row's
 rotary coordinates, in a Window(rate − 1) domain and its finished block keys in a Block(rate)
