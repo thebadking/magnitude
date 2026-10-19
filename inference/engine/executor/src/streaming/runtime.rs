@@ -125,8 +125,10 @@ impl StagingPool {
     /// for the new converter yet.
     fn copy_to_device(&self, source: u32, destination: usize, bytes: u64) -> Result<(), String> {
         let device = self.device.as_ref().ok_or("missing CUDA source window")?;
-        let count = usize::try_from(bytes).map_err(|_| "source record exceeds host address range")?;
-        let offset = (destination as u64).checked_mul(self.record_bytes)
+        let count =
+            usize::try_from(bytes).map_err(|_| "source record exceeds host address range")?;
+        let offset = (destination as u64)
+            .checked_mul(self.record_bytes)
             .ok_or("device source offset overflow")?;
         // SAFETY: the completed ticket owns these host bytes; the caller
         // owns this device slot until it publishes the converter's gate.
@@ -135,13 +137,19 @@ impl StagingPool {
     }
 
     fn shelf(&self, record: u32) -> Shelf {
-        if record < self.own { Shelf::Own } else { Shelf::Conveyor }
+        if record < self.own {
+            Shelf::Own
+        } else {
+            Shelf::Conveyor
+        }
     }
 
     /// The host address of record `record`, `bytes` of it in bounds.
     fn at(&self, record: u32, bytes: u64) -> *mut u8 {
         match self.shelf(record) {
-            Shelf::Own => self.own_bytes.at(u64::from(record) * self.record_bytes, bytes),
+            Shelf::Own => self
+                .own_bytes
+                .at(u64::from(record) * self.record_bytes, bytes),
             Shelf::Conveyor => self
                 .conveyor_bytes
                 .at(u64::from(record - self.own) * self.record_bytes, bytes),
@@ -169,6 +177,7 @@ impl Loan {
 
 /// A routed layer's device words and its host directory.
 pub(crate) struct StreamedLayer {
+    pub cpu: Option<CpuStreamedLayer>,
     pub slot_map: SharedWords,
     /// Per slot of the layer's bank group, the step that last bound it.
     pub stamps: SharedWords,
@@ -218,6 +227,7 @@ impl StreamedLayer {
             ring.fill(0);
         }
         Self {
+            cpu: None,
             slot_map,
             stamps,
             commits,
@@ -233,6 +243,14 @@ impl StreamedLayer {
             read: [0; 2],
         }
     }
+}
+
+#[derive(Clone)]
+pub(crate) struct CpuStreamedLayer {
+    pub service: Arc<super::cpu_service::CpuExpertService>,
+    pub layer: super::cpu_service::CpuExpertLayerContext,
+    pub exchange: Arc<super::cpu_exchange::CpuExpertExchange>,
+    pub selected: usize,
 }
 
 /// The host's heartbeat word: advanced while the watcher serves submitted
@@ -363,7 +381,10 @@ struct Staged {
 }
 
 #[derive(Clone, Copy)]
-enum SourcePath { Bank = 0, Scratch = 1 }
+enum SourcePath {
+    Bank = 0,
+    Scratch = 1,
+}
 
 #[derive(Clone, Copy, Default)]
 struct UploadTrace {
@@ -402,8 +423,8 @@ struct DecodeReuse {
 
 impl DecodeReuse {
     fn score(self, sequence: i32) -> u32 {
-        let elapsed = (sequence.max(0) as u32 / 64)
-            .saturating_sub(self.last_sequence.max(0) as u32 / 64);
+        let elapsed =
+            (sequence.max(0) as u32 / 64).saturating_sub(self.last_sequence.max(0) as u32 / 64);
         self.uses.checked_shr(elapsed).unwrap_or(0)
     }
 
@@ -426,14 +447,20 @@ struct ReuseHistory {
 impl ReuseHistory {
     fn new(layers: &[StreamedLayer]) -> Self {
         Self {
-            experts: layers.iter().map(|layer|
-                vec![DecodeReuse::default(); layer.slot_of.len()]).collect(),
+            experts: layers
+                .iter()
+                .map(|layer| vec![DecodeReuse::default(); layer.slot_of.len()])
+                .collect(),
             steps: Default::default(),
         }
     }
 
     fn observe(&mut self, layer: usize, expert: usize, sequence: i32) {
-        if self.steps.get(&sequence).is_some_and(|classes| classes[layer]) {
+        if self
+            .steps
+            .get(&sequence)
+            .is_some_and(|classes| classes[layer])
+        {
             self.experts[layer][expert].observe(sequence);
         }
     }
@@ -474,6 +501,7 @@ struct State {
     trace: Option<HashMap<i32, StepTrace>>,
     /// Request identities for bounded cache-policy replay; disabled in serving.
     request_trace: bool,
+    cpu_trace: bool,
     request_ordinal: u64,
     reuse: Option<ReuseHistory>,
     reuse_seeds: bool,
@@ -482,11 +510,19 @@ struct State {
 
 impl State {
     fn observe_reuse(&mut self) {
-        let Self { directory, layers, reuse, .. } = self;
+        let Self {
+            directory,
+            layers,
+            reuse,
+            ..
+        } = self;
         if let Some(history) = reuse {
             directory.visit_ready(|representative, slot, key| {
-                history.observe(key.layer.0 as usize, key.expert.0 as usize,
-                    layers[representative].stamps.load(slot));
+                history.observe(
+                    key.layer.0 as usize,
+                    key.expert.0 as usize,
+                    layers[representative].stamps.load(slot),
+                );
             });
         }
     }
@@ -497,16 +533,27 @@ impl State {
 
     /// Observe the existing blocking upload without changing its publication
     /// or completion edge. The timer is host wall time, not CUDA device time.
-    fn upload_source(&mut self, layer: usize, sequence: i32, path: SourcePath,
-        kind: usize, source: u32, destination: usize) -> Result<(), String>
-    {
+    fn upload_source(
+        &mut self,
+        layer: usize,
+        sequence: i32,
+        path: SourcePath,
+        kind: usize,
+        source: u32,
+        destination: usize,
+    ) -> Result<(), String> {
         let tensor = self.layers[layer].stored[kind];
         let began = self.trace.as_ref().map(|_| Instant::now());
         let result = self.pools[tensor.pool].copy_to_device(source, destination, tensor.bytes);
         let elapsed = began.map(|began| began.elapsed());
         if let Some(elapsed) = elapsed {
-            let sample = &mut self.trace.as_mut().expect("enabled trace")
-                .entry(sequence).or_default().uploads[path as usize][kind];
+            let sample = &mut self
+                .trace
+                .as_mut()
+                .expect("enabled trace")
+                .entry(sequence)
+                .or_default()
+                .uploads[path as usize][kind];
             sample.calls += 1;
             sample.requested_bytes += tensor.bytes;
             sample.host_service += elapsed;
@@ -568,23 +615,38 @@ impl StreamingRuntime {
         directory: SharedDirectory,
         loan: Option<Loan>,
     ) -> Result<Self, String> {
-        let sizes = layers.iter().map(|l| (l.stamps.len(), l.commits.len())).collect::<Vec<_>>();
-        directory.validate_ports(&sizes).map_err(|e| format!("shared directory ports: {e:?}"))?;
+        let sizes = layers
+            .iter()
+            .map(|l| (l.stamps.len(), l.commits.len()))
+            .collect::<Vec<_>>();
+        directory
+            .validate_ports(&sizes)
+            .map_err(|e| format!("shared directory ports: {e:?}"))?;
         let reuse_seeds = match std::env::var("MAGNITUDE_EXPERT_SEED_POLICY").as_deref() {
             Err(std::env::VarError::NotPresent) | Ok("prompt") => false,
             Ok("decode-reuse") => true,
             _ => return Err("MAGNITUDE_EXPERT_SEED_POLICY must be prompt or decode-reuse".into()),
         };
-        let reuse_replacement = match std::env::var("MAGNITUDE_EXPERT_REPLACEMENT_POLICY").as_deref() {
-            Err(std::env::VarError::NotPresent) | Ok("lru") => false,
-            Ok("decode-reuse") => true,
-            _ => return Err("MAGNITUDE_EXPERT_REPLACEMENT_POLICY must be lru or decode-reuse".into()),
-        };
+        let reuse_replacement =
+            match std::env::var("MAGNITUDE_EXPERT_REPLACEMENT_POLICY").as_deref() {
+                Err(std::env::VarError::NotPresent) | Ok("lru") => false,
+                Ok("decode-reuse") => true,
+                _ => {
+                    return Err(
+                        "MAGNITUDE_EXPERT_REPLACEMENT_POLICY must be lru or decode-reuse".into(),
+                    );
+                }
+            };
         let reuse = (reuse_seeds || reuse_replacement).then(|| ReuseHistory::new(&layers));
         if let Some(history) = &reuse {
-            let bytes = history.experts.iter().map(|experts|
-                experts.len() * std::mem::size_of::<DecodeReuse>()).sum::<usize>();
-            eprintln!("expert reuse seed={reuse_seeds} replacement={reuse_replacement} expert_counter_bytes={bytes} decay_sequences=64");
+            let bytes = history
+                .experts
+                .iter()
+                .map(|experts| experts.len() * std::mem::size_of::<DecodeReuse>())
+                .sum::<usize>();
+            eprintln!(
+                "expert reuse seed={reuse_seeds} replacement={reuse_replacement} expert_counter_bytes={bytes} decay_sequences=64"
+            );
         }
         let state = Arc::new(Mutex::new(State {
             directory,
@@ -607,9 +669,11 @@ impl StreamingRuntime {
             loan,
             prompt: 0,
             trace: std::env::var_os("MAGNITUDE_TRACE_EXPERT_STREAMING")
-                .is_some().then(HashMap::new),
+                .is_some()
+                .then(HashMap::new),
             request_trace: std::env::var_os("MAGNITUDE_TRACE_EXPERT_REQUESTS").is_some(),
             request_ordinal: 0,
+            cpu_trace: std::env::var_os("MAGNITUDE_TRACE_CPU_EXPERTS").is_some(),
             reuse,
             reuse_seeds,
             reuse_replacement,
@@ -639,12 +703,23 @@ impl StreamingRuntime {
     }
 
     /// Match request-local layer indices to their exact source inventory.
-    pub(crate) fn trace_inventory(&self, device: &seismic::Device,
-        plan: &crate::ExpertBankPlan, paths: &[std::path::PathBuf]) {
+    pub(crate) fn trace_inventory(
+        &self,
+        device: &seismic::Device,
+        plan: &crate::ExpertBankPlan,
+        paths: &[std::path::PathBuf],
+    ) {
         let state = self.state.lock().expect("streaming state");
-        if !state.request_trace { return; }
-        let layers = plan.layers.iter().zip(&state.layers).enumerate().map(|(index, (planned, layer))| {
-            let sources = layer.stored.iter().enumerate().map(|(kind, stored)| {
+        if !state.request_trace {
+            return;
+        }
+        let layers = plan
+            .layers
+            .iter()
+            .zip(&state.layers)
+            .enumerate()
+            .map(|(index, (planned, layer))| {
+                let sources = layer.stored.iter().enumerate().map(|(kind, stored)| {
                 let pool = &plan.pools[stored.pool];
                 // A physical footprint for replay, not CPU execution admission.
                 let cpu_name = match pool.source.name() {
@@ -662,12 +737,16 @@ impl StreamingRuntime {
                     "matrix": pool.matrix, "cpu_rows8_element": cpu_name,
                     "cpu_rows8_record_bytes": cpu_bytes})
             }).collect::<Vec<_>>();
-            serde_json::json!({"layer": index, "scope": format!("{:?}", planned.scope),
+                serde_json::json!({"layer": index, "scope": format!("{:?}", planned.scope),
                 "experts": plan.experts, "selected": plan.selected, "sources": sources})
-        }).collect::<Vec<_>>();
-        eprintln!("expert request {}", serde_json::json!({"kind": "inventory", "schema": 1,
+            })
+            .collect::<Vec<_>>();
+        eprintln!(
+            "expert request {}",
+            serde_json::json!({"kind": "inventory", "schema": 1,
             "bank": format!("{:p}", Arc::as_ptr(&self.source)), "device": device.info().selector,
-            "layers": layers, "scope": "Miss-bearing bank requests only; all-hit and scratch frames are absent"}));
+            "layers": layers, "scope": "Miss-bearing bank requests only; all-hit and scratch frames are absent"})
+        );
     }
 
     /// Steps `first..first + count` are about to be submitted, as one
@@ -683,18 +762,25 @@ impl StreamingRuntime {
         {
             let mut state = self.state.lock().expect("streaming state");
             if count > 1 {
-                state.groups.extend(
-                    (first + 1..first + count).map(|sequence| (sequence, first)),
-                );
+                state
+                    .groups
+                    .extend((first + 1..first + count).map(|sequence| (sequence, first)));
             }
             let seeds = seeds.into_iter().collect::<Vec<_>>();
             assert_eq!(
-                seeds.len(), state.layers.len(), "one seed boundary per local layer",
+                seeds.len(),
+                state.layers.len(),
+                "one seed boundary per local layer",
             );
             if let Some(history) = &mut state.reuse {
                 for sequence in first..first + count {
-                    history.steps.insert(sequence, seeds.iter().map(|last|
-                        last.is_none_or(|last| sequence > last)).collect());
+                    history.steps.insert(
+                        sequence,
+                        seeds
+                            .iter()
+                            .map(|last| last.is_none_or(|last| sequence > last))
+                            .collect(),
+                    );
                 }
             }
             for (layer, sequence) in seeds.into_iter().enumerate() {
@@ -717,9 +803,12 @@ impl StreamingRuntime {
         let mut state = self.state.lock().expect("streaming state");
         if !fenced {
             if state.request_trace {
-                eprintln!("expert request {}", serde_json::json!({"kind": "complete", "schema": 1,
+                eprintln!(
+                    "expert request {}",
+                    serde_json::json!({"kind": "complete", "schema": 1,
                     "bank": format!("{:p}", Arc::as_ptr(&self.source)), "sequence": sequence,
-                    "fenced": false, "failed": true}));
+                    "fenced": false, "failed": true})
+                );
             }
             if let Some(history) = &mut state.reuse {
                 history.steps.remove(&sequence);
@@ -727,7 +816,9 @@ impl StreamingRuntime {
             return Err("shared-cache step dropped without a completion fence".into());
         }
         let invalid = {
-            let State { directory, layers, .. } = &mut *state;
+            let State {
+                directory, layers, ..
+            } = &mut *state;
             directory
                 .retire_step(sequence, |layer, slot| layers[layer].commits.load(slot))
                 .map_err(|e| format!("shared-cache completion: {e:?}"))?
@@ -743,7 +834,10 @@ impl StreamingRuntime {
         let mut failed = state.failed_steps.remove(&sequence);
         let mut device_failures = Vec::new();
         for (layer, ports) in state.layers.iter().enumerate() {
-            for (kind, control) in [("decode", &ports.control), ("scratch", &ports.scratch_control)] {
+            for (kind, control) in [
+                ("decode", &ports.control),
+                ("scratch", &ports.scratch_control),
+            ] {
                 if control.load(FAILURE) == sequence {
                     failed = true;
                     device_failures.push(format!("layer {layer} {kind} device handshake"));
@@ -759,30 +853,65 @@ impl StreamingRuntime {
         }
         release_past(&mut state, &self.source);
         if state.request_trace {
-            eprintln!("expert request {}", serde_json::json!({"kind": "complete", "schema": 1,
+            eprintln!(
+                "expert request {}",
+                serde_json::json!({"kind": "complete", "schema": 1,
                 "bank": format!("{:p}", Arc::as_ptr(&self.source)), "sequence": sequence,
-                "fenced": true, "failed": failed}));
+                "fenced": true, "failed": failed})
+            );
         }
-        if let Some(trace) = state.trace.as_mut().and_then(|steps| steps.remove(&sequence)) {
+        if state.cpu_trace {
+            if let Some(cpu) = state.layers.iter().find_map(|layer| layer.cpu.as_ref()) {
+                eprintln!(
+                    "CPU experts {}",
+                    serde_json::json!({"service":format!("{:p}",Arc::as_ptr(&cpu.service)),
+                    "sequence":sequence,"fenced":true,"snapshot":cpu.service.snapshot()})
+                );
+            }
+        }
+        if let Some(trace) = state
+            .trace
+            .as_mut()
+            .and_then(|steps| steps.remove(&sequence))
+        {
             let (cache_hit_bytes, file_read_bytes) = self.source.counters();
-            eprintln!("expert source bank={:p} sequence={sequence} cache_hit_bytes={cache_hit_bytes} file_read_bytes={file_read_bytes}",
-                Arc::as_ptr(&self.source));
+            eprintln!(
+                "expert source bank={:p} sequence={sequence} cache_hit_bytes={cache_hit_bytes} file_read_bytes={file_read_bytes}",
+                Arc::as_ptr(&self.source)
+            );
             eprintln!(
                 "expert streaming bank={:p} sequence={sequence} requests={} choices={} misses={} staged={} ready={} demand_bytes={} prefetch_bytes={} revived={} host_service_ms={:.3} scratch_requests={} scratch_held={} scratch_misses={}",
-                Arc::as_ptr(&self.source), trace.requests, trace.choices, trace.misses,
-                trace.staged, trace.ready, trace.source_bytes[0], trace.source_bytes[1],
-                trace.revived, trace.host_service.as_secs_f64() * 1000.0,
-                trace.scratch_requests, trace.scratch_held, trace.scratch_misses,
+                Arc::as_ptr(&self.source),
+                trace.requests,
+                trace.choices,
+                trace.misses,
+                trace.staged,
+                trace.ready,
+                trace.source_bytes[0],
+                trace.source_bytes[1],
+                trace.revived,
+                trace.host_service.as_secs_f64() * 1000.0,
+                trace.scratch_requests,
+                trace.scratch_held,
+                trace.scratch_misses,
             );
             for (path, name) in ["bank", "scratch"].into_iter().enumerate() {
                 let source = trace.source_timing[path];
                 let uploads = &trace.uploads[path];
                 let calls = uploads.iter().map(|sample| sample.calls).sum::<u64>();
-                let bytes = uploads.iter().map(|sample| sample.requested_bytes).sum::<u64>();
-                let service = uploads.iter().map(|sample| sample.host_service).sum::<Duration>();
+                let bytes = uploads
+                    .iter()
+                    .map(|sample| sample.requested_bytes)
+                    .sum::<u64>();
+                let service = uploads
+                    .iter()
+                    .map(|sample| sample.host_service)
+                    .sum::<Duration>();
                 eprintln!(
                     "expert service bank={:p} sequence={sequence} path={name} source_tickets={} source_ranges={} source_first_start_ms_sum={:.3} source_worker_ms_sum={:.3} source_span_ms_sum={:.3} upload_calls={calls} upload_requested_bytes={bytes} upload_host_ms={:.3} gate_upload_ms={:.3} up_upload_ms={:.3} down_upload_ms={:.3} bank_poll_sleep_ms={:.3} scratch_ticket_wait_ms={:.3}",
-                    Arc::as_ptr(&self.source), trace.source_tickets[path], source.ranges,
+                    Arc::as_ptr(&self.source),
+                    trace.source_tickets[path],
+                    source.ranges,
                     source.first_start_delay.as_secs_f64() * 1000.0,
                     source.worker_service.as_secs_f64() * 1000.0,
                     source.completion_span.as_secs_f64() * 1000.0,
@@ -790,16 +919,29 @@ impl StreamingRuntime {
                     uploads[0].host_service.as_secs_f64() * 1000.0,
                     uploads[1].host_service.as_secs_f64() * 1000.0,
                     uploads[2].host_service.as_secs_f64() * 1000.0,
-                    if path == 0 { trace.bank_poll_sleep.as_secs_f64() * 1000.0 } else { 0.0 },
-                    if path == 1 { trace.scratch_ticket_wait.as_secs_f64() * 1000.0 } else { 0.0 },
+                    if path == 0 {
+                        trace.bank_poll_sleep.as_secs_f64() * 1000.0
+                    } else {
+                        0.0
+                    },
+                    if path == 1 {
+                        trace.scratch_ticket_wait.as_secs_f64() * 1000.0
+                    } else {
+                        0.0
+                    },
                 );
             }
         }
         let detail = state.fetch_failures.remove(&sequence);
         if failed {
-            return Err(format!("step {sequence}: {}", detail.unwrap_or_else(||
-                if device_failures.is_empty() { "shared-cache invalidation failed".into() }
-                else { device_failures.join("; ") })));
+            return Err(format!(
+                "step {sequence}: {}",
+                detail.unwrap_or_else(|| if device_failures.is_empty() {
+                    "shared-cache invalidation failed".into()
+                } else {
+                    device_failures.join("; ")
+                })
+            ));
         }
         Ok(())
     }
@@ -867,7 +1009,9 @@ fn poll(state: &mut State, source: &ExpertSource) -> bool {
             let point = state.clock(sequence, layer);
             advance(state, point, source);
             let ring = &state.layers[layer].rings[distance];
-            let count = usize::try_from(ring.load(1)).unwrap_or(0).min(ring.len() - 2);
+            let count = usize::try_from(ring.load(1))
+                .unwrap_or(0)
+                .min(ring.len() - 2);
             let experts = (0..count).map(|i| ring.load(2 + i)).collect::<Vec<_>>();
             for expert in experts {
                 prefetch(state, source, target, expert, sequence, Window::Hint);
@@ -895,7 +1039,9 @@ fn poll(state: &mut State, source: &ExpertSource) -> bool {
 fn advance(state: &mut State, point: Clock, source: &ExpertSource) {
     if point > state.progress {
         let invalid = {
-            let State { directory, layers, .. } = &mut *state;
+            let State {
+                directory, layers, ..
+            } = &mut *state;
             directory
                 .retire_progress(point, |layer, slot| layers[layer].commits.load(slot))
                 .expect("device-published shared-cache progress")
@@ -908,13 +1054,26 @@ fn advance(state: &mut State, point: Clock, source: &ExpertSource) {
 }
 
 /// Mappings the directory withdrew: unmap them and fail their steps.
-fn invalidate(state: &mut State, source: &ExpertSource, invalid: Vec<(Clock, super::arena::Location)>) {
+fn invalidate(
+    state: &mut State,
+    source: &ExpertSource,
+    invalid: Vec<(Clock, super::arena::Location)>,
+) {
     for (clock, location) in invalid {
         state.failed_steps.insert(clock.sequence);
-        state.fetch_failures.entry(clock.sequence).or_insert_with(|| format!(
-            "uncommitted cache fill: layer {}, expert {}, slot {}, commit {} (expected {})",
-            clock.layer, location.key.expert.0, location.slot,
-            state.layers[clock.layer].commits.load(location.slot), clock.sequence));
+        state
+            .fetch_failures
+            .entry(clock.sequence)
+            .or_insert_with(|| {
+                format!(
+                    "uncommitted cache fill: layer {}, expert {}, slot {}, commit {} (expected {})",
+                    clock.layer,
+                    location.key.expert.0,
+                    location.slot,
+                    state.layers[clock.layer].commits.load(location.slot),
+                    clock.sequence
+                )
+            });
         unmap(state, source, location);
         state.layers[location.key.layer.0 as usize]
             .control
@@ -930,7 +1089,9 @@ fn unmap(state: &mut State, source: &ExpertSource, location: super::arena::Locat
         layer.slot_of[expert] = -1;
         layer.slot_map.store(expert, -1);
         layer.expert_of[location.slot] = -1;
-        for tensor in layer.stored { source.device_residency(tensor, expert, false); }
+        for tensor in layer.stored {
+            source.device_residency(tensor, expert, false);
+        }
     }
 }
 
@@ -980,7 +1141,10 @@ fn give_back(state: &mut State) {
     let loan = state.loan.as_mut().expect("a loan");
     loan.lent = false;
     let (group, slots) = (loan.group, loan.slots.clone());
-    state.directory.restore(group, slots).expect("the conveyor's lent records");
+    state
+        .directory
+        .restore(group, slots)
+        .expect("the conveyor's lent records");
 }
 
 /// Free converted records and cancel or free unused prefetches of layers the
@@ -1002,7 +1166,9 @@ fn release_past(state: &mut State, source: &ExpertSource) {
     // A step before the progress's group is past at every layer, as its own
     // group or its layer-major one.
     groups.retain(|&sequence, _| sequence >= progress.group);
-    state.seed_steps.retain(|&(sequence, _)| sequence >= progress.group);
+    state
+        .seed_steps
+        .retain(|&(sequence, _)| sequence >= progress.group);
     for (records, layer, expert) in freed {
         free_records(state, layer, records, (expert >= 0).then_some(expert));
     }
@@ -1139,7 +1305,10 @@ fn fetch(
         return true;
     }
     let stored = state.layers[layer].stored;
-    if !stored.iter().all(|tensor| available(state, tensor.pool, shelf)) {
+    if !stored
+        .iter()
+        .all(|tensor| available(state, tensor.pool, shelf))
+    {
         return false;
     }
     let mut records = [0u32; KINDS];
@@ -1184,14 +1353,20 @@ fn stage_for_decode(
 ) -> Result<(), String> {
     let key = (layer, expert);
     if state.device_staging() {
-        state.staged.get_mut(&key).expect("a pending decode source").sequence = sequence;
+        state
+            .staged
+            .get_mut(&key)
+            .expect("a pending decode source")
+            .sequence = sequence;
         return Ok(());
     }
     let staged = state.staged.get(&key).expect("a pending decode source");
     let records = staged.records;
     let stored = state.layers[layer].stored;
-    let own = records.iter().zip(stored).all(|(&record, tensor)|
-        state.pools[tensor.pool].shelf(record) == Shelf::Own);
+    let own = records
+        .iter()
+        .zip(stored)
+        .all(|(&record, tensor)| state.pools[tensor.pool].shelf(record) == Shelf::Own);
     if own {
         state.staged.get_mut(&key).unwrap().sequence = sequence;
         return Ok(());
@@ -1202,13 +1377,23 @@ fn stage_for_decode(
         return Err(format!("conveyor source: {}", ticket.diagnostic()));
     }
     let mut needed = HashMap::<usize, usize>::new();
-    for tensor in stored { *needed.entry(tensor.pool).or_default() += 1; }
-    let available = |state: &State| needed.iter().all(|(&pool, &count)|
-        state.pools[pool].free[Shelf::Own as usize].len() >= count);
-    if !available(state) { reclaim_prefetches(state, source, layer); }
-    if !available(state) { return Err("no decode staging for a conveyor source".into()); }
-    let copied = std::array::from_fn(|kind|
-        take_record(state, stored[kind].pool, Shelf::Own).expect("reserved own capacity"));
+    for tensor in stored {
+        *needed.entry(tensor.pool).or_default() += 1;
+    }
+    let available = |state: &State| {
+        needed
+            .iter()
+            .all(|(&pool, &count)| state.pools[pool].free[Shelf::Own as usize].len() >= count)
+    };
+    if !available(state) {
+        reclaim_prefetches(state, source, layer);
+    }
+    if !available(state) {
+        return Err("no decode staging for a conveyor source".into());
+    }
+    let copied = std::array::from_fn(|kind| {
+        take_record(state, stored[kind].pool, Shelf::Own).expect("reserved own capacity")
+    });
     for (kind, tensor) in stored.iter().enumerate() {
         let pool = &state.pools[tensor.pool];
         let from = pool.at(records[kind], tensor.bytes);
@@ -1219,14 +1404,19 @@ fn stage_for_decode(
         for offset in (0..bytes).step_by(1024 * 1024) {
             state.heartbeat.beat();
             let count = (bytes - offset).min(1024 * 1024);
-            unsafe { std::ptr::copy_nonoverlapping(from.add(offset), to.add(offset), count); }
+            unsafe {
+                std::ptr::copy_nonoverlapping(from.add(offset), to.add(offset), count);
+            }
         }
     }
-    state.staged.insert(key, Staged {
-        records: copied,
-        ticket: Ticket::done(Priority::Demand),
-        sequence,
-    });
+    state.staged.insert(
+        key,
+        Staged {
+            records: copied,
+            ticket: Ticket::done(Priority::Demand),
+            sequence,
+        },
+    );
     free_records(state, layer, records, None);
     Ok(())
 }
@@ -1263,12 +1453,96 @@ fn prefetch(
         }
         Window::Conveyor => Shelf::Conveyor,
     };
-    fetch(state, source, layer, expert, Priority::Prefetch, shelf, sequence);
+    fetch(
+        state,
+        source,
+        layer,
+        expert,
+        Priority::Prefetch,
+        shelf,
+        sequence,
+    );
 }
 
 /// A parked step's request (spec 4.6 step 4): resolve it against the shared
 /// directory, deliver every absent expert into staging, publish each choice's
 /// placement and its acknowledgement as its record arrives, then the request's.
+/// CPU work has no sequence-state writes. Availability or execution failure
+/// therefore selects the ordinary GPU path before any GPU slots are reserved.
+fn try_cpu(
+    state: &mut State,
+    layer: usize,
+    sequence: i32,
+    choices: &[i32],
+    routed: &[i32],
+) -> (Option<usize>, Option<(CpuStreamedLayer, i32)>) {
+    let Some(cpu) = state.layers[layer].cpu.clone() else {
+        return (None, None);
+    };
+    if choices.len() != cpu.selected || choices.iter().filter(|&&choice| choice >= 0).count() != 1 {
+        return (None, None);
+    };
+    let position = choices
+        .iter()
+        .position(|&choice| choice >= 0)
+        .expect("one absent choice");
+    let expert = routed[position];
+    if cpu.exchange.failure().is_some() {
+        return (None, None);
+    }
+    let deadline = Instant::now() + PARK_BOUND;
+    let request = loop {
+        cpu.exchange.pulse();
+        state.heartbeat.beat();
+        match cpu.exchange.try_request() {
+            Ok(Some(request)) => break request,
+            Ok(None) if Instant::now() < deadline => std::thread::yield_now(),
+            _ => {
+                cpu.exchange.abort();
+                return (None, None);
+            }
+        }
+    };
+    if request.sequence() != sequence {
+        drop(request);
+        return (None, None);
+    };
+    let needs_conversion = !state.directory.is_ready(layer, expert);
+    let mut contribution = None;
+    if needs_conversion {
+        cpu.service.eligible.fetch_add(1, Ordering::Relaxed);
+        if let Ok(Some(lease)) = cpu.service.get(&cpu.layer, expert as usize) {
+            contribution = cpu
+                .service
+                .execute(&cpu.layer, &lease, request.activation())
+                .ok();
+        }
+    }
+    let used_cpu = contribution.is_some();
+    let contribution = contribution
+        .unwrap_or_else(|| vec![0; cpu.exchange.contribution().extents()[1] as usize * 4]);
+    if request.complete(&contribution).is_err() {
+        return (None, None);
+    };
+    if used_cpu {
+        // A host ACK alone does not establish successful device consumption:
+        // the device can have reached its watchdog at that exact publication.
+        while !cpu.exchange.consumed(sequence) {
+            cpu.exchange.pulse();
+            state.heartbeat.beat();
+            if cpu.exchange.failure().is_some() || Instant::now() >= deadline {
+                cpu.exchange.abort();
+                return (None, None);
+            }
+            std::thread::yield_now();
+        }
+        cpu.service.hits.fetch_add(1, Ordering::Relaxed);
+        (Some(position), None)
+    } else {
+        (None, needs_conversion.then_some((cpu, expert)))
+    }
+}
+
 fn serve(state: &mut State, source: &ExpertSource, layer: usize, sequence: i32) {
     let started = Instant::now();
     let mut deadline = started + PARK_BOUND;
@@ -1306,6 +1580,19 @@ fn serve(state: &mut State, source: &ExpertSource, layer: usize, sequence: i32) 
         return;
     }
     let routed = routed.into_iter().map(|e| e as i32).collect::<Vec<_>>();
+    let (cpu_choice, cpu_retain) = try_cpu(state, layer, sequence, &choices, &routed);
+    let gpu_routed = match cpu_choice {
+        Some(position) => std::borrow::Cow::Owned(
+            routed
+                .iter()
+                .enumerate()
+                .filter_map(|(index, &expert)| (index != position).then_some(expert))
+                .collect::<Vec<_>>(),
+        ),
+        None => std::borrow::Cow::Borrowed(routed.as_slice()),
+    };
+    let original_choice =
+        |index: usize| index + usize::from(cpu_choice.is_some_and(|position| index >= position));
     state
         .directory
         .sync_stamps(
@@ -1321,34 +1608,56 @@ fn serve(state: &mut State, source: &ExpertSource, layer: usize, sequence: i32) 
         let priority = |key: super::arena::Key| {
             let layer = key.layer.0 as usize;
             let uses = history.experts[layer][key.expert.0 as usize].score(sequence);
-            let source_bytes: u128 = layers[layer].stored.iter()
-                .map(|tensor| u128::from(tensor.bytes)).sum();
+            let source_bytes: u128 = layers[layer]
+                .stored
+                .iter()
+                .map(|tensor| u128::from(tensor.bytes))
+                .sum();
             u128::from(uses) * source_bytes
         };
-        state.directory.begin_with_priority(point, &routed, Some(&priority))
+        state
+            .directory
+            .begin_with_priority(point, &gpu_routed, Some(&priority))
     } else {
-        state.directory.begin(point, &routed)
-    }.expect("validated shared route union");
+        state.directory.begin(point, &gpu_routed)
+    }
+    .expect("validated shared route union");
     if state.request_trace {
         state.request_ordinal += 1;
-        let evicted = resolution.evicted.iter().map(|location| serde_json::json!({
-            "layer": location.key.layer.0, "expert": location.key.expert.0,
-        })).collect::<Vec<_>>();
-        eprintln!("expert request {}", serde_json::json!({"kind": "request", "schema": 1,
+        let evicted = resolution
+            .evicted
+            .iter()
+            .map(|location| {
+                serde_json::json!({
+                    "layer": location.key.layer.0, "expert": location.key.expert.0,
+                })
+            })
+            .collect::<Vec<_>>();
+        eprintln!(
+            "expert request {}",
+            serde_json::json!({"kind": "request", "schema": 1,
             "bank": format!("{source:p}"), "ordinal": state.request_ordinal,
             "sequence": sequence, "layer": layer, "choices": routed,
             "initial_gpu_hits": choices.iter().map(|&choice| choice < 0).collect::<Vec<_>>(),
-            "needs_conversion": resolution.choices.iter().map(|choice| choice.needs_conversion).collect::<Vec<_>>(),
-            "evicted": evicted}));
+            "needs_conversion": (0..count).map(|index|if cpu_choice==Some(index) {false} else {
+                resolution.choices[index-usize::from(cpu_choice.is_some_and(|position|index>position))].needs_conversion }).collect::<Vec<_>>(),
+            "cpu_choice":cpu_choice,
+            "evicted": evicted})
+        );
     }
     if let Some(steps) = &mut state.trace {
         let trace = steps.entry(sequence).or_default();
         trace.requests += 1;
-        trace.choices += resolution.choices.len();
+        trace.choices += count;
         for choice in &resolution.choices {
-            if !choice.needs_conversion { continue; }
+            if !choice.needs_conversion {
+                continue;
+            }
             trace.misses += 1;
-            if let Some(staged) = state.staged.get(&(layer, choice.location.key.expert.0 as i32)) {
+            if let Some(staged) = state
+                .staged
+                .get(&(layer, choice.location.key.expert.0 as i32))
+            {
                 trace.staged += 1;
                 trace.ready += usize::from(staged.ticket.poll() == Some(Outcome::Done));
             }
@@ -1369,7 +1678,9 @@ fn serve(state: &mut State, source: &ExpertSource, layer: usize, sequence: i32) 
         state.layers[layer].slot_of[expert as usize] = slot as i32;
         state.layers[layer].expert_of[slot] = expert;
         state.layers[layer].stamps.store(slot, sequence);
-        for tensor in state.layers[layer].stored { source.device_residency(tensor, expert as usize, true); }
+        for tensor in state.layers[layer].stored {
+            source.device_residency(tensor, expert as usize, true);
+        }
         match state.staged.get(&(layer, expert)) {
             Some(staged) => {
                 if staged.ticket.priority() == Priority::Prefetch {
@@ -1378,7 +1689,15 @@ fn serve(state: &mut State, source: &ExpertSource, layer: usize, sequence: i32) 
             }
             None => {
                 let demand = |state: &mut State| {
-                    fetch(state, source, layer, expert, Priority::Demand, Shelf::Own, sequence)
+                    fetch(
+                        state,
+                        source,
+                        layer,
+                        expert,
+                        Priority::Demand,
+                        Shelf::Own,
+                        sequence,
+                    )
                 };
                 if !demand(state) {
                     reclaim_prefetches(state, source, layer);
@@ -1397,9 +1716,14 @@ fn serve(state: &mut State, source: &ExpertSource, layer: usize, sequence: i32) 
     }
     for &expert in &pending {
         if let Err(detail) = stage_for_decode(state, source, layer, expert, sequence) {
-            state.directory.submitted(point).expect("failed immutable frame");
-            state.fetch_failures.entry(sequence).or_insert_with(||
-                format!("layer {layer}, expert {expert}: {detail}"));
+            state
+                .directory
+                .submitted(point)
+                .expect("failed immutable frame");
+            state
+                .fetch_failures
+                .entry(sequence)
+                .or_insert_with(|| format!("layer {layer}, expert {expert}: {detail}"));
             fail(state);
             return;
         }
@@ -1408,7 +1732,14 @@ fn serve(state: &mut State, source: &ExpertSource, layer: usize, sequence: i32) 
     // readiness is published. Reserved source records remain staged until
     // their tickets finish, even when another record fails mid-request.
     let device_staging = state.device_staging();
-    for (c, choice) in resolution.choices.iter().enumerate() {
+    if let Some(c) = cpu_choice {
+        for row in 0..4 {
+            state.layers[layer].placement.store(row * width + c, -1);
+        }
+        state.layers[layer].placement.store(4 * width + c, 0);
+    }
+    for (index, choice) in resolution.choices.iter().enumerate() {
+        let c = original_choice(index);
         if choices[c] < 0 {
             continue;
         }
@@ -1416,7 +1747,9 @@ fn serve(state: &mut State, source: &ExpertSource, layer: usize, sequence: i32) 
             .placement
             .store(c, choice.location.slot as i32);
         let records = if choice.needs_conversion && device_staging {
-            let index = pending.iter().position(|&expert| expert == routed[c])
+            let index = pending
+                .iter()
+                .position(|&expert| expert == routed[c])
                 .expect("a pending conversion");
             [index as i32; KINDS]
         } else if choice.needs_conversion {
@@ -1440,7 +1773,11 @@ fn serve(state: &mut State, source: &ExpertSource, layer: usize, sequence: i32) 
     if outstanding.is_empty() {
         state.layers[layer].control.store(ACKNOWLEDGED, sequence);
     }
-    for (c, choice) in resolution.choices.iter().enumerate() {
+    if let Some(c) = cpu_choice {
+        state.layers[layer].placement.store(4 * width + c, sequence);
+    }
+    for (index, choice) in resolution.choices.iter().enumerate() {
+        let c = original_choice(index);
         if choices[c] >= 0 && !choice.needs_conversion {
             state.layers[layer].placement.store(4 * width + c, sequence);
         }
@@ -1448,15 +1785,31 @@ fn serve(state: &mut State, source: &ExpertSource, layer: usize, sequence: i32) 
     while !outstanding.is_empty() {
         state.heartbeat.beat();
         for expert in &outstanding {
-            deadline = deadline.max(state.staged[&(layer, *expert)].ticket.progress_at() + PARK_BOUND);
+            deadline =
+                deadline.max(state.staged[&(layer, *expert)].ticket.progress_at() + PARK_BOUND);
         }
         if Instant::now() >= deadline || state.layers[layer].control.load(FAILURE) == sequence {
-            let reason = if Instant::now() >= deadline { "fetch made no progress" } else { "device handshake" };
-            let tickets = outstanding.iter().map(|expert| format!(
-                "expert {expert}: {}", state.staged[&(layer, *expert)].ticket.diagnostic()))
-                .collect::<Vec<_>>().join("; ");
-            state.fetch_failures.entry(sequence).or_insert_with(|| format!(
-                "layer {layer} {reason} after {:?}: {tickets}", started.elapsed()));
+            let reason = if Instant::now() >= deadline {
+                "fetch made no progress"
+            } else {
+                "device handshake"
+            };
+            let tickets = outstanding
+                .iter()
+                .map(|expert| {
+                    format!(
+                        "expert {expert}: {}",
+                        state.staged[&(layer, *expert)].ticket.diagnostic()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            state.fetch_failures.entry(sequence).or_insert_with(|| {
+                format!(
+                    "layer {layer} {reason} after {:?}: {tickets}",
+                    started.elapsed()
+                )
+            });
             fail(state);
             return;
         }
@@ -1472,23 +1825,35 @@ fn serve(state: &mut State, source: &ExpertSource, layer: usize, sequence: i32) 
                 Some(Outcome::Done) => {}
                 Some(_) => {
                     let detail = state.staged[&(layer, expert)].ticket.diagnostic();
-                    state.fetch_failures.entry(sequence).or_insert_with(||
-                        format!("layer {layer}, expert {expert}: {detail}"));
+                    state
+                        .fetch_failures
+                        .entry(sequence)
+                        .or_insert_with(|| format!("layer {layer}, expert {expert}: {detail}"));
                     fail(state);
                     return;
                 }
             }
             if device_staging {
                 let records = state.staged[&(layer, expert)].records;
-                let destination = pending.iter().position(|&pending| pending == expert)
+                let destination = pending
+                    .iter()
+                    .position(|&pending| pending == expert)
                     .expect("a pending conversion");
                 for kind in 0..KINDS {
                     state.heartbeat.beat();
-                    if let Err(error) = state.upload_source(layer, sequence, SourcePath::Bank,
-                        kind, records[kind], destination)
-                    {
-                        state.fetch_failures.entry(sequence).or_insert_with(||
-                            format!("layer {layer}, expert {expert}: device source transfer: {error}"));
+                    if let Err(error) = state.upload_source(
+                        layer,
+                        sequence,
+                        SourcePath::Bank,
+                        kind,
+                        records[kind],
+                        destination,
+                    ) {
+                        state.fetch_failures.entry(sequence).or_insert_with(|| {
+                            format!(
+                                "layer {layer}, expert {expert}: device source transfer: {error}"
+                            )
+                        });
                         fail(state);
                         return;
                     }
@@ -1508,7 +1873,8 @@ fn serve(state: &mut State, source: &ExpertSource, layer: usize, sequence: i32) 
             if outstanding.is_empty() {
                 state.layers[layer].control.store(ACKNOWLEDGED, sequence);
             }
-            for (c, choice) in resolution.choices.iter().enumerate() {
+            for (index, choice) in resolution.choices.iter().enumerate() {
+                let c = original_choice(index);
                 if choices[c] >= 0 && choice.location.key.expert.0 == expert as u32 {
                     state.layers[layer].placement.store(4 * width + c, sequence);
                 }
@@ -1520,8 +1886,36 @@ fn serve(state: &mut State, source: &ExpertSource, layer: usize, sequence: i32) 
             std::thread::sleep(IDLE);
             let elapsed = began.map(|began| began.elapsed());
             if let Some(elapsed) = elapsed {
-                state.trace.as_mut().expect("enabled trace").entry(sequence).or_default()
+                state
+                    .trace
+                    .as_mut()
+                    .expect("enabled trace")
+                    .entry(sequence)
+                    .or_default()
                     .bank_poll_sleep += elapsed;
+            }
+        }
+    }
+    // Only reuse source records the ordinary GPU miss already fetched. CUDA's
+    // uploads are complete and its converter reads the device copy. This
+    // watcher still owns the host records until its next progress retirement.
+    if let Some((cpu, expert)) = cpu_retain {
+        if let Some(&(_, _, records, _)) = state
+            .converted
+            .last()
+            .filter(|&&(seq, owner, _, key)| seq == sequence && owner == layer && key == expert)
+        {
+            let stored = state.layers[layer].stored;
+            // SAFETY: the completed tickets and this watcher's exclusion keep
+            // all three host ranges immutable throughout the synchronous fill.
+            let raw = std::array::from_fn(|kind| unsafe {
+                std::slice::from_raw_parts(
+                    state.pools[stored[kind].pool].at(records[kind], stored[kind].bytes),
+                    stored[kind].bytes as usize,
+                )
+            });
+            if let Err(error) = cpu.service.retain(&cpu.layer, expert as usize, raw) {
+                eprintln!("CPU expert retention bypass layer={layer} expert={expert}: {error}");
             }
         }
     }
@@ -1536,19 +1930,35 @@ fn serve(state: &mut State, source: &ExpertSource, layer: usize, sequence: i32) 
 /// those the bank lacks. To make room within the share it evicts the layer's
 /// least recently read other experts, never the step's `hits`, which the fill
 /// copies; a short prompt evicts no more than its seeds need.
-fn keep_routed(state: &mut State, source: &ExpertSource, layer: usize, sequence: i32, routed: &[u32], hits: &[i32]) -> Vec<i32> {
+fn keep_routed(
+    state: &mut State,
+    source: &ExpertSource,
+    layer: usize,
+    sequence: i32,
+    routed: &[u32],
+    hits: &[i32],
+) -> Vec<i32> {
     let share = state
         .directory
         .share(layer)
         .expect("a streamed layer of the directory");
     state.observe_reuse();
-    let score = |expert: usize| state.reuse.as_ref().filter(|_| state.reuse_seeds)
-        .map_or(0, |history| history.experts[layer][expert].score(sequence));
+    let score = |expert: usize| {
+        state
+            .reuse
+            .as_ref()
+            .filter(|_| state.reuse_seeds)
+            .map_or(0, |history| history.experts[layer][expert].score(sequence))
+    };
     let mut kept = (0..routed.len() as i32)
-        .filter(|&expert| routed[expert as usize] > 0
-            || (state.layers[layer].slot_of[expert as usize] >= 0 && score(expert as usize) > 0))
+        .filter(|&expert| {
+            routed[expert as usize] > 0
+                || (state.layers[layer].slot_of[expert as usize] >= 0 && score(expert as usize) > 0)
+        })
         .collect::<Vec<_>>();
-    kept.sort_by_key(|&expert| std::cmp::Reverse((score(expert as usize), routed[expert as usize])));
+    kept.sort_by_key(|&expert| {
+        std::cmp::Reverse((score(expert as usize), routed[expert as usize]))
+    });
     kept.truncate(share);
     let slot_of = &state.layers[layer].slot_of;
     let mut seeded = kept
@@ -1675,7 +2085,9 @@ fn serve_scratch(state: &mut State, source: &ExpertSource, layer: usize, sequenc
             state.layers[layer].slot_of[expert as usize] = slot as i32;
             state.layers[layer].expert_of[slot] = expert;
             state.layers[layer].stamps.store(slot, sequence);
-            for tensor in state.layers[layer].stored { source.device_residency(tensor, expert as usize, true); }
+            for tensor in state.layers[layer].stored {
+                source.device_residency(tensor, expert as usize, true);
+            }
             seeds.push((expert as u32, slot));
         }
         state
@@ -1684,8 +2096,10 @@ fn serve_scratch(state: &mut State, source: &ExpertSource, layer: usize, sequenc
             .expect("immutable scratch publication");
     }
     let failure = |state: &mut State, error: String| {
-        state.fetch_failures.entry(sequence).or_insert_with(||
-            format!("layer {layer}: source list transfer: {error}"));
+        state
+            .fetch_failures
+            .entry(sequence)
+            .or_insert_with(|| format!("layer {layer}: source list transfer: {error}"));
         state.layers[layer].scratch_control.store(FAILURE, sequence);
     };
     if let Err(error) = publish_list(&state.scratch.seeds, sequence, &seeds) {
@@ -1718,9 +2132,13 @@ fn serve_scratch(state: &mut State, source: &ExpertSource, layer: usize, sequenc
     let mut held: Vec<Vec<(i32, [u32; KINDS])>> = Vec::new();
     let mut failed = chunks.len() > state.scratch.rounds();
     if failed {
-        state.fetch_failures.entry(sequence).or_insert_with(|| format!(
-            "layer {layer}: scratch fill needs {} rounds, plan holds {}",
-            chunks.len(), state.scratch.rounds()));
+        state.fetch_failures.entry(sequence).or_insert_with(|| {
+            format!(
+                "layer {layer}: scratch fill needs {} rounds, plan holds {}",
+                chunks.len(),
+                state.scratch.rounds()
+            )
+        });
     }
     for round in 0..state.scratch.rounds() {
         let deadline = Instant::now() + PARK_BOUND;
@@ -1775,8 +2193,10 @@ fn serve_scratch(state: &mut State, source: &ExpertSource, layer: usize, sequenc
             }
             if !pools.iter().all(|&pool| available(state, pool, Shelf::Own)) {
                 let free = pools.map(|pool| state.pools[pool].free[Shelf::Own as usize].len());
-                state.fetch_failures.entry(sequence).or_insert_with(|| format!(
-                    "layer {layer}, scratch round {round}: staging exhausted (own free {free:?})"));
+                state.fetch_failures.entry(sequence).or_insert_with(|| {
+                    format!(
+                    "layer {layer}, scratch round {round}: staging exhausted (own free {free:?})")
+                });
                 failed = true;
                 break;
             }
@@ -1810,7 +2230,12 @@ fn serve_scratch(state: &mut State, source: &ExpertSource, layer: usize, sequenc
             let outcome = wait_ticket(ticket, &mut state.heartbeat);
             let elapsed = began.map(|began| began.elapsed());
             if let Some(elapsed) = elapsed {
-                state.trace.as_mut().expect("enabled trace").entry(sequence).or_default()
+                state
+                    .trace
+                    .as_mut()
+                    .expect("enabled trace")
+                    .entry(sequence)
+                    .or_default()
                     .scratch_ticket_wait += elapsed;
             }
             if outcome != Some(Outcome::Done) {
@@ -1827,13 +2252,17 @@ fn serve_scratch(state: &mut State, source: &ExpertSource, layer: usize, sequenc
             // still owns its destination: release_past must observe its ticket
             // finish before the staging record can be reused.
             for (expert, records) in records {
-                let ticket = round_tickets.remove(&expert)
+                let ticket = round_tickets
+                    .remove(&expert)
                     .unwrap_or_else(|| Ticket::done(Priority::Demand));
-                state.staged.insert((layer, expert), Staged {
-                    records,
-                    ticket,
-                    sequence,
-                });
+                state.staged.insert(
+                    (layer, expert),
+                    Staged {
+                        records,
+                        ticket,
+                        sequence,
+                    },
+                );
             }
             break;
         }
@@ -1843,16 +2272,25 @@ fn serve_scratch(state: &mut State, source: &ExpertSource, layer: usize, sequenc
                 let destination = (round % 2) * state.scratch.round_records + index;
                 for kind in 0..KINDS {
                     state.heartbeat.beat();
-                    if let Err(error) = state.upload_source(layer, sequence, SourcePath::Scratch,
-                        kind, record[kind], destination)
-                    {
-                        state.fetch_failures.entry(sequence).or_insert_with(|| format!(
-                            "layer {layer}, scratch round {round}: device source transfer: {error}"));
+                    if let Err(error) = state.upload_source(
+                        layer,
+                        sequence,
+                        SourcePath::Scratch,
+                        kind,
+                        record[kind],
+                        destination,
+                    ) {
+                        state.fetch_failures.entry(sequence).or_insert_with(|| {
+                            format!(
+                            "layer {layer}, scratch round {round}: device source transfer: {error}")
+                        });
                         failed = true;
                         break;
                     }
                 }
-                if failed { break; }
+                if failed {
+                    break;
+                }
             }
             if failed {
                 // All source reads have completed. The unpublished copies
@@ -1869,7 +2307,9 @@ fn serve_scratch(state: &mut State, source: &ExpertSource, layer: usize, sequenc
                 .map(|(index, &(expert, record))| {
                     let source = if device_staging {
                         ((round % 2) * state.scratch.round_records + index) as u32
-                    } else { record[kind] };
+                    } else {
+                        record[kind]
+                    };
                     (source, expert as usize)
                 })
                 .collect::<Vec<_>>();
@@ -1880,7 +2320,9 @@ fn serve_scratch(state: &mut State, source: &ExpertSource, layer: usize, sequenc
             }
         }
         held.push(records);
-        if failed { break; }
+        if failed {
+            break;
+        }
         state.layers[layer]
             .scratch_control
             .store(state.scratch.acknowledgement(round), sequence);
@@ -1960,9 +2402,14 @@ mod tests {
     }
     #[test]
     fn progressing_source_batch_can_exceed_one_park_interval() {
-        let device = DeviceCatalog::discover().unwrap().open_backend(
-            if cfg!(target_os = "macos") { BackendName::Metal } else { BackendName::Cuda }
-        ).unwrap();
+        let device = DeviceCatalog::discover()
+            .unwrap()
+            .open_backend(if cfg!(target_os = "macos") {
+                BackendName::Metal
+            } else {
+                BackendName::Cuda
+            })
+            .unwrap();
         let ticket = Ticket::controlled_ranges(5);
         let worker_ticket = Arc::clone(&ticket);
         let worker = std::thread::spawn(move || {
@@ -2028,14 +2475,20 @@ mod tests {
         let file =
             std::env::temp_dir().join(format!("expert-conveyor-loan-{}", std::process::id()));
         std::fs::write(&file, [0u8; 512]).unwrap();
-        let source =
-            ExpertSource::new(vec![crate::streaming::source::ModelFile::open(&file).unwrap()]).unwrap();
+        let source = ExpertSource::new(vec![
+            crate::streaming::source::ModelFile::open(&file).unwrap(),
+        ])
+        .unwrap();
         let runtime = StreamingRuntime::new(
             layers,
             ScratchFill::new(
                 words(&device, 256),
                 vec![],
-                [words(&device, 514), words(&device, 514), words(&device, 514)],
+                [
+                    words(&device, 514),
+                    words(&device, 514),
+                    words(&device, 514),
+                ],
                 words(&device, 514),
                 256,
                 40,
@@ -2048,7 +2501,11 @@ mod tests {
         )
         .unwrap();
         let mut state = runtime.state.lock().unwrap();
-        assert_eq!(take_record(&mut state, 0, Shelf::Conveyor), None, "nothing borrowed");
+        assert_eq!(
+            take_record(&mut state, 0, Shelf::Conveyor),
+            None,
+            "nothing borrowed"
+        );
         assert!(borrow(&mut state, &runtime.source));
         assert_eq!(state.directory.share(0), Ok(6));
         let records: [u32; KINDS] =
@@ -2060,8 +2517,21 @@ mod tests {
         // A decode fill converts from the pools' own records only: its read
         // of expert 5 never takes back the conveyor's.
         let source = Arc::clone(&runtime.source);
-        assert!(fetch(&mut state, &source, 0, 5, Priority::Demand, Shelf::Own, 1));
-        assert!(state.staged[&(0, 5)].records.iter().all(|&record| record < 64));
+        assert!(fetch(
+            &mut state,
+            &source,
+            0,
+            5,
+            Priority::Demand,
+            Shelf::Own,
+            1
+        ));
+        assert!(
+            state.staged[&(0, 5)]
+                .records
+                .iter()
+                .all(|&record| record < 64)
+        );
         assert!(state.kept.contains_key(&(0, 5)));
         // The device is not yet past the prompt: the records stay lent.
         give_back(&mut state);
@@ -2069,14 +2539,23 @@ mod tests {
         state.progress = state.clock(1, usize::MAX);
         let taken: [u32; KINDS] =
             std::array::from_fn(|pool| take_record(&mut state, pool, Shelf::Conveyor).unwrap());
-        assert!(state.kept.contains_key(&(0, 5)), "the longest free are taken first");
+        assert!(
+            state.kept.contains_key(&(0, 5)),
+            "the longest free are taken first"
+        );
         give_back(&mut state);
-        assert!(state.loan.as_ref().unwrap().lent, "conveyor records are taken");
+        assert!(
+            state.loan.as_ref().unwrap().lent,
+            "conveyor records are taken"
+        );
         free_records(&mut state, 0, taken, None);
         give_back(&mut state);
         assert!(!state.loan.as_ref().unwrap().lent);
         assert_eq!(state.directory.share(0), Ok(8));
-        assert!(!state.kept.contains_key(&(0, 5)), "the bank overwrites what they kept");
+        assert!(
+            !state.kept.contains_key(&(0, 5)),
+            "the bank overwrites what they kept"
+        );
         assert_eq!(take_record(&mut state, 0, Shelf::Conveyor), None);
         drop(state);
         drop(runtime);
@@ -2139,8 +2618,10 @@ mod tests {
         let file =
             std::env::temp_dir().join(format!("expert-ready-control-{}", std::process::id()));
         std::fs::write(&file, [0u8; 512]).unwrap();
-        let source =
-            ExpertSource::new(vec![crate::streaming::source::ModelFile::open(&file).unwrap()]).unwrap();
+        let source = ExpertSource::new(vec![
+            crate::streaming::source::ModelFile::open(&file).unwrap(),
+        ])
+        .unwrap();
         let runtime = StreamingRuntime::new(
             layers,
             scratch,
@@ -2278,8 +2759,10 @@ mod tests {
             .collect();
         let file = std::env::temp_dir().join(format!("expert-union-fill-{}", std::process::id()));
         std::fs::write(&file, [0u8; 512]).unwrap();
-        let source =
-            ExpertSource::new(vec![crate::streaming::source::ModelFile::open(&file).unwrap()]).unwrap();
+        let source = ExpertSource::new(vec![
+            crate::streaming::source::ModelFile::open(&file).unwrap(),
+        ])
+        .unwrap();
         let runtime = StreamingRuntime::new(
             layers,
             scratch,
@@ -2379,13 +2862,16 @@ mod tests {
             state.scratch.holds = None;
             device_flags.fill(0);
             device_flags.store(14, 1);
-            let records = std::array::from_fn(|pool|
-                take_record(&mut state, pool, Shelf::Own).unwrap());
-            state.staged.insert((0, 14), Staged {
-                records,
-                ticket: Arc::clone(&delayed),
-                sequence: 6,
-            });
+            let records =
+                std::array::from_fn(|pool| take_record(&mut state, pool, Shelf::Own).unwrap());
+            state.staged.insert(
+                (0, 14),
+                Staged {
+                    records,
+                    ticket: Arc::clone(&delayed),
+                    sequence: 6,
+                },
+            );
             // Keep the emulated device request consistent with the manual
             // serve, so the watcher cannot rediscover the older request 5.
             device_control.store(REQUEST, 6);

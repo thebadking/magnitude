@@ -6,11 +6,13 @@
 mod assessment;
 mod capabilities;
 mod components;
+mod cpu_experts;
 mod execution_plan;
-mod programs;
 mod placement;
+mod programs;
 mod resources;
 mod weights;
+pub use cpu_experts::{CpuExpertBinding, CpuExpertPlan, requested_cpu_expert_bytes};
 
 pub use assessment::{
     AssessmentFit, AssessmentFitVerdict, AssessmentGraphResourceBounds, AssessmentHeaderBounds,
@@ -37,12 +39,11 @@ pub use resources::{
 pub use weights::{
     AttentionBinding, AttentionShape, BANK_KINDS, BankTensor, ConveyorPlan, DenseBinding,
     DenseBranchBinding, DenseScales, DirectoryForm, EmbeddingBinding, ExpertBankPlan,
-    FeaturesBinding, HeadBinding,
-    HostPeak, HostTablePlan, ModelLoadPlan, NGramBinding, ParallelBinding, PerLayerBinding,
-    PerLayerEntryBinding, ReadoutBinding, ReadoutClassChoice, ReadoutHead, RecurrentBinding,
-    RoutedBank, RoutedBinding, ScalableWeight, SelectionBinding, SelectionShape, SublayerTail,
-    WeightPlan, WeightScalePlan, WeightStorageIdentity, resident_element, resident_layout,
-    source_element,
+    FeaturesBinding, HeadBinding, HostPeak, HostTablePlan, ModelLoadPlan, NGramBinding,
+    ParallelBinding, PerLayerBinding, PerLayerEntryBinding, ReadoutBinding, ReadoutClassChoice,
+    ReadoutHead, RecurrentBinding, RoutedBank, RoutedBinding, ScalableWeight, SelectionBinding,
+    SelectionShape, SublayerTail, WeightPlan, WeightScalePlan, WeightStorageIdentity,
+    resident_element, resident_layout, source_element,
 };
 
 pub(crate) use weights::{activation_dtype, packing_residue, packing_run};

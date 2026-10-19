@@ -1,0 +1,40 @@
+# One retained expert's unweighted contribution, using the same separate
+# activation publications as routed_gate_up followed by routed_down.
+fn routed_cpu_expert[H, F](normalized: &tensor[1, H] bf16,
+    expert_gate: &tensor[1, F, H] EGW, expert_up: &tensor[1, F, H] EUW,
+    expert_down: &tensor[1, H, F] EDW) -> tensor[1, H] f32 where H > 0 and F > 0:
+    let mut product = tensor[F] bf16
+    for feature in 0..F:
+        let mut gate = f32(0.0)
+        let mut up = f32(0.0)
+        for column in 0..H:
+            gate = fma(f32(normalized[0, column]), f32(expert_gate[0, feature, column]), gate)
+            up = fma(f32(normalized[0, column]), f32(expert_up[0, feature, column]), up)
+        let g = f32(bf16(gate))
+        let activated = bf16(g / (1.0 + exp(-g)))
+        product[feature] = f32(activated) * f32(bf16(up))
+    let mut value = tensor[1, H] f32
+    for column in 0..H:
+        let mut projected = f32(0.0)
+        for feature in 0..F:
+            projected = fma(f32(product[feature]), f32(expert_down[0, column, feature]), projected)
+        value[0, column] = 0.0 + fma(1.0, f32(bf16(projected)), 0.0)
+    return value
+
+native routed_cpu_expert for cpu from "cpu/routed_cpu_expert.rs":
+    static (H, F)
+    scratch input bytes (H * 4)
+    scratch product bytes (F * 2)
+    scratch down bytes (F * 4)
+    launch routed_cpu_expert_stage:
+        threadgroups (1, 1, 1)
+        threads_per_threadgroup (1, 1, 1)
+    launch routed_cpu_expert_up:
+        threadgroups (ceil_div(F, 8), 1, 1)
+        threads_per_threadgroup (1, 1, 1)
+    launch routed_cpu_expert_product:
+        threadgroups (1, 1, 1)
+        threads_per_threadgroup (1, 1, 1)
+    launch routed_cpu_expert_down:
+        threadgroups (ceil_div(H, 8), 1, 1)
+        threads_per_threadgroup (1, 1, 1)

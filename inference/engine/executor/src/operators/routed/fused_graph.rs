@@ -27,6 +27,9 @@ use magnitude_kernels::{
     routed_route_streamed, routed_scratch_request, routed_scratch_wait, routed_seed_commit,
     routed_step,
 };
+use magnitude_kernels::{
+    routed_bank_fill_cpu, routed_cpu_try, routed_gate_up_cpu, routed_output_cpu,
+};
 use seismic::{BackendName, Element, NativeGraph, NativeGraphMetadata, NativePort, WorkflowTensor};
 
 /// How a backend runs the decode rows' expansions.
@@ -71,6 +74,7 @@ pub(crate) struct RoutedGraphEntries<'a, G: GraphDraft + 'a> {
 
 /// A streamed layer's decode entries (`StreamedRoutedKernels`).
 pub(crate) struct StreamedGraphEntries<'a, G: GraphDraft + 'a> {
+    pub cpu: Option<CpuGraphEntries<'a, G>>,
     pub choices: G::Binding<'a, routed_gate_up::Entry>,
     pub step: G::Binding<'a, routed_step::Entry>,
     pub route: G::Binding<'a, routed_route_streamed::Entry>,
@@ -82,11 +86,24 @@ pub(crate) struct StreamedGraphEntries<'a, G: GraphDraft + 'a> {
     pub convert_wide: [G::Binding<'a, routed_convert_wide::Entry>; 3],
 }
 
+pub(crate) struct CpuGraphEntries<'a, G: GraphDraft + 'a> {
+    pub exchange: G::Binding<'a, routed_cpu_try::Entry>,
+    pub fill: G::Binding<'a, routed_bank_fill_cpu::Entry>,
+    pub choices: G::Binding<'a, routed_gate_up_cpu::Entry>,
+    pub output: G::Binding<'a, routed_output_cpu::Entry>,
+}
+
 impl<'a> From<&'a StreamedRoutedKernels> for StreamedGraphEntries<'a, NativeGraph> {
     fn from(kernels: &'a StreamedRoutedKernels) -> Self {
         let [copy_gate, copy_up, copy_down] = &kernels.copy;
         let [wide_gate, wide_up, wide_down] = &kernels.convert_wide;
         Self {
+            cpu: kernels.cpu.as_ref().map(|cpu| CpuGraphEntries {
+                exchange: &cpu.exchange,
+                fill: &cpu.fill,
+                choices: &cpu.choices,
+                output: &cpu.output,
+            }),
             choices: &kernels.choices,
             step: &kernels.step,
             route: &kernels.route,
@@ -146,6 +163,7 @@ pub(crate) struct CheckedRoutedEntries {
 }
 
 struct CheckedStreamedEntries {
+    cpu: bool,
     choices: [(&'static str, Element); 3],
     route: [(&'static str, Element); 5],
     convert: [[(&'static str, Element); 2]; 3],
@@ -214,6 +232,7 @@ impl CheckedRoutedEntries {
             streamed: binding.bank.map(|bank| {
                 let residents = [binding.expert_gate, binding.expert_up, binding.expert_down];
                 CheckedStreamedEntries {
+                    cpu: bank.cpu,
                     choices: [
                         ("EGW", binding.expert_gate),
                         ("EUW", binding.expert_up),
@@ -226,7 +245,8 @@ impl CheckedRoutedEntries {
                         ("SUW", binding.shared_up),
                         ("A", binding.activation),
                     ],
-                    convert: [0, 1, 2].map(|kind| [("E", bank.sources[kind]), ("U", residents[kind])]),
+                    convert: [0, 1, 2]
+                        .map(|kind| [("E", bank.sources[kind]), ("U", residents[kind])]),
                     copy: residents.map(|resident| [("U", resident)]),
                     fill: [
                         ("SG", bank.sources[0]),
@@ -261,6 +281,12 @@ impl CheckedRoutedEntries {
                 let [gate, up, down] = &streamed.convert;
                 let [copy_gate, copy_up, copy_down] = &streamed.copy;
                 StreamedGraphEntries {
+                    cpu: streamed.cpu.then(|| CpuGraphEntries {
+                        exchange: &[][..],
+                        fill: &streamed.fill[..],
+                        choices: &streamed.choices[..],
+                        output: &self.output[..],
+                    }),
                     choices: &streamed.choices[..],
                     step: &[][..],
                     route: &streamed.route[..],
@@ -372,7 +398,14 @@ pub(crate) fn routed<'a, G: GraphDraft + 'a>(
     // A streamed layer's converts write its expert weights (its banks), so
     // the expert ports stay at hand.
     let mut expert_port = |kind| {
-        weight_port(graph, load, WeightRole { scope, kind }, WeightPart::Values, 0, weights)
+        weight_port(
+            graph,
+            load,
+            WeightRole { scope, kind },
+            WeightPart::Values,
+            0,
+            weights,
+        )
     };
     let expert_ports = [
         expert_port(WeightKind::ExpertGate)?,
@@ -418,10 +451,12 @@ pub(crate) fn routed<'a, G: GraphDraft + 'a>(
     let normalize = i32::from(shape.normalize_selected);
 
     if decodes(rows) {
-        if let Some(bank) = load.expert_bank().filter(|bank| bank.holds(WeightRole {
-            scope,
-            kind: WeightKind::ExpertGate,
-        })) {
+        if let Some(bank) = load.expert_bank().filter(|bank| {
+            bank.holds(WeightRole {
+                scope,
+                kind: WeightKind::ExpertGate,
+            })
+        }) {
             let streamed = handle
                 .streamed
                 .as_ref()
@@ -707,9 +742,8 @@ fn fill_scratch<'a, G: GraphDraft + 'a>(
         scope,
         kind: WeightKind::ExpertGate,
     };
-    let mut part = |graph: &mut G, part| {
-        weight_port(graph, load, gate, WeightPart::Bank(part), 0, weights)
-    };
+    let mut part =
+        |graph: &mut G, part| weight_port(graph, load, gate, WeightPart::Bank(part), 0, weights);
     let mut step = part(graph, BankPart::Step)?;
     let heartbeat = part(graph, BankPart::Heartbeat)?;
     let mut control = part(graph, BankPart::ScratchControl)?;
@@ -901,7 +935,10 @@ struct LayerWeights {
 fn streamed_decode<'a, G: GraphDraft + 'a>(
     graph: &mut G,
     entries: &StreamedGraphEntries<'a, G>,
-    (choices, output): (G::Binding<'a, routed_gate_up::Entry>, G::Binding<'a, routed_output::Entry>),
+    (choices, output): (
+        G::Binding<'a, routed_gate_up::Entry>,
+        G::Binding<'a, routed_output::Entry>,
+    ),
     (inject, output_dims): (&WorkflowTensor, &[(&str, u64)]),
     load: &ModelLoadPlan,
     bank: &crate::ExpertBankPlan,
@@ -982,7 +1019,8 @@ fn streamed_decode<'a, G: GraphDraft + 'a>(
         let Some(later_layer) = bank.layers.get(position + usize::from(distance)) else {
             break;
         };
-        let WeightScope::TargetSublayer(SublayerIndex { block: later, .. }) = later_layer.scope else {
+        let WeightScope::TargetSublayer(SublayerIndex { block: later, .. }) = later_layer.scope
+        else {
             return Err("a streamed layer outside the target".into());
         };
         let offset = later
@@ -1005,19 +1043,31 @@ fn streamed_decode<'a, G: GraphDraft + 'a>(
         // (HyperConnectionMix, NM=0), ahead layers also use NM=0 and must
         // receive an absent norm port rather than InputNorm.
         let later_has_norm = load.weights().any(|p| {
-            p.role == (WeightRole { scope: later_layer.scope, kind: WeightKind::InputNorm })
+            p.role
+                == (WeightRole {
+                    scope: later_layer.scope,
+                    kind: WeightKind::InputNorm,
+                })
         });
         let ahead_norm = if later_has_norm {
-            ahead_port(graph, WeightKind::InputNorm, WeightPart::Values)?.tensor().clone()
+            ahead_port(graph, WeightKind::InputNorm, WeightPart::Values)?
+                .tensor()
+                .clone()
         } else {
             norm.clone()
         };
         ahead.push([
             ahead_norm,
-            ahead_port(graph, WeightKind::Router, WeightPart::Values)?.tensor().clone(),
-            ahead_port(graph, WeightKind::ExpertGate, WeightPart::Bank(BankPart::SlotMap))?
+            ahead_port(graph, WeightKind::Router, WeightPart::Values)?
                 .tensor()
                 .clone(),
+            ahead_port(
+                graph,
+                WeightKind::ExpertGate,
+                WeightPart::Bank(BankPart::SlotMap),
+            )?
+            .tensor()
+            .clone(),
         ]);
     }
     let predicted = ahead.len();
@@ -1066,6 +1116,32 @@ fn streamed_decode<'a, G: GraphDraft + 'a>(
     )?;
     let (normalized, coefficient, shared_product, slots) =
         (routed.r0, routed.r1, routed.r2, routed.r3);
+    let cpu = entries.cpu.as_ref().filter(|_| rows == 1);
+    let cpu_result = if let Some(cpu) = cpu {
+        let mut activation = part(graph, weights, BankPart::CpuActivation)?;
+        let contribution = part(graph, weights, BankPart::CpuContribution)?;
+        let mut cpu_control = part(graph, weights, BankPart::CpuControl)?;
+        let cpu_heartbeat = part(graph, weights, BankPart::CpuHeartbeat)?;
+        Some(
+            graph
+                .enqueue(
+                    cpu.exchange,
+                    &[("H", hidden), ("K", shape.selected)],
+                    routed_cpu_try::WorkflowArgs {
+                        normalized: (&normalized).into(),
+                        slots: (&slots).into(),
+                        activation: activation.tensor_mut().into(),
+                        contribution: contribution.tensor().into(),
+                        step: step.tensor().into(),
+                        control: cpu_control.tensor_mut().into(),
+                        heartbeat: cpu_heartbeat.tensor().into(),
+                    },
+                )?
+                .value,
+        )
+    } else {
+        None
+    };
     // The resident choices' products while the host serves the absent ones
     // (4.8); late threadgroups park until acknowledgement, convert their
     // expert from staging into its placed slot, and compute it in-launch.
@@ -1079,82 +1155,161 @@ fn streamed_decode<'a, G: GraphDraft + 'a>(
         part(graph, weights, BankPart::Staging { kind: 2 })?,
     ];
     let mut commits = part(graph, weights, BankPart::Commits)?;
-    let bound = graph
-        .enqueue(
-            entries.fill,
-            &[
-                ("M", rows),
-                ("H", hidden),
-                ("K", shape.selected),
-                ("F", shape.intermediate),
-                ("BANK", bank.records(scope)?),
-                ("T", bank.graph_staging_records()),
-                ("X", bank.experts),
-                ("C", bank.control_words()),
-                ("P", bank.placement_choices()),
-            ],
-            routed_bank_fill::WorkflowArgs {
-                slots: (&slots).into(),
-                stamps: stamps.tensor_mut().into(),
-                step: step.tensor().into(),
-                control: control.tensor_mut().into(),
-                placement: placement.tensor().into(),
-                heartbeat: heartbeat.tensor().into(),
-                staged_gate: staged[0].tensor().into(),
-                staged_up: staged[1].tensor().into(),
-                staged_down: staged[2].tensor().into(),
-                expert_gate: expert_gate.tensor_mut().into(),
-                expert_up: expert_up.tensor_mut().into(),
-                expert_down: expert_down.tensor_mut().into(),
-                slot_map: slot_map.tensor_mut().into(),
-                commits: commits.tensor_mut().into(),
-            },
-        )?
-        .value;
+    let bound = if let Some(cpu) = cpu {
+        graph
+            .enqueue(
+                cpu.fill,
+                &[
+                    ("M", rows),
+                    ("H", hidden),
+                    ("K", shape.selected),
+                    ("F", shape.intermediate),
+                    ("BANK", bank.records(scope)?),
+                    ("T", bank.graph_staging_records()),
+                    ("X", bank.experts),
+                    ("C", bank.control_words()),
+                    ("P", bank.placement_choices()),
+                ],
+                routed_bank_fill_cpu::WorkflowArgs {
+                    slots: (&slots).into(),
+                    stamps: stamps.tensor_mut().into(),
+                    step: step.tensor().into(),
+                    control: control.tensor_mut().into(),
+                    placement: placement.tensor().into(),
+                    heartbeat: heartbeat.tensor().into(),
+                    staged_gate: staged[0].tensor().into(),
+                    staged_up: staged[1].tensor().into(),
+                    staged_down: staged[2].tensor().into(),
+                    expert_gate: expert_gate.tensor_mut().into(),
+                    expert_up: expert_up.tensor_mut().into(),
+                    expert_down: expert_down.tensor_mut().into(),
+                    slot_map: slot_map.tensor_mut().into(),
+                    commits: commits.tensor_mut().into(),
+                },
+            )?
+            .value
+    } else {
+        graph
+            .enqueue(
+                entries.fill,
+                &[
+                    ("M", rows),
+                    ("H", hidden),
+                    ("K", shape.selected),
+                    ("F", shape.intermediate),
+                    ("BANK", bank.records(scope)?),
+                    ("T", bank.graph_staging_records()),
+                    ("X", bank.experts),
+                    ("C", bank.control_words()),
+                    ("P", bank.placement_choices()),
+                ],
+                routed_bank_fill::WorkflowArgs {
+                    slots: (&slots).into(),
+                    stamps: stamps.tensor_mut().into(),
+                    step: step.tensor().into(),
+                    control: control.tensor_mut().into(),
+                    placement: placement.tensor().into(),
+                    heartbeat: heartbeat.tensor().into(),
+                    staged_gate: staged[0].tensor().into(),
+                    staged_up: staged[1].tensor().into(),
+                    staged_down: staged[2].tensor().into(),
+                    expert_gate: expert_gate.tensor_mut().into(),
+                    expert_up: expert_up.tensor_mut().into(),
+                    expert_down: expert_down.tensor_mut().into(),
+                    slot_map: slot_map.tensor_mut().into(),
+                    commits: commits.tensor_mut().into(),
+                },
+            )?
+            .value
+    };
     // The resident choices and output over the bank and the bound slots:
     // the value is the resident load's, bit for bit.
     let records = bank.records(scope)?;
-    let expert_product = graph
-        .enqueue(
-            choices,
-            &[
-                ("M", rows),
-                ("H", hidden),
-                ("E", records),
-                ("K", shape.selected),
-                ("F", shape.intermediate),
-            ],
-            routed_gate_up::WorkflowArgs {
-                normalized: (&normalized).into(),
-                routes: (&bound).into(),
-                expert_gate: expert_gate.tensor().into(),
-                expert_up: expert_up.tensor().into(),
-                // SiLU: the fused Qwen form's experts.
-                activation: 0,
-            },
-        )?
-        .value;
+    let expert_product = if let Some(cpu) = cpu {
+        graph
+            .enqueue(
+                cpu.choices,
+                &[
+                    ("M", rows),
+                    ("H", hidden),
+                    ("E", records),
+                    ("K", shape.selected),
+                    ("F", shape.intermediate),
+                ],
+                routed_gate_up_cpu::WorkflowArgs {
+                    normalized: (&normalized).into(),
+                    routes: (&bound).into(),
+                    expert_gate: expert_gate.tensor().into(),
+                    expert_up: expert_up.tensor().into(),
+                    // SiLU: the fused Qwen form's experts.
+                    activation: 0,
+                },
+            )?
+            .value
+    } else {
+        graph
+            .enqueue(
+                choices,
+                &[
+                    ("M", rows),
+                    ("H", hidden),
+                    ("E", records),
+                    ("K", shape.selected),
+                    ("F", shape.intermediate),
+                ],
+                routed_gate_up::WorkflowArgs {
+                    normalized: (&normalized).into(),
+                    routes: (&bound).into(),
+                    expert_gate: expert_gate.tensor().into(),
+                    expert_up: expert_up.tensor().into(),
+                    // SiLU: the fused Qwen form's experts.
+                    activation: 0,
+                },
+            )?
+            .value
+    };
     let output_dims = output_dims
         .iter()
         .map(|&(name, value)| (name, if name == "E" { records } else { value }))
         .collect::<Vec<_>>();
-    let value = graph
-        .enqueue(
-            output,
-            &output_dims,
-            routed_output::WorkflowArgs {
-                residual: residual.into(),
-                inject: inject.into(),
-                expert_product: (&expert_product).into(),
-                shared_product: (&shared_product).into(),
-                routes: (&bound).into(),
-                scores: scores.tensor().into(),
-                coefficient: (&coefficient).into(),
-                expert_down: expert_down.tensor().into(),
-                shared_down: (&shared_down).into(),
-            },
-        )?
-        .value;
+    let value = if let (Some(cpu), Some(contribution)) = (cpu, cpu_result.as_ref()) {
+        graph
+            .enqueue(
+                cpu.output,
+                &output_dims,
+                routed_output_cpu::WorkflowArgs {
+                    residual: residual.into(),
+                    cpu_contribution: contribution.into(),
+                    inject: inject.into(),
+                    expert_product: (&expert_product).into(),
+                    shared_product: (&shared_product).into(),
+                    routes: (&bound).into(),
+                    scores: scores.tensor().into(),
+                    coefficient: (&coefficient).into(),
+                    expert_down: expert_down.tensor().into(),
+                    shared_down: (&shared_down).into(),
+                },
+            )?
+            .value
+    } else {
+        graph
+            .enqueue(
+                output,
+                &output_dims,
+                routed_output::WorkflowArgs {
+                    residual: residual.into(),
+                    inject: inject.into(),
+                    expert_product: (&expert_product).into(),
+                    shared_product: (&shared_product).into(),
+                    routes: (&bound).into(),
+                    scores: scores.tensor().into(),
+                    coefficient: (&coefficient).into(),
+                    expert_down: expert_down.tensor().into(),
+                    shared_down: (&shared_down).into(),
+                },
+            )?
+            .value
+    };
     Ok((value, sequence))
 }
 

@@ -15,12 +15,13 @@ use crate::worker::protocol::LoadProgress;
 use magnitude_artifacts::{ArtifactIdentity, Package, PackageIdentity};
 use magnitude_batching::Demand;
 use magnitude_executor::{
-    AttestedPrograms, ClaimRefusal, ComponentLoader, DEFAULT_KERNEL_CACHE_BYTES, DeviceHeap,
-    ExecutionPlanDraft, ExecutorDomain, KernelCache, Operation, RequestId, ReservedResources,
-    ResidencyError, ResidencyStore, ResourceAllocator, ResourceCapacity, ResourceDomainId,
-    CatalogError, CatalogFailure, ResourcePlan, ResourcePlanner, SEARCH_VERSION, StateBindings,
-    TokenId, TracedWork, TunedEntry, TuningCacheKey, TuningContext, TuningEvent, TuningObserver,
-    TuningOrigin, TuningSettings, TuningTrace, UnpreparedUnits, WeightImportError, WorkKind,
+    AttestedPrograms, CatalogError, CatalogFailure, ClaimRefusal, ComponentLoader,
+    DEFAULT_KERNEL_CACHE_BYTES, DeviceHeap, ExecutionPlanDraft, ExecutorDomain, KernelCache,
+    Operation, RequestId, ReservedResources, ResidencyError, ResidencyStore, ResourceAllocator,
+    ResourceCapacity, ResourceDomainId, ResourcePlan, ResourcePlanner, SEARCH_VERSION,
+    StateBindings, TokenId, TracedWork, TunedEntry, TuningCacheKey, TuningContext, TuningEvent,
+    TuningObserver, TuningOrigin, TuningSettings, TuningTrace, UnpreparedUnits, WeightImportError,
+    WorkKind,
     memory::{ClaimId, HoldingClass},
     platform::{self, DeviceRequest, DomainRole, OpenedPlatform, PlatformConfig, PlatformError},
     require_normal,
@@ -43,7 +44,6 @@ pub(crate) struct NativeDomain {
     pub plan: ResourcePlan,
     pub owner_plans: Vec<(DeviceSelector, ResourcePlan)>,
     pub device: DeviceSelector,
-
 }
 
 fn internal(reason: impl Into<String>) -> LoadError {
@@ -173,15 +173,26 @@ fn plan_on_device(
         (draft, None)
     } else {
         let placement = magnitude_executor::DecoderPlacement::new(
-            manifest.definition.decoder.blocks.len(), manifest.decoder_ranges.clone()).map_err(internal)?;
-        if placement.ranges().len() != 2 { return Err(internal("placed startup requires two decoder owners")); }
-        let owner = placement.ranges().iter().position(|range| range.device == draft.device().selector())
+            manifest.definition.decoder.blocks.len(),
+            manifest.decoder_ranges.clone(),
+        )
+        .map_err(internal)?;
+        if placement.ranges().len() != 2 {
+            return Err(internal("placed startup requires two decoder owners"));
+        }
+        let owner = placement
+            .ranges()
+            .iter()
+            .position(|range| range.device == draft.device().selector())
             .ok_or_else(|| internal("selected device is absent from decoder placement"))?;
         let shared_in_host = platform::shared_role(&selected.info)
-            .map_err(|error| internal(error.to_string()))? == DomainRole::Staging;
-        let range = placement.load_range_with_cache_budget(owner, draft.load(), shared_in_host)
+            .map_err(|error| internal(error.to_string()))?
+            == DomainRole::Staging;
+        let range = placement
+            .load_range_with_cache_budget(owner, draft.load(), shared_in_host)
             .map_err(internal)?;
-        let draft = draft.for_decoder_range(&manifest.definition, &range)
+        let draft = draft
+            .for_decoder_range(&manifest.definition, &range)
             .map_err(|error| LoadError::from(classify_plan(error, backend)))?;
         (draft, Some(range))
     };
@@ -224,7 +235,8 @@ fn plan_on_device(
     // so it must claim its peak through the same heap as later allocations.
     let workspace = AttestedPrograms::planned_invocation_workspace_bytes(draft.programs(), backend)
         .map_err(|error| internal(format!("program preparation workspace: {error:?}")))?;
-    let qualification = AttestedPrograms::qualification_peak_bytes(draft.load()).map_err(internal)?;
+    let qualification =
+        AttestedPrograms::qualification_peak_bytes(draft.load()).map_err(internal)?;
     let preparation_peak = workspace
         .checked_add(qualification)
         .ok_or_else(|| internal("program preparation peak byte count overflows"))?;
@@ -267,12 +279,19 @@ fn tuning_report(
 /// unit's record as it stands. Nothing is prepared for serving and the model
 /// is not imported: the process ends here, and a load reads the records.
 pub(crate) fn search(
-    catalog: Rc<DeviceCatalog>, manifest: &ExecutionManifest, package: &Package,
+    catalog: Rc<DeviceCatalog>,
+    manifest: &ExecutionManifest,
+    package: &Package,
     progress: Rc<dyn Fn(LoadProgress)>,
 ) -> Result<(), LoadError> {
-    if manifest.decoder_ranges.is_empty() { return search_one(catalog, manifest, package, progress); }
+    if manifest.decoder_ranges.is_empty() {
+        return search_one(catalog, manifest, package, progress);
+    }
     let placement = magnitude_executor::DecoderPlacement::new(
-        manifest.definition.decoder.blocks.len(), manifest.decoder_ranges.clone()).map_err(internal)?;
+        manifest.definition.decoder.blocks.len(),
+        manifest.decoder_ranges.clone(),
+    )
+    .map_err(internal)?;
     for range in placement.ranges() {
         let mut local = manifest.clone();
         local.device = DeviceRequest::Selector(range.device);
@@ -384,8 +403,9 @@ fn prepared_key(manifest: &ExecutionManifest) -> Result<TuningCacheKey, LoadErro
     }
     load.definition.artifact_identity = package.identity;
     let load = serde_json::to_string(&load).map_err(|error| internal(error.to_string()))?;
+    let cpu_experts = magnitude_executor::requested_cpu_expert_bytes().map_err(internal)?;
     Ok(TuningCacheKey::of(&format!(
-        "prepared {SEARCH_VERSION}\n{load}"
+        "prepared {SEARCH_VERSION}\ncpu-expert-bytes={cpu_experts}\n{load}"
     )))
 }
 
@@ -471,18 +491,19 @@ fn prepare(
         Err(error) => return Err(LoadError::from(classify_catalog(error))),
     };
     let draft = if range.is_some() {
-        programs.discard_readout_choices(draft.programs())
-            .map_err(|error| LoadError::from(classify_plan(error, backend)))?;
-        draft
-    } else {
-    let draft = draft
-        .finalize_readout(&manifest.definition, programs.readout_choices())
-        .map_err(|error| LoadError::from(classify_plan(error, backend)))?;
-    if draft.load().readout_choices() != programs.readout_choices() {
         programs
             .discard_readout_choices(draft.programs())
             .map_err(|error| LoadError::from(classify_plan(error, backend)))?;
-    }
+        draft
+    } else {
+        let draft = draft
+            .finalize_readout(&manifest.definition, programs.readout_choices())
+            .map_err(|error| LoadError::from(classify_plan(error, backend)))?;
+        if draft.load().readout_choices() != programs.readout_choices() {
+            programs
+                .discard_readout_choices(draft.programs())
+                .map_err(|error| LoadError::from(classify_plan(error, backend)))?;
+        }
         draft
     };
     let tuned = programs.tuned();
@@ -534,12 +555,19 @@ pub(crate) fn build(
         pool,
         capacity,
         workers,
-    } = match prepare(catalog.clone(), manifest, &package, unprepared, progress.clone())? {
+    } = match prepare(
+        catalog.clone(),
+        manifest,
+        &package,
+        unprepared,
+        progress.clone(),
+    )? {
         LoadAttempt::Loaded(prepared) => prepared,
         LoadAttempt::Unprepared => return Ok(LoadAttempt::Unprepared),
     };
     let reserves = manifest.reserves;
     let limits = draft.policy().limits();
+    let cpu_programs = programs.take_cpu_expert_programs();
     let head_enabled = draft.policy().selection().head;
     let state = ResourcePlanner::state_plan(
         &manifest.definition,
@@ -724,10 +752,23 @@ pub(crate) fn build(
         residency.keep_table_rows(cache.join("table-rows"));
     }
     if backend == BackendName::Cuda && execution_plan.load().expert_bank().is_some() {
+        if let Some(programs) = cpu_programs {
+            let service = magnitude_executor::CpuExpertService::new(
+                catalog.as_ref().clone(),
+                programs,
+                reserves,
+                execution_plan.load().host_table_bytes().map_err(internal)?,
+            )
+            .map_err(internal)?;
+            residency.keep_cpu_experts(service);
+        }
         if let Some(cache) = magnitude_executor::HostExpertCache::new(
-            catalog.as_ref().clone(), reserves,
+            catalog.as_ref().clone(),
+            reserves,
             execution_plan.load().host_table_bytes().map_err(internal)?,
-        ).map_err(internal)? {
+        )
+        .map_err(internal)?
+        {
             residency.keep_host_experts(cache);
         }
     }
@@ -950,9 +991,17 @@ impl StartupClaims {
         plan: &magnitude_executor::ResourcePlan,
     ) -> Result<(), LoadError> {
         let shared_in_host = magnitude_executor::platform::shared_role(self.heap.device().info())
-            .map_err(|error| internal(error.to_string()))? == DomainRole::Staging;
-        let uploads = if shared_in_host { plan.shared_upload_bytes().map_err(internal)? } else { 0 };
-        let allocation = plan.bytes().scratch.checked_sub(uploads)
+            .map_err(|error| internal(error.to_string()))?
+            == DomainRole::Staging;
+        let uploads = if shared_in_host {
+            plan.shared_upload_bytes().map_err(internal)?
+        } else {
+            0
+        };
+        let allocation = plan
+            .bytes()
+            .scratch
+            .checked_sub(uploads)
             .ok_or_else(|| internal("shared uploads exceed graph scratch charge"))?;
         self.claim(purpose, allocation, uploads)
     }

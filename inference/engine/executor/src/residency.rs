@@ -419,6 +419,7 @@ struct ImportProgress {
 /// Sole cache and importer for one planned device. Resident components are
 /// assembled from this store before their numerical programs are bound.
 pub struct ResidencyStore {
+    cpu_experts: Option<Arc<crate::CpuExpertService>>,
     host_experts: Option<Arc<crate::HostExpertCache>>,
     shared_bank: Option<crate::streaming::shared_bank::SharedBankStore>,
     device: Rc<Device>,
@@ -451,8 +452,15 @@ impl ResidencyStore {
                 "attested programs, selected plan, and residency device differ",
             ));
         }
-        Self::with_import_plan(device, programs, execution.load().clone(), execution.policy().path(),
-            execution.resources().qualification_peak_bytes(), None, domain)
+        Self::with_import_plan(
+            device,
+            programs,
+            execution.load().clone(),
+            execution.policy().path(),
+            execution.resources().qualification_peak_bytes(),
+            None,
+            domain,
+        )
     }
 
     /// Materialize one device's projected physical inventory. The caller must
@@ -464,10 +472,19 @@ impl ResidencyStore {
         domain: ResourceDomainId,
     ) -> Result<Self, WeightImportError> {
         if !programs.belongs_to(&device) || plan.range().device != device.info().selector {
-            return Err(invalid("decoder range, attested kernels and opened residency device differ"));
+            return Err(invalid(
+                "decoder range, attested kernels and opened residency device differ",
+            ));
         }
-        Self::with_import_plan(device, programs, plan.physical_load().clone(), crate::ExecutionPath::Native,
-            plan.import_peak_bytes(), Some((plan.range().blocks.clone(), plan.decoder_blocks())), domain)
+        Self::with_import_plan(
+            device,
+            programs,
+            plan.physical_load().clone(),
+            crate::ExecutionPath::Native,
+            plan.import_peak_bytes(),
+            Some((plan.range().blocks.clone(), plan.decoder_blocks())),
+            domain,
+        )
     }
 
     fn with_import_plan(
@@ -479,13 +496,23 @@ impl ResidencyStore {
         owned_blocks: Option<(std::ops::Range<usize>, usize)>,
         domain: ResourceDomainId,
     ) -> Result<Self, WeightImportError> {
-        let shared_bank = load.expert_bank()
+        let shared_bank = load
+            .expert_bank()
             .filter(|bank| bank.shared.is_some())
             .map(crate::streaming::shared_bank::SharedBankStore::new)
-            .transpose().map_err(invalid)?;
+            .transpose()
+            .map_err(invalid)?;
         Ok(Self {
+            cpu_experts: None,
             host_experts: None,
-            shared_bank, device, programs, load, path, import_peak_bytes, owned_blocks, domain,
+            shared_bank,
+            device,
+            programs,
+            load,
+            path,
+            import_peak_bytes,
+            owned_blocks,
+            domain,
             resident: HashMap::new(),
             mapped_import: MappedImportReport::default(),
             import_progress: None,
@@ -496,6 +523,12 @@ impl ResidencyStore {
     /// Share the target's host source cache across independently placed owners.
     pub fn keep_host_experts(&mut self, cache: Arc<crate::HostExpertCache>) {
         self.host_experts = Some(cache);
+    }
+    pub fn keep_cpu_experts(&mut self, service: Arc<crate::CpuExpertService>) {
+        self.cpu_experts = Some(service);
+    }
+    pub(crate) fn cpu_experts(&self) -> Option<Arc<crate::CpuExpertService>> {
+        self.cpu_experts.clone()
     }
 
     pub(crate) fn host_experts(&self) -> Option<Arc<crate::HostExpertCache>> {
@@ -511,7 +544,10 @@ impl ResidencyStore {
     ) -> Result<(), WeightImportError> {
         let before = self.resident_bytes().map_err(invalid)?;
         self.resident.insert(key, weight);
-        let storage_bytes = self.resident_bytes().map_err(invalid)?.saturating_sub(before);
+        let storage_bytes = self
+            .resident_bytes()
+            .map_err(invalid)?
+            .saturating_sub(before);
         if let Some(progress) = &mut self.import_progress {
             // Planned and allocated storage agree; the bound keeps a
             // disagreement from reporting past completion.
@@ -732,8 +768,7 @@ impl ResidencyStore {
 
     /// The imported physical view selected for an explicit semantic weight role.
     pub(crate) fn planned(&self, role: WeightRole) -> Option<&WeightPlan> {
-        self.load.weights()
-            .find(|weight| weight.role == role)
+        self.load.weights().find(|weight| weight.role == role)
     }
 
     /// Imports a plane of a progressive weight (`ImportTransform::Progressive`):
@@ -889,13 +924,16 @@ impl ResidencyStore {
             return Ok(Some(weight.clone()));
         }
         let tensor = match &mut self.shared_bank {
-            Some(shared) => shared.bind(&self.device, planned.role)
+            Some(shared) => shared
+                .bind(&self.device, planned.role)
                 .map_err(WeightImportError::Device)?,
             None => Tensor::zeros(&self.device, planned.resident, &planned.shape)
                 .map_err(|error| WeightImportError::Device(error.to_string()))?,
         };
         if tensor.extents() != planned.shape || tensor.element() != planned.resident {
-            return Err(invalid("expert bank storage differs from its planned weight port"));
+            return Err(invalid(
+                "expert bank storage differs from its planned weight port",
+            ));
         }
         // A bank's stacked expert weights have no packing bound
         // (`packing_bound` is per 2-D weight) and are not gathered tables.
@@ -946,10 +984,7 @@ impl ResidencyStore {
         let actual_source = stored
             .source_element()
             .ok_or_else(|| invalid("unsupported source representation"))?;
-        let layout = crate::resident_layout(
-            self.path,
-            self.device.backend(),
-        );
+        let layout = crate::resident_layout(self.path, self.device.backend());
         // The plan dequantizes a packed weight on the host when its kernels
         // read dense weights only: it uploads F32 and becomes dense.
         let dequantized = planned.upload != planned.source;
@@ -1125,9 +1160,7 @@ impl ResidencyStore {
         // steps name them (`stream_table`). A bank takes none either: it
         // starts empty (`import_gguf`).
         for plan in weights.iter().filter(|plan| {
-            !plan.placed_on_host()
-                && plan.streamed.is_none()
-                && !self.load_plan().banked(plan.role)
+            !plan.placed_on_host() && plan.streamed.is_none() && !self.load_plan().banked(plan.role)
         }) {
             if !seen.insert(plan.storage_identity()) {
                 continue;
@@ -1187,8 +1220,9 @@ impl ResidencyStore {
                 last += 1;
             }
             let mapping = Instant::now();
-            let window = ImportWindow::new(self.import_peak_bytes, &self.device, source, start, end)
-                .map_err(WeightImportError::Allocation)?;
+            let window =
+                ImportWindow::new(self.import_peak_bytes, &self.device, source, start, end)
+                    .map_err(WeightImportError::Allocation)?;
             report.mapping += mapping.elapsed();
             report.windows += 1;
             let mut batch = NativeTensorBatch::new(&self.device);
@@ -1291,8 +1325,14 @@ impl ResidencyStore {
         mut observer: ImportObserver,
     ) -> Result<crate::ResidentTarget, crate::ResidencyError> {
         crate::resident_weights::validate_definition_package(definition, package)?;
-        if self.owned_blocks.as_ref().is_some_and(|(_, blocks)| *blocks != definition.decoder.blocks.len()) {
-            return Err(crate::ResidencyError::Invalid("range import differs from the planned decoder extent".into()));
+        if self
+            .owned_blocks
+            .as_ref()
+            .is_some_and(|(_, blocks)| *blocks != definition.decoder.blocks.len())
+        {
+            return Err(crate::ResidencyError::Invalid(
+                "range import differs from the planned decoder extent".into(),
+            ));
         }
         let weights = self.load_plan().target().to_vec();
         let mut storage = HashSet::new();
@@ -1316,7 +1356,14 @@ impl ResidencyStore {
                 crate::resident_weights::activation_dtype(definition.decoder.activation_dtype),
             )
             .map_err(crate::ResidencyError::from)
-            .and_then(|()| crate::resident_weights::import_target(definition, package, self, owned_blocks.as_ref()));
+            .and_then(|()| {
+                crate::resident_weights::import_target(
+                    definition,
+                    package,
+                    self,
+                    owned_blocks.as_ref(),
+                )
+            });
         let mut progress = self
             .import_progress
             .take()
@@ -1353,9 +1400,7 @@ impl ResidencyStore {
     ) -> Result<Option<crate::ResidentVision>, crate::ResidencyError> {
         crate::resident_weights::validate_definition_package(definition, package)?;
         if let (Some(weights), Some(projector)) = (
-            self.load
-                .vision()
-                .map(|weights| weights.to_vec()),
+            self.load.vision().map(|weights| weights.to_vec()),
             package.projector(),
         ) {
             self.preload_component(projector, &weights, DType::F32)?;
@@ -1636,14 +1681,20 @@ fn validate_dense(stored: &StoredTensor) -> Result<usize, WeightImportError> {
     Ok(count)
 }
 
-fn resident_storage_bytes<'a>(weights: impl IntoIterator<Item = &'a ResidentWeight>)
-    -> Result<u64, &'static str> {
-        let mut seen = HashSet::new();
-        weights.into_iter().flat_map(|weight|
-            std::iter::once(&weight.tensor).chain(weight.scale.iter())
-        ).flat_map(Tensor::storage_observers).try_fold(0u64, |bytes, observation| {
-            if !seen.insert(observation.identity()) { return Ok(bytes); }
-            bytes.checked_add(observation.charged_bytes().unwrap_or(0))
+fn resident_storage_bytes<'a>(
+    weights: impl IntoIterator<Item = &'a ResidentWeight>,
+) -> Result<u64, &'static str> {
+    let mut seen = HashSet::new();
+    weights
+        .into_iter()
+        .flat_map(|weight| std::iter::once(&weight.tensor).chain(weight.scale.iter()))
+        .flat_map(Tensor::storage_observers)
+        .try_fold(0u64, |bytes, observation| {
+            if !seen.insert(observation.identity()) {
+                return Ok(bytes);
+            }
+            bytes
+                .checked_add(observation.charged_bytes().unwrap_or(0))
                 .ok_or("resident cache charge overflows")
         })
 }
@@ -1654,23 +1705,35 @@ mod tests {
 
     #[test]
     fn resident_census_charges_shared_bank_storage_once_across_roles_and_scales() {
-        let device = seismic::DeviceCatalog::discover().unwrap()
-            .open_backend(seismic::BackendName::Cpu).unwrap();
+        let device = seismic::DeviceCatalog::discover()
+            .unwrap()
+            .open_backend(seismic::BackendName::Cpu)
+            .unwrap();
         // A bank group's components, each bound by the roles of two layers.
         let components = (0..3)
             .map(|_| Tensor::zeros(&device, Element::f32(), &[32, 2, 2]).unwrap())
             .collect::<Vec<_>>();
         let scale = Tensor::zeros(&device, Element::f32(), &[1]).unwrap();
         let dense = Tensor::zeros(&device, Element::f32(), &[2]).unwrap();
-        let mut weights = (0..6).map(|role| ResidentWeight {
-            descriptor: WeightDescriptor::stored(format!("role.{role}"), vec![32, 2, 2]),
-            tensor: components[role % 3].clone(), scale: Some(scale.clone()),
-            bound: None, table: ResidentTable::whole(),
-        }).collect::<Vec<_>>();
-        weights.push(ResidentWeight { descriptor: WeightDescriptor::stored("dense", vec![2]),
-            tensor: dense.clone(), scale: None, bound: None, table: ResidentTable::whole() });
+        let mut weights = (0..6)
+            .map(|role| ResidentWeight {
+                descriptor: WeightDescriptor::stored(format!("role.{role}"), vec![32, 2, 2]),
+                tensor: components[role % 3].clone(),
+                scale: Some(scale.clone()),
+                bound: None,
+                table: ResidentTable::whole(),
+            })
+            .collect::<Vec<_>>();
+        weights.push(ResidentWeight {
+            descriptor: WeightDescriptor::stored("dense", vec![2]),
+            tensor: dense.clone(),
+            scale: None,
+            bound: None,
+            table: ResidentTable::whole(),
+        });
         let expected = components.iter().map(Tensor::storage_bytes).sum::<u64>()
-            + scale.storage_bytes() + dense.storage_bytes();
+            + scale.storage_bytes()
+            + dense.storage_bytes();
         assert_eq!(resident_storage_bytes(&weights).unwrap(), expected);
         drop(components);
         assert_eq!(resident_storage_bytes(&weights).unwrap(), expected);

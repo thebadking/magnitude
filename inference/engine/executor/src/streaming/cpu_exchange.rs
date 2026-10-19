@@ -11,6 +11,7 @@ use std::sync::{
 const REQUEST: usize = 0;
 const ACKNOWLEDGED: usize = 1;
 const FAILURE: usize = 2;
+const CONSUMED: usize = 3;
 
 pub struct CpuExpertExchange {
     activation: Tensor,
@@ -49,7 +50,7 @@ impl CpuExpertExchange {
         };
         let activation = allocate(Element::bf16(), &[1, width as u64])?;
         let contribution = allocate(Element::f32(), &[1, width as u64])?;
-        let control = allocate(Element::i32(), &[3])?;
+        let control = allocate(Element::i32(), &[4])?;
         let heartbeat = allocate(Element::i32(), &[1])?;
         let words = SharedWords::new(control.clone())?;
         let beat = SharedWords::new(heartbeat.clone())?;
@@ -94,6 +95,9 @@ impl CpuExpertExchange {
             0 => None,
             sequence => Some(sequence),
         }
+    }
+    pub fn consumed(&self, sequence: i32) -> bool {
+        self.words.load(CONSUMED) == sequence
     }
 
     /// Permanently withdraw a channel, including before a request arrives.

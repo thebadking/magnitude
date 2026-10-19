@@ -60,11 +60,22 @@ pub(crate) struct SharedDirectory {
     frames: Vec<Frame>,
 }
 impl SharedDirectory {
+    pub(crate) fn is_ready(&self, layer: usize, expert: i32) -> bool {
+        self.group_of_layer.get(layer).is_some_and(|&group| {
+            self.groups[group].is_ready(Key {
+                layer: LayerId(layer as u32),
+                expert: ExpertId(expert as u32),
+            })
+        })
+    }
     /// Visit each bank group's readable slots once. Its layers share one GPU
     /// stamp array; the representative is only that array's binding owner.
     pub(crate) fn visit_ready(&self, mut visit: impl FnMut(usize, usize, Key)) {
         for (group, arena) in self.groups.iter().enumerate() {
-            let layer = self.group_of_layer.iter().position(|&owner| owner == group)
+            let layer = self
+                .group_of_layer
+                .iter()
+                .position(|&owner| owner == group)
                 .expect("a bank group has a member");
             for (slot, key) in arena.ready_slots() {
                 visit(layer, slot, key);
@@ -408,14 +419,19 @@ mod tests {
     }
     /// Device progress at `c` that retires no frame.
     fn observe(d: &mut SharedDirectory, c: Clock) -> Result<(), Error> {
-        d.retire_progress(c, |_, _| panic!("no frame retires here")).map(|_| ())
+        d.retire_progress(c, |_, _| panic!("no frame retires here"))
+            .map(|_| ())
     }
     /// A request at `c` whose conversions the device committed.
     fn finish(d: &mut SharedDirectory, c: Clock, routes: &[i32]) -> Resolution {
         observe(d, c).unwrap();
         let r = d.begin(c, routes).unwrap();
         d.submitted(c).unwrap();
-        assert!(d.retire_step(c.sequence, |_, _| c.sequence).unwrap().is_empty());
+        assert!(
+            d.retire_step(c.sequence, |_, _| c.sequence)
+                .unwrap()
+                .is_empty()
+        );
         r
     }
     #[test]
@@ -450,9 +466,16 @@ mod tests {
             layer: LayerId(0),
             expert: ExpertId(0),
         };
-        assert_eq!(d.groups[0].acquire(key, Phase(1)).unwrap_err(), ArenaError::ConversionPending);
+        assert_eq!(
+            d.groups[0].acquire(key, Phase(1)).unwrap_err(),
+            ArenaError::ConversionPending
+        );
         // A later point retires the frame with the device's commit of slot 0.
-        assert!(d.retire_progress(clock(1, 1), |_, s| [1, 0][s]).unwrap().is_empty());
+        assert!(
+            d.retire_progress(clock(1, 1), |_, s| [1, 0][s])
+                .unwrap()
+                .is_empty()
+        );
         assert!(d.groups[0].acquire(key, Phase(1)).is_ok());
     }
     #[test]
@@ -497,10 +520,11 @@ mod tests {
         observe(&mut d, c).unwrap();
         d.begin(c, &[1]).unwrap();
         d.submitted(c).unwrap();
-        assert!(d
-            .retire_step(1, |_, _| panic!("future commit must not be read"))
-            .unwrap()
-            .is_empty());
+        assert!(
+            d.retire_step(1, |_, _| panic!("future commit must not be read"))
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(d.frames.len(), 1);
         assert_eq!(observe(&mut d, clock(1, 1)), Err(Error::BackwardClock));
     }

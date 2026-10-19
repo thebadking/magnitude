@@ -3,8 +3,8 @@
 //! edge and intermediate allocation.
 
 use crate::device_table::ResidentTable;
-use crate::stored_table::{SelectionNotice, StoredTable};
 use crate::operators::{self, MixerKind, PairedBlock, paired_block};
+use crate::stored_table::{SelectionNotice, StoredTable};
 use crate::streamed_table::StreamedTable;
 use crate::{
     ModelLoadPlan, ResidentTarget, ResourceLimits, StateResourcePlan, TargetBlockProgramSlot,
@@ -237,7 +237,9 @@ fn block_class_slice(
         MixerKind::Attention => {
             slice.dimension("R", classes.iter().map(|&(_, segments, ..)| segments))
         }
-        MixerKind::Recurrent => slice.dimension("B", classes.iter().map(|&(_, _, slots, ..)| slots)),
+        MixerKind::Recurrent => {
+            slice.dimension("B", classes.iter().map(|&(_, _, slots, ..)| slots))
+        }
     };
     let slice = match block.mixer {
         crate::operators::Mixer::Attention(operator) if scored => {
@@ -250,12 +252,7 @@ fn block_class_slice(
         Some(ngram) => slice.scoped(
             "stored_rows",
             "M",
-            [rows
-                * ngram
-                    .op
-                    .hash
-                    .heads()
-                    .map_err(|error| error.to_string())?],
+            [rows * ngram.op.hash.heads().map_err(|error| error.to_string())?],
         ),
         None => slice,
     };
@@ -1005,8 +1002,17 @@ impl PreparedTargetGraphs {
         limits: ResourceLimits,
         workers: &seismic::Workers,
     ) -> Result<Self, String> {
-        Self::prepare_range(device, handles, load, geometry, state, plan, limits, workers,
-            0..geometry.blocks.len())
+        Self::prepare_range(
+            device,
+            handles,
+            load,
+            geometry,
+            state,
+            plan,
+            limits,
+            workers,
+            0..geometry.blocks.len(),
+        )
     }
 
     pub(crate) fn prepare_range(
@@ -1039,9 +1045,16 @@ impl PreparedTargetGraphs {
                 },
             ));
         }
-        let certificate =
-            certify_target_family_in_range(device.backend(), load, geometry, state, plan, limits, owned.clone())
-                .map_err(|error| error.to_string())?;
+        let certificate = certify_target_family_in_range(
+            device.backend(),
+            load,
+            geometry,
+            state,
+            plan,
+            limits,
+            owned.clone(),
+        )
+        .map_err(|error| error.to_string())?;
         let row_classes = magnitude_batching::row_classes(limits.max_launch_rows);
         if row_classes.is_empty() {
             return Err(format!(
@@ -1401,15 +1414,29 @@ impl PreparedTargetGraphs {
     /// One capacity for each entry and owned block. Large gathered entry
     /// rows must not determine every block's upload allocation.
     pub(crate) fn upload_regions(&self) -> Vec<u64> {
-        let mut regions = vec![self.entries.values()
-            .map(|entry| entry.plan.upload_bytes()).max().unwrap_or(0)];
+        let mut regions = vec![
+            self.entries
+                .values()
+                .map(|entry| entry.plan.upload_bytes())
+                .max()
+                .unwrap_or(0),
+        ];
         if self.per_layer_rows.is_some() {
-            regions.push(self.per_layer_entries.values()
-                .map(|entry| entry.plan.upload_bytes()).max().unwrap_or(0));
+            regions.push(
+                self.per_layer_entries
+                    .values()
+                    .map(|entry| entry.plan.upload_bytes())
+                    .max()
+                    .unwrap_or(0),
+            );
         }
-        regions.extend(self.owned_blocks.clone().map(|index|
-            self.blocks_by_class[index].iter()
-                .map(|(_, graph)| graph.plan.upload_bytes()).max().unwrap_or(0)));
+        regions.extend(self.owned_blocks.clone().map(|index| {
+            self.blocks_by_class[index]
+                .iter()
+                .map(|(_, graph)| graph.plan.upload_bytes())
+                .max()
+                .unwrap_or(0)
+        }));
         regions
     }
 }
@@ -1430,28 +1457,61 @@ impl PreparedTargetGraphs {
 
     /// Largest carried tensors at the end of this owner's range, obtained
     /// from its sealed producer, plus its explicitly planned persistent rows.
-    pub(crate) fn outgoing_boundary(&self) -> Result<[Option<seismic::NativeTensorMetadata>; 4], String> {
+    pub(crate) fn outgoing_boundary(
+        &self,
+    ) -> Result<[Option<seismic::NativeTensorMetadata>; 4], String> {
         let classes = &self.blocks_by_class[self.owned_blocks.end - 1];
-        let graph = classes.iter().map(|(_, graph)| graph)
-            .max_by_key(|graph| graph.plan.tensor_metadata(&graph.output)
-                .and_then(|meta| meta.extents.first().copied()).unwrap_or(0))
+        let graph = classes
+            .iter()
+            .map(|(_, graph)| graph)
+            .max_by_key(|graph| {
+                graph
+                    .plan
+                    .tensor_metadata(&graph.output)
+                    .and_then(|meta| meta.extents.first().copied())
+                    .unwrap_or(0)
+            })
             .ok_or("source range has no sealed boundary producer")?;
-        let hidden = graph.plan.tensor_metadata(&graph.output)
+        let hidden = graph
+            .plan
+            .tensor_metadata(&graph.output)
             .ok_or("source graph has no hidden descriptor")?;
-        let residual = graph.residual.as_ref().map(|tensor| graph.plan.tensor_metadata(tensor)
-            .ok_or("source graph has no residual descriptor")).transpose()?;
-        let rows = |element: Element, extents: [u64; 2]| -> Result<seismic::NativeTensorMetadata, String> {
-            Ok(seismic::NativeTensorMetadata { element,
-                canonical_bytes: element.canonical_byte_len(&extents).map_err(|error| error.to_string())?,
-                extents: extents.to_vec() })
+        let residual = graph
+            .residual
+            .as_ref()
+            .map(|tensor| {
+                graph
+                    .plan
+                    .tensor_metadata(tensor)
+                    .ok_or("source graph has no residual descriptor")
+            })
+            .transpose()?;
+        let rows = |element: Element,
+                    extents: [u64; 2]|
+         -> Result<seismic::NativeTensorMetadata, String> {
+            Ok(seismic::NativeTensorMetadata {
+                element,
+                canonical_bytes: element
+                    .canonical_byte_len(&extents)
+                    .map_err(|error| error.to_string())?,
+                extents: extents.to_vec(),
+            })
         };
-        Ok([Some(hidden), residual,
-            self.token_rows.map(|extents| rows(Element::i32(), extents)).transpose()?,
-            self.per_layer_rows.map(|extents| rows(Element::f32(), extents)).transpose()?])
+        Ok([
+            Some(hidden),
+            residual,
+            self.token_rows
+                .map(|extents| rows(Element::i32(), extents))
+                .transpose()?,
+            self.per_layer_rows
+                .map(|extents| rows(Element::f32(), extents))
+                .transpose()?,
+        ])
     }
 
     pub(crate) fn incoming_hidden(&self) -> Result<seismic::NativeTensorMetadata, String> {
-        self.blocks_by_class[self.owned_blocks.start].iter()
+        self.blocks_by_class[self.owned_blocks.start]
+            .iter()
             .filter_map(|(_, graph)| graph.plan.tensor_metadata(graph.hidden.tensor()))
             .max_by_key(|meta| meta.extents.first().copied().unwrap_or(0))
             .ok_or_else(|| "destination range has no sealed boundary consumer".into())
@@ -1561,7 +1621,8 @@ impl PreparedTargetGraphs {
         let token_rows = self
             .token_rows
             .map(|mut extents| {
-                extents[0] = extents[0].checked_mul(self.token_row_slots as u64)
+                extents[0] = extents[0]
+                    .checked_mul(self.token_row_slots as u64)
                     .ok_or("group token row extent overflows")?;
                 seismic::Tensor::zeros(
                     &resident.embedding.tensor().device(),
@@ -1629,7 +1690,11 @@ impl PreparedTargetGraphs {
             true => None,
             false => Some(SelectionNotice::new(
                 &resident.embedding.tensor().device(),
-                self.entries.keys().map(|(rows, _)| *rows).max().unwrap_or(1),
+                self.entries
+                    .keys()
+                    .map(|(rows, _)| *rows)
+                    .max()
+                    .unwrap_or(1),
             )?),
         };
         let graphs = BoundTargetGraphs {
@@ -1878,7 +1943,10 @@ mod token_rows_tests {
 
     #[test]
     fn kept_token_charge_covers_every_group_member() {
-        assert_eq!(token_rows_bytes(Some([128, 2]), 8).unwrap(), 128 * 2 * 4 * 8);
+        assert_eq!(
+            token_rows_bytes(Some([128, 2]), 8).unwrap(),
+            128 * 2 * 4 * 8
+        );
         assert_eq!(token_rows_bytes(None, 8).unwrap(), 0);
         assert!(token_rows_bytes(Some([u64::MAX, 2]), 8).is_err());
     }
@@ -1920,15 +1988,24 @@ impl BoundTargetGraphs {
     /// Group entries run before their blocks, so each chain member needs a
     /// distinct token region. Later groups reuse regions in submission order.
     pub(crate) fn token_rows_for(&self, slot: usize, rows: u64) -> Result<seismic::Tensor, String> {
-        let [capacity, _] = self.prepared.token_rows
+        let [capacity, _] = self
+            .prepared
+            .token_rows
             .ok_or("the model keeps no token rows")?;
         if slot >= self.prepared.token_row_slots || rows > capacity {
             return Err("token rows exceed the admitted group or row capacity".into());
         }
-        let start = capacity.checked_mul(slot as u64).ok_or("token row offset overflows")?;
-        let end = start.checked_add(rows).ok_or("token row extent overflows")?;
-        self.token_rows.as_ref().ok_or("token row storage is absent")?
-            .slice_leading(start, end).map_err(|error| error.to_string())
+        let start = capacity
+            .checked_mul(slot as u64)
+            .ok_or("token row offset overflows")?;
+        let end = start
+            .checked_add(rows)
+            .ok_or("token row extent overflows")?;
+        self.token_rows
+            .as_ref()
+            .ok_or("token row storage is absent")?
+            .slice_leading(start, end)
+            .map_err(|error| error.to_string())
     }
 
     pub(crate) fn constant_bytes(&self) -> Result<u64, &'static str> {
@@ -2119,7 +2196,8 @@ fn token_rows_extents(load: &ModelLoadPlan, rows: u64) -> Option<[u64; 2]> {
 
 fn token_rows_bytes(extents: Option<[u64; 2]>, slots: usize) -> Result<u64, String> {
     extents.map_or(Ok(0), |mut extents| {
-        extents[0] = extents[0].checked_mul(slots as u64)
+        extents[0] = extents[0]
+            .checked_mul(slots as u64)
             .ok_or("group token row extent overflows")?;
         Element::i32()
             .canonical_byte_len(&extents)
@@ -2221,8 +2299,7 @@ fn entry_graph_topology<'a, G: GraphDraft + 'a>(
         (true, EntryTokens::Uploaded) => {
             let copy = copy_entry.ok_or("kept token rows need the token row copy entry")?;
             let uploaded = graph.input_for(copy, "selection", &[("M", rows)])?;
-            let mut rows_port =
-                graph.port_with_class_extent(Element::i32(), &[rows, 2], 0, "M")?;
+            let mut rows_port = graph.port_with_class_extent(Element::i32(), &[rows, 2], 0, "M")?;
             graph.enqueue::<selection_notice::Entry>(
                 copy,
                 &[("M", rows)],
@@ -2360,6 +2437,10 @@ pub(crate) enum WeightPart {
 /// The streamed-load tensors a routed layer's entries bind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum BankPart {
+    CpuActivation,
+    CpuContribution,
+    CpuControl,
+    CpuHeartbeat,
     /// The step sequence the device counts (`routed_step`), one per load.
     Step,
     /// The host's heartbeat a parked wait watches, one per load.
@@ -2373,20 +2454,31 @@ pub(crate) enum BankPart {
     Placement,
     /// The layer's hint ring for the predictions it makes `distance` layers
     /// ahead.
-    Ring { distance: u8 },
+    Ring {
+        distance: u8,
+    },
     /// The staging pool the layer's routed tensor `kind` is read into.
-    Staging { kind: u8 },
+    Staging {
+        kind: u8,
+    },
     /// The conveyor of that pool (spec 4.9): records a prompt's next layer
     /// is read into, on bank records the prompt borrows.
-    Conveyor { kind: u8 },
+    Conveyor {
+        kind: u8,
+    },
     /// The scratch bank of the layer's routed tensor `kind` (spec 4.9).
-    Scratch { kind: u8 },
+    Scratch {
+        kind: u8,
+    },
     /// The layer's scratch request region.
     ScratchControl,
     /// The experts a scratch-served launch routes to, a flag each.
     ScratchFlags,
     /// A scratch fill round's convert list of routed tensor `kind`.
-    ScratchList { round: u8, kind: u8 },
+    ScratchList {
+        round: u8,
+        kind: u8,
+    },
     /// The list of bank slots a scratch fill copies, for tensor `kind`.
     CopyList {
         kind: u8,
@@ -2951,7 +3043,9 @@ impl PreparedTargetBlockGraph {
         graph
             .export(&parts.output)
             .map_err(|error| error.to_string())?;
-        if let Some(residual) = &parts.residual { graph.export(residual).map_err(|error| error.to_string())?; }
+        if let Some(residual) = &parts.residual {
+            graph.export(residual).map_err(|error| error.to_string())?;
+        }
         let plan = graph.seal().map_err(|error| error.to_string())?;
         // The graph's constants are the family's values, and its vectors
         // hold exactly their elements: what it owns then follows from its
@@ -3137,7 +3231,9 @@ fn block_graph<'a, G: GraphDraft + 'a>(
             return Err("an n-gram input in an attention block".into());
         }
     };
-    let residual = (block_index + 1 == geometry.blocks.len() && load.residual_conditioning().is_some()).then(|| output.clone());
+    let residual = (block_index + 1 == geometry.blocks.len()
+        && load.residual_conditioning().is_some())
+    .then(|| output.clone());
     // The last block ends with the decoder's exit site, whose partials the
     // readout sums.
     let output = match (streams, streams_entries, &geometry.exit.norm) {
@@ -3265,7 +3361,9 @@ fn checked_block_graph_draft(
         &mut constants,
     )?;
     GraphDraft::export(&mut graph, &parts.output)?;
-    if let Some(residual) = &parts.residual { GraphDraft::export(&mut graph, residual)?; }
+    if let Some(residual) = &parts.residual {
+        GraphDraft::export(&mut graph, residual)?;
+    }
     let owned = owned_vectors_heap(weights.len(), constants.len(), parts.state.ports().len());
     Ok((graph, constants, owned))
 }
@@ -3329,8 +3427,15 @@ pub(crate) fn checked_target_family(
     plan: &TargetProgramPlan,
     limits: ResourceLimits,
 ) -> Result<(CheckedGraphResources, PlannedSealedGraphs, Vec<u64>), GraphError> {
-    checked_target_family_in_range(backend, load, geometry, state, plan, limits,
-        0..geometry.blocks.len())
+    checked_target_family_in_range(
+        backend,
+        load,
+        geometry,
+        state,
+        plan,
+        limits,
+        0..geometry.blocks.len(),
+    )
 }
 
 /// Resource projection for the same global block range that `prepare_range`
@@ -3345,8 +3450,15 @@ pub(crate) fn checked_target_family_in_range(
     limits: ResourceLimits,
     owned: std::ops::Range<usize>,
 ) -> Result<(CheckedGraphResources, PlannedSealedGraphs, Vec<u64>), GraphError> {
-    certify_target_family_in_range(backend, load, geometry, state, plan, limits, owned)
-        .map(|certificate| (certificate.resources, certificate.sealed, certificate.upload_regions))
+    certify_target_family_in_range(backend, load, geometry, state, plan, limits, owned).map(
+        |certificate| {
+            (
+                certificate.resources,
+                certificate.sealed,
+                certificate.upload_regions,
+            )
+        },
+    )
 }
 
 struct TargetFamilyCertificate {
@@ -3414,7 +3526,9 @@ fn certify_target_family_in_range(
         for layer in &bank.layers {
             let block = match layer.scope {
                 WeightScope::TargetSublayer(index)
-                | WeightScope::TargetBranch { sublayer: index, .. } => index.block as usize,
+                | WeightScope::TargetBranch {
+                    sublayer: index, ..
+                } => index.block as usize,
                 _ => return Err("target expert bank has a non-decoder scope".into()),
             };
             if !owned.contains(&block) {
@@ -3695,17 +3809,29 @@ fn certify_target_family_in_range(
     };
     // The draft input rows, the per-layer rows and the kept token rows the
     // family binds with its constants.
-    let mut upload_regions = vec![entries.values()
-        .map(|layout| layout.storage_bytes().upload).max().unwrap_or(0)];
+    let mut upload_regions = vec![
+        entries
+            .values()
+            .map(|layout| layout.storage_bytes().upload)
+            .max()
+            .unwrap_or(0),
+    ];
     if let Some(layout) = &per_layer {
         upload_regions.push(layout.storage_bytes().upload);
     }
-    upload_regions.extend(owned.clone().map(|index|
-        blocks[index].values().map(|graph| graph.layout.storage_bytes().upload)
-            .max().unwrap_or(0)));
+    upload_regions.extend(owned.clone().map(|index| {
+        blocks[index]
+            .values()
+            .map(|graph| graph.layout.storage_bytes().upload)
+            .max()
+            .unwrap_or(0)
+    }));
     let mut resources = family.finish()?;
     let per_layer_rows = per_layer_rows_bytes(per_layer_rows(plan, largest_rows))?;
-    let token_rows = token_rows_bytes(token_rows_extents(load, largest_rows), limits.startup_slots().target.activations)?;
+    let token_rows = token_rows_bytes(
+        token_rows_extents(load, largest_rows),
+        limits.startup_slots().target.activations,
+    )?;
     resources.binding_constant_bytes = resources
         .binding_constant_bytes
         .checked_add(tap_buffer_bytes(tap_width, largest_rows, geometry)?)
@@ -3834,23 +3960,54 @@ mod resource_template_tests {
         // device it must seal its own graph, preserving its global index and
         // the final block's hyper-connection exit.
         let local = enumerate_block_graphs_in_range(
-            backend, &state, plan.target(), &block_mixers(geometry).unwrap(),
-            &shapes, BlockOutputScales::Planned(UnreadScales::Equal), &[1, 64],
+            backend,
+            &state,
+            plan.target(),
+            &block_mixers(geometry).unwrap(),
+            &shapes,
+            BlockOutputScales::Planned(UnreadScales::Equal),
+            &[1, 64],
             limits.max_launch_slots as u64,
-            state.target_state().span_limit().next_power_of_two() as u64, 2..4,
-        ).unwrap();
+            state.target_state().span_limit().next_power_of_two() as u64,
+            2..4,
+        )
+        .unwrap();
         assert!(local.sharing.is_empty());
-        assert!(local.sealing.iter().all(|&(index, _)| (2..4).contains(&index)));
+        assert!(
+            local
+                .sealing
+                .iter()
+                .all(|&(index, _)| (2..4).contains(&index))
+        );
         assert!(local.sealing.iter().any(|&(index, _)| index == 2));
         assert!(local.sealing.iter().any(|&(index, _)| index == 3));
-        let whole = certify_target_family(backend, &load, geometry, &state, plan.target(), limits).unwrap();
-        let local = certify_target_family_in_range(backend, &load, geometry, &state,
-            plan.target(), limits, 2..4).unwrap();
+        let whole =
+            certify_target_family(backend, &load, geometry, &state, plan.target(), limits).unwrap();
+        let local = certify_target_family_in_range(
+            backend,
+            &load,
+            geometry,
+            &state,
+            plan.target(),
+            limits,
+            2..4,
+        )
+        .unwrap();
         assert!(local.blocks[..2].iter().all(BTreeMap::is_empty));
         assert!(local.blocks[2..].iter().all(|classes| !classes.is_empty()));
         assert!(local.sealed.at_most.graphs < whole.sealed.at_most.graphs);
-        assert!(certify_target_family_in_range(backend, &load, geometry, &state,
-            plan.target(), limits, 4..5).is_err());
+        assert!(
+            certify_target_family_in_range(
+                backend,
+                &load,
+                geometry,
+                &state,
+                plan.target(),
+                limits,
+                4..5
+            )
+            .is_err()
+        );
         for boundary in [0, 3] {
             assert!(
                 enumeration
@@ -3958,8 +4115,14 @@ mod resource_template_tests {
             listings.tiles.is_empty(),
             !(tensor_operations || matches!(head_width, 128 | 256 | 512))
         );
-        for class in block_classes(MixerKind::Attention, 512, 512, max_segments, &listings, false)
-        {
+        for class in block_classes(
+            MixerKind::Attention,
+            512,
+            512,
+            max_segments,
+            &listings,
+            false,
+        ) {
             let (rows, segments, slots, listed, _) = class;
             let (graph, _, _) = checked_block_graph_draft(
                 NativeGraphMetadata::new(backend),

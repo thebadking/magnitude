@@ -83,11 +83,20 @@ pub struct Arena {
     mapped: HashMap<Key, usize>,
 }
 impl Arena {
+    pub(crate) fn is_ready(&self, key: Key) -> bool {
+        self.mapped.get(&key).is_some_and(
+            |&index| matches!(self.slots[index].content,Content::Ready(found) if found==key),
+        )
+    }
     /// Current readable identities, under the directory owner's exclusion.
     /// Observing them supplies policy hints, never a device read lease.
     pub(crate) fn ready_slots(&self) -> impl Iterator<Item = (usize, Key)> + '_ {
         self.slots.iter().enumerate().filter_map(|(index, slot)| {
-            if let Content::Ready(key) = slot.content { Some((index, key)) } else { None }
+            if let Content::Ready(key) = slot.content {
+                Some((index, key))
+            } else {
+                None
+            }
         })
     }
 
@@ -311,7 +320,10 @@ impl Arena {
         let mut evicted = Vec::new();
         for index in slots {
             let slot = &mut self.slots[index];
-            let generation = slot.generation.checked_add(1).ok_or(Error::CounterOverflow)?;
+            let generation = slot
+                .generation
+                .checked_add(1)
+                .ok_or(Error::CounterOverflow)?;
             if let Content::Ready(key) = slot.content {
                 self.mapped.remove(&key);
                 evicted.push(Location {
@@ -502,11 +514,18 @@ mod tests {
         let free = load(&mut a, key(0, 1), 1);
         let free_location = free.location();
         a.release_after_reader_completion(free).unwrap();
-        assert_eq!(a.lend(0..2).unwrap_err(), Error::WrongState, "slot 0 is read");
+        assert_eq!(
+            a.lend(0..2).unwrap_err(),
+            Error::WrongState,
+            "slot 0 is read"
+        );
         a.validate_read(held.location()).unwrap();
         a.release_after_reader_completion(held).unwrap();
         let evicted = a.lend(1..3).unwrap();
-        assert_eq!(evicted.iter().map(|l| l.key).collect::<Vec<_>>(), vec![key(0, 1)]);
+        assert_eq!(
+            evicted.iter().map(|l| l.key).collect::<Vec<_>>(),
+            vec![key(0, 1)]
+        );
         assert_eq!(a.validate_read(free_location), Err(Error::StaleLocation));
         assert_eq!(a.acquire(key(0, 1), Phase(3)).unwrap_err(), Error::Missing);
         // Only slot 0 remains: the next fill evicts expert 0, never a lent slot.
@@ -514,11 +533,17 @@ mod tests {
         assert_eq!(fill.location().slot, 0);
         let read = a.publish_after_conversion(fill).unwrap();
         a.release_after_reader_completion(read).unwrap();
-        assert_eq!(a.reserve(key(0, 3), Phase(4)).map(|f| f.location().slot), Ok(0));
+        assert_eq!(
+            a.reserve(key(0, 3), Phase(4)).map(|f| f.location().slot),
+            Ok(0)
+        );
         assert_eq!(a.lend(1..3).unwrap_err(), Error::WrongState, "already lent");
         a.restore(1..3).unwrap();
         assert_eq!(a.restore(1..3).unwrap_err(), Error::WrongState);
-        assert_eq!(a.reserve(key(0, 4), Phase(5)).map(|f| f.location().slot), Ok(1));
+        assert_eq!(
+            a.reserve(key(0, 4), Phase(5)).map(|f| f.location().slot),
+            Ok(1)
+        );
     }
     #[test]
     fn an_older_reader_cannot_regress_the_use_clock() {

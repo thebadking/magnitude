@@ -36,7 +36,13 @@ pub(super) fn build_placed(
     for range in placement.ranges() {
         let mut local = manifest.clone();
         local.device = DeviceRequest::Selector(range.device);
-        match prepare(catalog.clone(), &local, &package, unprepared, progress.clone())? {
+        match prepare(
+            catalog.clone(),
+            &local,
+            &package,
+            unprepared,
+            progress.clone(),
+        )? {
             LoadAttempt::Loaded(owner) => prepared.push(owner),
             LoadAttempt::Unprepared => return Ok(LoadAttempt::Unprepared),
         }
@@ -114,7 +120,9 @@ pub(super) fn build_placed(
             .map_err(internal)?;
     }
     if manifest.model.lookahead && !targets[0].supports_selected_return() {
-        return Err(internal("placed lookahead requires admitted selected-token return storage"));
+        return Err(internal(
+            "placed lookahead requires admitted selected-token return storage",
+        ));
     }
     let mut plans = Vec::new();
     for (index, owner) in prepared.iter().enumerate() {
@@ -140,9 +148,38 @@ pub(super) fn build_placed(
         });
     }
     let host_experts = if prepared[0].backend == BackendName::Cuda {
-        magnitude_executor::HostExpertCache::new(catalog.as_ref().clone(), manifest.reserves,
-            protected_host_bytes).map_err(internal)?
-    } else { None };
+        magnitude_executor::HostExpertCache::new(
+            catalog.as_ref().clone(),
+            manifest.reserves,
+            protected_host_bytes,
+        )
+        .map_err(internal)?
+    } else {
+        None
+    };
+    let mut cpu_programs: Option<Arc<magnitude_executor::CpuExpertPrograms>> = None;
+    for owner in &mut prepared {
+        if let Some(programs) = owner.programs.take_cpu_expert_programs() {
+            if let Some(first) = &cpu_programs {
+                if first.plan != programs.plan {
+                    return Err(internal("owners disagree on the CPU program inventory"));
+                }
+            } else {
+                cpu_programs = Some(programs);
+            }
+        }
+    }
+    let cpu_experts = cpu_programs
+        .map(|programs| {
+            magnitude_executor::CpuExpertService::new(
+                catalog.as_ref().clone(),
+                programs,
+                manifest.reserves,
+                protected_host_bytes,
+            )
+        })
+        .transpose()
+        .map_err(internal)?;
     let mut owners = Vec::new();
     for (((owner, target), readout), plan) in
         prepared.into_iter().zip(targets).zip(readouts).zip(plans)
@@ -207,7 +244,12 @@ pub(super) fn build_placed(
         let mut residency =
             ResidencyStore::new_range(device.clone(), programs.clone(), &range, identity)
                 .map_err(|error| internal(error.to_string()))?;
-        if let Some(cache) = &host_experts { residency.keep_host_experts(cache.clone()); }
+        if let Some(cache) = &host_experts {
+            residency.keep_host_experts(cache.clone());
+        }
+        if let Some(service) = &cpu_experts {
+            residency.keep_cpu_experts(service.clone());
+        }
         if let Some(cache) = &manifest.kernel_cache {
             residency.keep_table_rows(cache.join("table-rows"));
         }
@@ -266,8 +308,16 @@ pub(super) fn build_placed(
     }
     let second = owners.pop().unwrap();
     let first = owners.pop().unwrap();
-    let owner_plans = vec![(first.device.info().selector, first.execution.resources().clone()),
-        (second.device.info().selector, second.execution.resources().clone())];
+    let owner_plans = vec![
+        (
+            first.device.info().selector,
+            first.execution.resources().clone(),
+        ),
+        (
+            second.device.info().selector,
+            second.execution.resources().clone(),
+        ),
+    ];
     let plan = first.execution.resources().clone();
     let device = first.device.info().selector;
     let (mut domain, bindings) = ExecutorDomain::new_placed(

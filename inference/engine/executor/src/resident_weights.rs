@@ -82,7 +82,12 @@ impl ResidentRoles {
     /// roles.
     pub(crate) fn stored_tables(
         &self,
-    ) -> impl Iterator<Item = (WeightRole, &std::sync::Arc<crate::stored_table::StoredTable>)> {
+    ) -> impl Iterator<
+        Item = (
+            WeightRole,
+            &std::sync::Arc<crate::stored_table::StoredTable>,
+        ),
+    > {
         self.0
             .iter()
             .filter_map(|(role, weight)| weight.table().stored().map(|table| (*role, table)))
@@ -282,12 +287,16 @@ pub(crate) fn import_target(
         operators::decoder_weights(decoder)
             .into_iter()
             .chain(exit_roles)
-            .filter(|(role, _)| owned_blocks.is_none_or(|blocks| match role.scope {
-                WeightScope::Target => true,
-                WeightScope::TargetSublayer(index)
-                | WeightScope::TargetBranch { sublayer: index, .. } => blocks.contains(&(index.block as usize)),
-                _ => false,
-            }))
+            .filter(|(role, _)| {
+                owned_blocks.is_none_or(|blocks| match role.scope {
+                    WeightScope::Target => true,
+                    WeightScope::TargetSublayer(index)
+                    | WeightScope::TargetBranch {
+                        sublayer: index, ..
+                    } => blocks.contains(&(index.block as usize)),
+                    _ => false,
+                })
+            })
             .collect(),
         residency,
         target,
@@ -345,15 +354,25 @@ pub(crate) fn import_target(
         .cloned()
         .map(|plan| {
             // The conveyor borrows its lender's records (spec 4.9).
-            let lender =
-                plan.conveyor.lender.map(|group| residency.bank_arenas(group)).transpose()?;
+            let lender = plan
+                .conveyor
+                .lender
+                .map(|group| residency.bank_arenas(group))
+                .transpose()?;
             let device = residency.device().clone();
             let host_experts = residency.host_experts();
+            let cpu_experts = residency.cpu_experts();
             crate::streaming::bank::ResidentBank::open(
-                &device, &plan, target, &sublayers, lender, host_experts,
+                &device,
+                &plan,
+                target,
+                &sublayers,
+                lender,
+                host_experts,
+                cpu_experts,
                 &mut || residency.import_checkpoint(),
             )
-                .map(std::sync::Arc::new)
+            .map(std::sync::Arc::new)
         })
         .transpose()?;
     Ok(ResidentTarget {

@@ -17,11 +17,11 @@ use magnitude_kernels::{
     dense_up, feature_rows, routed_down, routed_experts_up, routed_gate_up, routed_scatter,
     routed_select, routed_up, state_space_chunk, state_space_gate, state_space_step, tap_rows,
 };
-use magnitude_kernels::{short_conv_project, short_conv_rows};
 use magnitude_kernels::{
     routed_bank_fill, routed_convert_wide, routed_copy, routed_route_streamed,
     routed_scratch_request, routed_scratch_wait, routed_seed_commit, routed_step,
 };
+use magnitude_kernels::{short_conv_project, short_conv_rows};
 use seismic::NativeKernel;
 use std::collections::HashMap;
 
@@ -208,6 +208,7 @@ pub struct RoutedKernels {
 /// absent experts, and fill the scratch banks of larger row classes.
 #[derive(Clone, Debug)]
 pub struct StreamedRoutedKernels {
+    pub cpu: Option<CpuRoutedKernels>,
     pub choices: NativeKernel<routed_gate_up::Entry>,
     pub step: NativeKernel<routed_step::Entry>,
     /// Routing with resolve and hints; a backend with a resident shared
@@ -225,6 +226,14 @@ pub struct StreamedRoutedKernels {
     /// A round's convert, per routed tensor: every record of the round at
     /// once.
     pub convert_wide: [NativeKernel<routed_convert_wide::Entry>; 3],
+}
+
+#[derive(Clone, Debug)]
+pub struct CpuRoutedKernels {
+    pub exchange: NativeKernel<magnitude_kernels::routed_cpu_try::Entry>,
+    pub fill: NativeKernel<magnitude_kernels::routed_bank_fill_cpu::Entry>,
+    pub choices: NativeKernel<magnitude_kernels::routed_gate_up_cpu::Entry>,
+    pub output: NativeKernel<magnitude_kernels::routed_output_cpu::Entry>,
 }
 
 /// The decode rows' routing and expansions, by the backend's

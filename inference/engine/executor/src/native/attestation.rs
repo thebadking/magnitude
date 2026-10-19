@@ -19,6 +19,9 @@ use magnitude_kernels::{
     project_rows, readout_project_rows, repack_weight, repeat_rows, selection_notice, stored_rows,
     stream_mix_down, stream_mix_up, tap_rows, widen_rows,
 };
+use magnitude_kernels::{
+    routed_bank_fill_cpu, routed_cpu_try, routed_gate_up_cpu, routed_output_cpu,
+};
 use std::{collections::HashSet, rc::Rc};
 
 /// Invocation workspace of the fused routed form's decode kernels.
@@ -44,6 +47,7 @@ fn recurrent_step_bytes(step: &RecurrentStepKernels) -> u128 {
 }
 
 pub struct AttestedPrograms {
+    cpu_experts: Option<std::sync::Arc<crate::CpuExpertPrograms>>,
     backend: BackendName,
     tuned: Vec<TunedEntry>,
     unprepared: usize,
@@ -348,6 +352,9 @@ where
 }
 
 impl AttestedPrograms {
+    pub fn take_cpu_expert_programs(&mut self) -> Option<std::sync::Arc<crate::CpuExpertPrograms>> {
+        self.cpu_experts.take()
+    }
     pub fn readout_choices(&self) -> &[crate::ReadoutClassChoice] {
         &self.readout_choices
     }
@@ -612,7 +619,15 @@ impl AttestedPrograms {
             return Err("target range kernels belong to another opened device".into());
         }
         crate::programs::native_target_graph::PreparedTargetGraphs::prepare_range(
-            device, &self.target, load, geometry, state, plan, limits, workers, owned,
+            device,
+            &self.target,
+            load,
+            geometry,
+            state,
+            plan,
+            limits,
+            workers,
+            owned,
         )
     }
 
@@ -812,7 +827,13 @@ impl AttestedPrograms {
                 Some(FeedForwardProgramSlot::Routed(binding))
                     if charged_feed_forward.insert(FeedForwardProgramSlot::Routed(binding)) =>
                 {
-                    bytes += routed_bytes
+                    bytes += routed_bytes;
+                    if binding.bank.is_some_and(|bank| bank.cpu) {
+                        bytes += bytes!(routed_cpu_try)
+                            + bytes!(routed_bank_fill_cpu)
+                            + bytes!(routed_gate_up_cpu)
+                            + bytes!(routed_output_cpu);
+                    }
                 }
                 Some(FeedForwardProgramSlot::GeneralRouted(binding))
                     if charged_feed_forward
@@ -1661,6 +1682,7 @@ impl AttestedPrograms {
             });
         }
         let attested = Self {
+            cpu_experts: prepared.cpu_experts.clone(),
             backend: device.backend(),
             readout_choices: prepared.readout_choices.clone(),
             tuned,
@@ -1818,6 +1840,16 @@ impl AttestedPrograms {
             }
         }
         for handles in prepared.target.routed.values() {
+            if let Some(cpu) = handles
+                .streamed
+                .as_ref()
+                .and_then(|streamed| streamed.cpu.as_ref())
+            {
+                bytes += u128::from(cpu.exchange.invocation_workspace_bytes())
+                    + u128::from(cpu.fill.invocation_workspace_bytes())
+                    + u128::from(cpu.choices.invocation_workspace_bytes())
+                    + u128::from(cpu.output.invocation_workspace_bytes());
+            }
             bytes += u128::from(handles.route.invocation_workspace_bytes())
                 + routed_decode_bytes(&handles.decode)
                 + u128::from(handles.output.invocation_workspace_bytes())

@@ -2,7 +2,7 @@
 //! resident encoding form a group whose records every member layer binds
 //! (group-global slot indices), planned before the device opens and allocated
 //! on the first binding, one contiguous tensor per routed component.
-use crate::planning::{ExpertBankPlan, BANK_KINDS};
+use crate::planning::{BANK_KINDS, ExpertBankPlan};
 use magnitude_family_contracts::WeightRole;
 use seismic::{Device, Element, Tensor};
 use std::collections::{HashMap, HashSet};
@@ -369,6 +369,7 @@ mod tests {
             })
             .collect();
         ExpertBankPlan {
+            cpu: None,
             shared: None,
             slots: 2,
             experts: 256,
@@ -493,7 +494,10 @@ mod tests {
         // Bound components outlive the store and keep exactly their own
         // allocation charged.
         drop(bank);
-        assert_eq!(device.memory_usage().charged - baseline, first.storage_bytes());
+        assert_eq!(
+            device.memory_usage().charged - baseline,
+            first.storage_bytes()
+        );
         assert_eq!(first.storage_bytes(), charge / 3);
         drop(first);
         drop(alias);
@@ -537,9 +541,11 @@ mod tests {
         metadata.shared = Some(shared.clone());
         let tensors =
             BankTensors::allocate(&device, &metadata, &shared, None, &mut || Ok(())).unwrap();
-        assert!(tensors.layers[0]
-            .stamps
-            .shares_allocation(&tensors.layers[1].stamps));
+        assert!(
+            tensors.layers[0]
+                .stamps
+                .shares_allocation(&tensors.layers[1].stamps)
+        );
         let first = &tensors.layers[0].commits;
         assert_eq!(first.extents(), &[18]);
         assert!(first.shares_allocation(&tensors.layers[1].commits));

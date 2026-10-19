@@ -1,0 +1,146 @@
+# CPU-served slots are -1; other choices retain the ordinary GPU computation.
+
+fn routed_gate_up_cpu[M, H, E, K, F](normalized: &tensor[M, H] A,
+    routes: &tensor[M, K] i32, expert_gate: &tensor[E, F, H] EGW,
+    expert_up: &tensor[E, F, H] EUW, activation: i32) -> tensor[M, K, F] A where M == 1:
+    let mut product = tensor[M, K, F] A
+    for row in 0..M:
+        for choice in 0..K:
+            let expert = routes[row, choice]
+            if expert < 0:
+                for feature in 0..F:
+                    product[row, choice, feature] = 0.0
+            else:
+                let mut gate = tensor[1, F] A
+                let mut up = tensor[1, F] A
+                let mut activated = tensor[1, F] A
+                for feature in 0..F:
+                    let mut g = f32(0.0)
+                    let mut u = f32(0.0)
+                    for source in 0..H:
+                        g = fma(f32(normalized[row, source]), f32(expert_gate[expert, feature, source]), g)
+                        u = fma(f32(normalized[row, source]), f32(expert_up[expert, feature, source]), u)
+                    gate[0, feature] = g
+                    up[0, feature] = u
+                activate(gate, activated, activation)
+                for feature in 0..F:
+                    product[row, choice, feature] = f32(activated[0, feature]) * f32(up[0, feature])
+    return product
+
+native routed_gate_up_cpu for cuda from "cuda/routed_gate_up_cpu.cu":
+    static (H, K, F)
+    where H % 64 == 0
+    launch routed_gate_up_cpu:
+        params (code TPW in [1, 2], code arithmetic KSPLIT in [1, 2, 4])
+        threadgroups (ceil_div(ceil_div(ceil_div(F, 16), TPW), 4 / KSPLIT), M * K, 1)
+        threads_per_threadgroup (128, 1, 1)
+
+fn routed_output_cpu[M, H, SN, IN, E, K, F, S](residual: &tensor[M, SN * H] f32,
+    inject: &tensor[M, IN] f32, cpu_contribution: &tensor[M, H] f32,
+    expert_product: &tensor[M, K, F] A, shared_product: &tensor[M, S] A,
+    routes: &tensor[M, K] i32, scores: &tensor[M, K] f32,
+    coefficient: &tensor[M] f32, expert_down: &tensor[E, H, F] EDW,
+    shared_down: &tensor[H, S] SDW) -> tensor[M, SN * H] f32
+    where M == 1 and IN >= 0 and ((IN == 0 and SN == 1) or (IN == SN and SN >= 1)):
+    let mut published = tensor[M, K, H] A
+    let mut shared = tensor[M, H] A
+    let mut value = tensor[M, SN * H] f32
+    linear(shared_product, shared_down, shared)
+    for row in 0..M:
+        for choice in 0..K:
+            let expert = routes[row, choice]
+            if expert < 0:
+                for column in 0..H:
+                    published[row, choice, column] = cpu_contribution[row, column]
+            else:
+                for column in 0..H:
+                    let mut projected = f32(0.0)
+                    for feature in 0..F:
+                        projected = fma(f32(expert_product[row, choice, feature]), f32(expert_down[expert, column, feature]), projected)
+                    published[row, choice, column] = projected
+        for column in 0..H:
+            let mut selected = f32(0.0)
+            for choice in 0..K:
+                selected = fma(scores[row, choice], f32(published[row, choice, column]), selected)
+            let shared_value = f32(shared[row, column]) * coefficient[row]
+            # One stream: residual + selected + shared, in that order;
+            # streams: residual[s] + (selected + shared) · inject[s].
+            for stream in 0..SN:
+                let at = stream * H + column
+                if stream < IN:
+                    value[row, at] = residual[row, at] + (selected + shared_value) * inject[row, stream]
+                else:
+                    value[row, at] = residual[row, at] + selected + shared_value
+    return value
+
+native routed_output_cpu for cuda from "cuda/routed_output_cpu.cu":
+    static (H, SN, IN, K, F, S)
+    scratch published bytes (M * (K + 1) * H * 4)
+    scratch arrivals bytes (ceil_div(H, 16) * 4) sync
+    launch routed_output_cpu when M == 1:
+        params (code TPW in [1, 2], code arithmetic KSPLIT in [1, 2, 4])
+        threadgroups (ceil_div(ceil_div(ceil_div(H, 16), TPW), 4 / KSPLIT), M * (K + 1), 1)
+        threads_per_threadgroup (128, 1, 1)
+
+fn routed_bank_fill_cpu[M, H, K, F, BANK, T, X, C, P](slots: &tensor[M, K] i32,
+    stamps: &mut tensor[BANK] i32, step: &tensor[1] i32, control: &mut tensor[C] i32,
+    placement: &tensor[5, P] i32, heartbeat: &tensor[1] i32,
+    staged_gate: &tensor[T, F, H] SG, staged_up: &tensor[T, F, H] SU,
+    staged_down: &tensor[T, H, F] SD, expert_gate: &mut tensor[BANK, F, H] EGW,
+    expert_up: &mut tensor[BANK, F, H] EUW, expert_down: &mut tensor[BANK, H, F] EDW,
+    slot_map: &mut tensor[X] i32, commits: &mut tensor[BANK] i32) -> tensor[M, K] i32
+    where M == 1 and C >= 4 and P > 0:
+    let mut bound = tensor[M, K] i32
+    for row in 0..M:
+        for choice in 0..K:
+            let c = row * K + choice
+            bound[row, choice] = slots[row, choice]
+            if slots[row, choice] < 0 and c < P:
+                let slot = placement[0, c]
+                bound[row, choice] = slot
+                if slot >= 0 and placement[1, c] >= 0:
+                    expert_gate[slot, :, :] = repack[U = EGW](staged_gate[placement[1, c], :, :])
+                    expert_up[slot, :, :] = repack[U = EUW](staged_up[placement[2, c], :, :])
+                    expert_down[slot, :, :] = repack[U = EDW](staged_down[placement[3, c], :, :])
+                    stamps[slot] = step[0]
+                    if control[0] == step[0] and control[1] == step[0] and control[2] != step[0] and 4 + c < C:
+                        let expert = control[4 + c]
+                        if expert >= 0 and expert < X:
+                            slot_map[expert] = slot
+                            commits[slot] = step[0]
+    return bound
+
+native routed_bank_fill_cpu for cuda from "cuda/routed_bank_fill_cpu.cu":
+    static (H, K, F, T, C, P)
+    where K <= 32 and C >= 4 + 8 * K and P >= 8 * K
+    launch routed_bank_fill_cpu:
+        threadgroups (32, M * K, 1)
+        threads_per_threadgroup (32, 1, 1)
+        shared_bytes (16384)
+
+# Publish only an eligible one-row, one-miss activation. A GPU fallback replies
+# with zero; its nonnegative bound slots cause the output to ignore that value.
+fn routed_cpu_try[H, K](normalized: &tensor[1, H] bf16, slots: &tensor[1, K] i32,
+    activation: &mut tensor[1, H] bf16, contribution: &tensor[1, H] f32,
+    step: &tensor[1] i32, control: &mut tensor[4] i32,
+    heartbeat: &tensor[1] i32) -> tensor[1, H] f32 where H > 0 and K > 1:
+    let mut missing = i32(0)
+    for choice in 0..K:
+        if slots[0, choice] < 0:
+            missing = missing + 1
+    let mut value = tensor[1, H] f32
+    for column in 0..H:
+        value[0, column] = 0.0
+        if missing == 1 and control[2] == 0:
+            activation[0, column] = normalized[0, column]
+            value[0, column] = contribution[0, column]
+    if missing == 1 and control[2] == 0:
+        control[0] = step[0]
+        control[3] = step[0]
+    return value
+
+native routed_cpu_try for cuda from "cuda/routed_cpu_try.cu":
+    static (H, K)
+    launch routed_cpu_try:
+        threadgroups (1, 1, 1)
+        threads_per_threadgroup (256, 1, 1)

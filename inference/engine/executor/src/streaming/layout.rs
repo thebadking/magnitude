@@ -4,10 +4,10 @@
 //! them and as the load allocates them.
 
 use crate::ModelLoadPlan;
+use crate::operators::routed::fused_graph::DECODE_ROWS;
 use crate::planning::{BANK_KINDS, ExpertBankPlan};
 use crate::programs::native_target_graph::BankPart;
 use magnitude_family_contracts::{WeightKind, WeightRole, WeightScope};
-use crate::operators::routed::fused_graph::DECODE_ROWS;
 use seismic::{Device, Element, Tensor};
 
 /// Prediction distances (spec 4.7): a routed layer hints the layers one and
@@ -98,6 +98,25 @@ pub(crate) fn bank_port(
     let bank = bank(load)?;
     let words = |count: u64| Ok((Element::i32(), vec![count]));
     match part {
+        BankPart::CpuControl => words(4),
+        BankPart::CpuHeartbeat => words(1),
+        BankPart::CpuActivation | BankPart::CpuContribution => {
+            let layer = bank
+                .layers
+                .iter()
+                .find(|layer| layer.scope == scope)
+                .ok_or("CPU channel scope outside bank")?;
+            let binding = crate::CpuExpertBinding::of(bank, layer)
+                .ok_or("CPU channel source binding unsupported")?;
+            Ok((
+                if matches!(part, BankPart::CpuActivation) {
+                    Element::bf16()
+                } else {
+                    Element::f32()
+                },
+                vec![1, binding.hidden()],
+            ))
+        }
         BankPart::Step | BankPart::Heartbeat => words(1),
         BankPart::SlotMap => words(bank.experts),
         BankPart::Stamps => words(bank.records(scope)?),
@@ -161,16 +180,26 @@ pub(crate) fn block_key(load: &ModelLoadPlan, block: usize) -> Result<Option<Str
         };
         let planned = |kind| {
             load.weights()
-                .find(|plan| plan.role == WeightRole { scope: layer.scope, kind })
+                .find(|plan| {
+                    plan.role
+                        == WeightRole {
+                            scope: layer.scope,
+                            kind,
+                        }
+                })
                 .map(|plan| (plan.resident, plan.shape.clone()))
                 .ok_or_else(|| format!("{:?} of {:?} is not planned", kind, layer.scope))
         };
         // InputNorm is absent for HyperConnectionMix layers (NM=0); the
         // kernel uses sum_parts instead of rms_norm for those.
-        let norm_info = load.weights()
-            .find(|plan| plan.role == WeightRole {
-                scope: layer.scope,
-                kind: WeightKind::InputNorm,
+        let norm_info = load
+            .weights()
+            .find(|plan| {
+                plan.role
+                    == WeightRole {
+                        scope: layer.scope,
+                        kind: WeightKind::InputNorm,
+                    }
             })
             .map(|plan| (plan.resident, plan.shape.clone()));
         ahead.push((
@@ -185,6 +214,7 @@ pub(crate) fn block_key(load: &ModelLoadPlan, block: usize) -> Result<Option<Str
 
 /// One routed layer's directory tensors.
 pub(crate) struct LayerTensors {
+    pub cpu: Option<std::sync::Arc<super::cpu_exchange::CpuExpertExchange>>,
     pub scope: WeightScope,
     pub slot_map: Tensor,
     /// The layer's bank group's stamps and commits, shared by its layers.
@@ -263,6 +293,18 @@ impl BankTensors {
             .map(|(position, layer)| {
                 let (stamps, commits) = group_words[shared.group_of_layer[position]].clone();
                 Ok(LayerTensors {
+                    cpu: if bank.cpu.is_some() {
+                        crate::CpuExpertBinding::of(bank, layer)
+                            .map(|binding| {
+                                super::cpu_exchange::CpuExpertExchange::new(
+                                    device,
+                                    binding.hidden(),
+                                )
+                            })
+                            .transpose()?
+                    } else {
+                        None
+                    },
                     scope: layer.scope,
                     slot_map: words(bank.experts)?,
                     stamps,
@@ -319,20 +361,46 @@ impl BankTensors {
             })
             .collect::<Result<Vec<_>, String>>()?;
         let device_pools = if bank.device_staging {
-            let arenas = (0..3).map(|kind| {
-                Tensor::zeros(device, Element::bool(), &[bank.device_staging_arena_bytes(kind)?])
+            let arenas = (0..3)
+                .map(|kind| {
+                    Tensor::zeros(
+                        device,
+                        Element::bool(),
+                        &[bank.device_staging_arena_bytes(kind)?],
+                    )
                     .map_err(|error| format!("device source arena allocation failed: {error}"))
-            }).collect::<Result<Vec<_>, String>>()?;
-            Some(bank.pools.iter().map(|pool| {
-                arenas[pool.kind].region(pool.source,
-                    &[bank.graph_staging_records(), pool.matrix[0], pool.matrix[1]], 0)
-                    .map_err(|error| format!("device source view failed: {error}"))
-            }).collect::<Result<Vec<_>, String>>()?)
-        } else { None };
-        let device_conveyors = device_pools.as_ref().map(|pools| pools.iter().map(|pool| {
-            pool.slice_leading(0, bank.conveyor_records())
-                .map_err(|error| format!("device conveyor view failed: {error}"))
-        }).collect::<Result<Vec<_>, String>>()).transpose()?.unwrap_or_default();
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Some(
+                bank.pools
+                    .iter()
+                    .map(|pool| {
+                        arenas[pool.kind]
+                            .region(
+                                pool.source,
+                                &[bank.graph_staging_records(), pool.matrix[0], pool.matrix[1]],
+                                0,
+                            )
+                            .map_err(|error| format!("device source view failed: {error}"))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?,
+            )
+        } else {
+            None
+        };
+        let device_conveyors = device_pools
+            .as_ref()
+            .map(|pools| {
+                pools
+                    .iter()
+                    .map(|pool| {
+                        pool.slice_leading(0, bank.conveyor_records())
+                            .map_err(|error| format!("device conveyor view failed: {error}"))
+                    })
+                    .collect::<Result<Vec<_>, String>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
         let lists = || -> Result<[Tensor; 3], String> {
             Ok([
                 words(bank.list_words())?,
@@ -349,19 +417,37 @@ impl BankTensors {
         let scratch_flags = words(bank.experts)?;
         let copy_lists = [words(copy_words)?, words(copy_words)?, words(copy_words)?];
         let seed_list = words(copy_words)?;
-        let device_words = |count| Tensor::zeros(device, Element::i32(), &[count])
-            .map_err(|error| format!("device source list allocation failed: {error}"));
+        let device_words = |count| {
+            Tensor::zeros(device, Element::i32(), &[count])
+                .map_err(|error| format!("device source list allocation failed: {error}"))
+        };
         let device_step = bank.device_staging.then(|| device_words(1)).transpose()?;
         let device_scratch_lists = if bank.device_staging {
-            (0..bank.rounds()).map(|_| Ok([
-                device_words(bank.list_words())?, device_words(bank.list_words())?,
-                device_words(bank.list_words())?,
-            ])).collect::<Result<Vec<_>, String>>()?
-        } else { Vec::new() };
-        let device_copy_lists = if bank.device_staging { Some([
-            device_words(copy_words)?, device_words(copy_words)?, device_words(copy_words)?,
-        ]) } else { None };
-        let device_seed_list = bank.device_staging.then(|| device_words(copy_words)).transpose()?;
+            (0..bank.rounds())
+                .map(|_| {
+                    Ok([
+                        device_words(bank.list_words())?,
+                        device_words(bank.list_words())?,
+                        device_words(bank.list_words())?,
+                    ])
+                })
+                .collect::<Result<Vec<_>, String>>()?
+        } else {
+            Vec::new()
+        };
+        let device_copy_lists = if bank.device_staging {
+            Some([
+                device_words(copy_words)?,
+                device_words(copy_words)?,
+                device_words(copy_words)?,
+            ])
+        } else {
+            None
+        };
+        let device_seed_list = bank
+            .device_staging
+            .then(|| device_words(copy_words))
+            .transpose()?;
         checkpoint()?;
         // One arena per routed tensor, sized for its largest form; each
         // form is a view of it at offset 0 (one layer fills it at a time).
@@ -418,6 +504,26 @@ impl BankTensors {
                 .ok_or_else(|| format!("bank part {part:?} out of range"))
         };
         Ok(match part {
+            BankPart::CpuActivation => layer
+                .cpu
+                .as_ref()
+                .ok_or("CPU channel not allocated")?
+                .activation(),
+            BankPart::CpuContribution => layer
+                .cpu
+                .as_ref()
+                .ok_or("CPU channel not allocated")?
+                .contribution(),
+            BankPart::CpuControl => layer
+                .cpu
+                .as_ref()
+                .ok_or("CPU channel not allocated")?
+                .control(),
+            BankPart::CpuHeartbeat => layer
+                .cpu
+                .as_ref()
+                .ok_or("CPU channel not allocated")?
+                .heartbeat(),
             BankPart::Step => self.device_step.as_ref().unwrap_or(&self.step),
             BankPart::Heartbeat => &self.heartbeat,
             BankPart::SlotMap => &layer.slot_map,
@@ -425,26 +531,32 @@ impl BankTensors {
             BankPart::Commits => &layer.commits,
             BankPart::Control => &layer.control,
             BankPart::Placement => &layer.placement,
-            BankPart::Ring { distance } => {
-                &layer.rings[index(distance.wrapping_sub(1), 2)?]
+            BankPart::Ring { distance } => &layer.rings[index(distance.wrapping_sub(1), 2)?],
+            BankPart::Staging { kind } => {
+                &self.device_pools.as_ref().unwrap_or(&self.pools)[layer.pools[index(kind, 3)?]]
             }
-            BankPart::Staging { kind } => &self.device_pools.as_ref().unwrap_or(&self.pools)
-                [layer.pools[index(kind, 3)?]],
             BankPart::Conveyor { kind } => {
-                let conveyors = if self.device_pools.is_some() { &self.device_conveyors }
-                    else { &self.conveyors };
+                let conveyors = if self.device_pools.is_some() {
+                    &self.device_conveyors
+                } else {
+                    &self.conveyors
+                };
                 &conveyors[layer.pools[index(kind, 3)?]]
             }
             BankPart::Scratch { kind } => &self.scratch[layer.scratch[index(kind, 3)?]],
             BankPart::ScratchControl => &layer.scratch_control,
             BankPart::ScratchFlags => &self.scratch_flags,
             BankPart::ScratchList { round, kind } => {
-                let lists = if self.device_pools.is_some() { &self.device_scratch_lists }
-                    else { &self.scratch_lists };
+                let lists = if self.device_pools.is_some() {
+                    &self.device_scratch_lists
+                } else {
+                    &self.scratch_lists
+                };
                 &lists[index(round, lists.len())?][index(kind, 3)?]
             }
-            BankPart::CopyList { kind } => &self.device_copy_lists.as_ref()
-                .unwrap_or(&self.copy_lists)[index(kind, 3)?],
+            BankPart::CopyList { kind } => {
+                &self.device_copy_lists.as_ref().unwrap_or(&self.copy_lists)[index(kind, 3)?]
+            }
             BankPart::SeedList => self.device_seed_list.as_ref().unwrap_or(&self.seed_list),
         })
     }

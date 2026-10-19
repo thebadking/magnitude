@@ -52,7 +52,7 @@ pub(super) struct UntunedEntries<'a> {
 }
 
 impl<'a> UntunedEntries<'a> {
-    fn add<E: Entry>(
+    pub(super) fn add<E: Entry>(
         &mut self,
         device: &'a Device,
         entry: BoundEntry<E>,
@@ -292,7 +292,11 @@ fn domain_statics(
     // A value the engine fixes for a declared parameter (one only a single
     // value of applies at these bindings) holds it at that value.
     for (name, value) in values {
-        if implementation.params.iter().any(|parameter| parameter.name == *name) {
+        if implementation
+            .params
+            .iter()
+            .any(|parameter| parameter.name == *name)
+        {
             specialization = specialization.with_param(*name, *value);
         }
     }
@@ -479,15 +483,39 @@ impl<'a> Specializer<'a> {
                 let mut pinned = resident
                     .params()
                     .iter()
-                    .fold(fixed, |pinned, (name, value)| pinned.with_param(name.clone(), *value));
+                    .fold(fixed, |pinned, (name, value)| {
+                        pinned.with_param(name.clone(), *value)
+                    });
                 for ((launch, name), value) in resident.launch_params() {
-                    pinned = pinned.with_launch_param(*launch, name.clone(), *value);
+                    if *launch < implementation.launches.len() {
+                        pinned = pinned.with_launch_param(*launch, name.clone(), *value);
+                    }
                 }
                 pinned
             }
             (Mode::Count | Mode::List(_), _) => fixed,
         };
         self.form(entry, bindings, &specialization)
+    }
+
+    pub fn pinned_with_default<E: Entry>(
+        &mut self,
+        bindings: &str,
+        values: &[(&str, u64)],
+        entry: BoundEntry<E>,
+        resident: Option<&NativeSpecialization>,
+    ) -> Result<Option<NativeKernel<E>>, CatalogFailure> {
+        let implementation = self.implementation::<E>(bindings)?;
+        let fixed = domain_statics(&implementation, E::NAME, bindings, values)?;
+        if let Mode::CountUntuned(device, untuned) = &mut self.mode {
+            let default = entry
+                .default_specialization(device, &fixed)
+                .map_err(|e| failure(E::NAME, bindings, e.to_string()))?
+                .ok_or_else(|| failure(E::NAME, bindings, "canonical companion absent".into()))?;
+            untuned.add(*device, entry, bindings, default);
+            return Ok(None);
+        }
+        self.pinned(bindings, values, entry, resident)
     }
 
     /// Prepare an entry through its tuning case: static values from the
@@ -585,8 +613,8 @@ mod tests {
                 ("S", 256),
                 ("SN", 1),
             ]
-                .map(|(name, value)| (name.to_owned(), value))
-                .to_vec()
+            .map(|(name, value)| (name.to_owned(), value))
+            .to_vec()
         );
         assert!(
             domain_statics(

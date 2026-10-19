@@ -19,6 +19,31 @@ const BACKENDS: [BackendName; 4] = [
 /// stale; its assets are exempt from `tree_parity` alike.
 const ENTRY_EXCEPTIONS: &[(&str, &[BackendName], &str)] = &[
     (
+        "routed_gate_up_cpu",
+        &[BackendName::Cuda],
+        "one-row GPU expansion skips a CPU-served choice",
+    ),
+    (
+        "routed_output_cpu",
+        &[BackendName::Cuda],
+        "one-row GPU fold consumes a CPU contribution in its original slot",
+    ),
+    (
+        "routed_bank_fill_cpu",
+        &[BackendName::Cuda],
+        "CPU-served choices bind no GPU record",
+    ),
+    (
+        "routed_cpu_try",
+        &[BackendName::Cuda],
+        "conditional one-miss CPU activation publication",
+    ),
+    (
+        "routed_cpu_expert",
+        &[BackendName::Cpu],
+        "one retained CPU expert's BF16-published contribution; GPU routing, weighting and residual joins remain on their owner",
+    ),
+    (
         "routed_cpu_exchange",
         &[BackendName::Cuda],
         "one-row BF16 CPU expert activation/contribution publication on CUDA mapped host memory; other backends have no selective CPU dispatcher",
@@ -112,6 +137,51 @@ const ENTRY_EXCEPTIONS: &[(&str, &[BackendName], &str)] = &[
 /// including one now on every backend, fails the build so this list cannot go
 /// stale.
 const TREE_EXCEPTIONS: &[(&str, &[BackendName], &str)] = &[
+    (
+        "lib/routed/gate_up_body",
+        &[BackendName::Cuda],
+        "CUDA entry body shared by ordinary and CPU-served slot bindings",
+    ),
+    (
+        "lib/routed/output_body",
+        &[BackendName::Cuda],
+        "CUDA entry body preserving the ordinary slot-order fold",
+    ),
+    (
+        "lib/routed/output_gathered_body",
+        &[BackendName::Cuda],
+        "CUDA gathered output body with generated arguments in entry scope",
+    ),
+    (
+        "lib/streaming/bank_fill_body",
+        &[BackendName::Cuda],
+        "CUDA bank conversion body shared across routed entry bindings",
+    ),
+    (
+        "lib/streaming/cpu_exchange_body",
+        &[BackendName::Cuda],
+        "CUDA exchange body shared across unconditional and one-miss entries",
+    ),
+    (
+        "lib/routed/gate_up",
+        &[BackendName::Cuda],
+        "shared CUDA expansion for ordinary and CPU-served-slot entry bindings",
+    ),
+    (
+        "lib/routed/output",
+        &[BackendName::Cuda],
+        "shared CUDA slot-order fold for ordinary and CPU-served-slot entry bindings",
+    ),
+    (
+        "lib/streaming/bank_fill",
+        &[BackendName::Cuda],
+        "shared CUDA bank conversion for ordinary and CPU-served-slot entry bindings",
+    ),
+    (
+        "lib/streaming/cpu_exchange",
+        &[BackendName::Cuda],
+        "shared CUDA activation exchange and conditional one-miss binding",
+    ),
     (
         "lib/attention/inputs",
         &[BackendName::Cuda],
@@ -613,7 +683,9 @@ fn repack_bindings(lib: &Path) -> Vec<String> {
         let text = read(binding);
         for member in &members {
             if !text.contains(&format!(" {member}(")) {
-                violations.push(format!("metal/lib/{binding} does not define {member}, which the repack templates read"));
+                violations.push(format!(
+                    "metal/lib/{binding} does not define {member}, which the repack templates read"
+                ));
             }
         }
     }

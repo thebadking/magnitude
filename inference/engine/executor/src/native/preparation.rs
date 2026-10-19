@@ -87,6 +87,7 @@ pub(super) fn separates_packed_attention_rows(
 /// retained for warm calls; this type has no API capable of preparing again.
 #[derive(Debug)]
 pub(super) struct NativePreparationCache {
+    pub(super) cpu_experts: Option<std::sync::Arc<crate::CpuExpertPrograms>>,
     pub(super) owner: Tensor,
     pub(super) import: ImportKernels,
     pub(super) glue: GlueKernels,
@@ -113,6 +114,25 @@ pub(super) struct PreparationInputs<'a> {
     pub room: Option<super::tuning::TuningRoom>,
     pub selection_limits: crate::ResourceLimits,
     pub graph_demand: GraphInvocationDemand,
+}
+
+fn cpu_failure(outcome: String) -> CatalogFailure {
+    CatalogFailure::Preparation {
+        entry: "routed_cpu_expert",
+        bindings: "CPU expert companion".into(),
+        outcome,
+    }
+}
+
+fn cpu_context(
+    load: &ModelLoadPlan,
+    cache: Option<&crate::KernelCache>,
+) -> Result<Option<crate::streaming::cpu_programs::CpuExpertProgramContext>, CatalogFailure> {
+    load.expert_bank()
+        .and_then(|bank| bank.cpu.clone())
+        .map(|plan| crate::streaming::cpu_programs::CpuExpertProgramContext::open(plan, cache))
+        .transpose()
+        .map_err(cpu_failure)
 }
 
 /// Prepare one entry that has no tuning case. Evaluates to `Option`: `None`
@@ -190,6 +210,10 @@ impl NativePreparationCache {
             graph_demand,
         } = inputs;
         let recipe_states = ReadoutRecipeStates::default();
+        let cpu_experts = cpu_context(load, tuning.cache)?
+            .map(|context| context.form())
+            .transpose()
+            .map_err(cpu_failure)?;
         let mut spec = Specializer::new(device);
         let import = imports(&mut spec, plan)?;
         let owner = Tensor::zeros(device, Element::u32(), &[1]).map_err(|error| {
@@ -256,6 +280,7 @@ impl NativePreparationCache {
             )
         };
         Ok(Self {
+            cpu_experts,
             readout_choices,
             owner,
             import,
@@ -294,6 +319,9 @@ impl NativePreparationCache {
             graph_demand,
         } = inputs;
         let recipe_states = ReadoutRecipeStates::default();
+        // Opening a companion device forms nothing. Its exact programs are
+        // mandatory formations inside the same census/first-load allowance.
+        let cpu = cpu_context(load, tuning.cache)?;
         // The search imports the weights its units measure through the
         // import kernels.
         let import = imports(&mut Specializer::new(device), plan)?;
@@ -313,7 +341,7 @@ impl NativePreparationCache {
         // the mandatory phase forms them with the units' canonical
         // programs, so a load after the search forms nothing the search
         // did not.
-        let (counted, untuned) = {
+        let (counted, mut untuned) = {
             let mut count = Preparation::new(
                 plan,
                 tuning.definition,
@@ -338,6 +366,32 @@ impl NativePreparationCache {
             let Preparation { spec, tuning, .. } = count;
             (tuning.into_tuner(), spec.into_untuned())
         };
+        if let Some(cpu) = &cpu {
+            use crate::streaming::cpu_programs::CpuExpertProgramContext;
+            for binding in &cpu.plan.bindings {
+                for entry in CpuExpertProgramContext::imports(binding) {
+                    let specialization = cpu
+                        .specialization(&entry, seismic::NativeSpecialization::new())
+                        .map_err(cpu_failure)?;
+                    untuned.add(&cpu.device, entry, "CPU expert import", specialization);
+                }
+                let entry = CpuExpertProgramContext::contribution(binding);
+                let specialization = cpu
+                    .specialization(
+                        &entry,
+                        seismic::NativeSpecialization::new()
+                            .with_static("H", binding.hidden())
+                            .with_static("F", binding.features()),
+                    )
+                    .map_err(cpu_failure)?;
+                untuned.add(
+                    &cpu.device,
+                    entry,
+                    "CPU expert contribution",
+                    specialization,
+                );
+            }
+        }
         let censused = {
             let mut census = Preparation::new(
                 plan,
@@ -2503,6 +2557,11 @@ impl<'a> Preparation<'a> {
         b: RoutedBinding,
         scopes: Vec<WeightScope>,
     ) -> Result<Option<RoutedKernels>, CatalogFailure> {
+        let cpu_join = if b.bank.is_some_and(|bank| bank.cpu) {
+            self.tuning.model().join(&scopes).map_err(cpu_failure)?
+        } else {
+            (1, 0)
+        };
         let shape = RoutedShape {
             hidden: b.hidden,
             experts: b.experts,
@@ -2566,6 +2625,7 @@ impl<'a> Preparation<'a> {
                         activation: b.activation,
                         shape,
                         scopes: scopes.clone(),
+                        cpu_companion: false,
                     },
                 )?;
                 route
@@ -2581,6 +2641,7 @@ impl<'a> Preparation<'a> {
                 activation: b.activation,
                 shape,
                 scopes: scopes.clone(),
+                cpu_companion: b.bank.is_some_and(|bank| bank.cpu),
             },
         )?;
         let experts = self.spec.tuned(
@@ -2603,6 +2664,7 @@ impl<'a> Preparation<'a> {
                     activation: b.activation,
                     shape,
                     scopes: scopes.clone(),
+                    cpu_companion: b.bank.is_some_and(|bank| bank.cpu),
                 },
             )?
         } else {
@@ -2631,7 +2693,15 @@ impl<'a> Preparation<'a> {
         let streamed = match b.bank {
             None => Some(None),
             Some(bank) => self
-                .streamed_routed(&b, bank, decode.as_ref(), input_form, streamed_choices)?
+                .streamed_routed(
+                    &b,
+                    bank,
+                    decode.as_ref(),
+                    input_form,
+                    streamed_choices,
+                    output.as_ref(),
+                    cpu_join,
+                )?
                 .map(Some),
         };
         Ok(
@@ -2668,6 +2738,8 @@ impl<'a> Preparation<'a> {
         decode: Option<&RoutedDecodeKernels>,
         (parts, norm): (u64, u64),
         choices: Option<NativeKernel<routed_gate_up::Entry>>,
+        output: Option<&NativeKernel<routed_output::Entry>>,
+        join: (u64, u64),
     ) -> Result<Option<StreamedRoutedKernels>, CatalogFailure> {
         let bindings = format!("{b:?}");
         let shared_route = match decode {
@@ -2708,6 +2780,84 @@ impl<'a> Preparation<'a> {
             )?
         };
         let residents = [b.expert_gate, b.expert_up, b.expert_down];
+        let cpu = if bank.cpu {
+            use magnitude_kernels::{
+                routed_bank_fill_cpu, routed_cpu_try, routed_gate_up_cpu, routed_output_cpu,
+            };
+            if b.activation != seismic::Element::bf16() {
+                return Err(cpu_failure("CPU dispatch requires BF16 activations".into()));
+            }
+            let exchange = spec.fixed(
+                &bindings,
+                &[("H", b.hidden), ("K", b.selected)],
+                routed_cpu_try::native_entry(),
+            )?;
+            let fill = spec.fixed(
+                &bindings,
+                &[
+                    ("H", b.hidden),
+                    ("K", b.selected),
+                    ("F", b.features),
+                    ("T", bank.staging_records),
+                    ("C", control),
+                    (
+                        "P",
+                        crate::operators::routed::fused_graph::DECODE_ROWS * b.selected,
+                    ),
+                ],
+                routed_bank_fill_cpu::native_entry_with(routed_bank_fill_cpu::Elements {
+                    SG: bank.sources[0],
+                    SU: bank.sources[1],
+                    SD: bank.sources[2],
+                    EGW: b.expert_gate,
+                    EUW: b.expert_up,
+                    EDW: b.expert_down,
+                }),
+            )?;
+            let cpu_choices = spec.pinned_with_default(
+                &bindings,
+                &[("H", b.hidden), ("K", b.selected), ("F", b.features)],
+                routed_gate_up_cpu::native_entry_with(routed_gate_up_cpu::Elements {
+                    EGW: b.expert_gate,
+                    EUW: b.expert_up,
+                    A: b.activation,
+                }),
+                choices.as_ref().map(|kernel| kernel.specialization()),
+            )?;
+            // The output inherits exactly the parent output's static join and
+            // its one-row launch's selected arithmetic; no CPU tuning clock.
+            let output_statics = [
+                ("H", b.hidden),
+                ("K", b.selected),
+                ("F", b.features),
+                ("S", b.shared),
+                ("SN", join.0),
+                ("IN", join.1),
+            ];
+            let cpu_output = spec.pinned_with_default(
+                &bindings,
+                &output_statics,
+                routed_output_cpu::native_entry_with(routed_output_cpu::Elements {
+                    EDW: b.expert_down,
+                    SDW: b.shared_down,
+                    A: b.activation,
+                }),
+                output.map(|kernel| kernel.specialization()),
+            )?;
+            match (exchange, fill, cpu_choices, cpu_output) {
+                (Some(exchange), Some(fill), Some(choices), Some(output)) => {
+                    Some(Some(super::target::CpuRoutedKernels {
+                        exchange,
+                        fill,
+                        choices,
+                        output,
+                    }))
+                }
+                _ => None,
+            }
+        } else {
+            Some(None)
+        };
         let fill = spec.fixed(
             &bindings,
             &[
@@ -2788,7 +2938,8 @@ impl<'a> Preparation<'a> {
                         Some(seed_commit),
                         Some(convert_wide),
                     ),
-                ) => Some(StreamedRoutedKernels {
+                ) => cpu.map(|cpu| StreamedRoutedKernels {
+                    cpu,
                     choices,
                     step,
                     route,

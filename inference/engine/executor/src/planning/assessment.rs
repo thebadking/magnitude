@@ -38,6 +38,9 @@ pub struct AssessmentMemoryTerms {
     /// Host-resident gathered tables (model-family plan §3.7): claims in the
     /// system-RAM domain, never device weights.
     pub host_table_bytes: u64,
+    /// Auxiliary CPU lane, invocation scratch and startup program storage,
+    /// shared across physical GPU owners. Optional expert payloads are surplus.
+    pub cpu_expert_host_bytes: u64,
     /// Host-shared stored tables and expert-streaming control/staging
     /// (`ModelLoadPlan::shared_weight_bytes`), part of `target_weights`.
     pub shared_weight_bytes: u64,
@@ -110,6 +113,7 @@ pub struct AssessmentMemoryCharge {
     /// Host-resident tables: system RAM, which is the allocation domain of a
     /// unified-memory device and the staging domain of a dedicated one.
     pub host_table_bytes: u64,
+    pub cpu_expert_host_bytes: u64,
     /// Host-shared model bytes, part of `allocation_bytes` and
     /// `serving_bytes`: held in the domain the device's host-shared storage
     /// consumes (`platform::shared_role`), host RAM on a dedicated device
@@ -199,7 +203,8 @@ impl AssessmentGraphResourceBounds {
             target_graph.storage,
             crate::programs::native_target_graph::target_runs_per_step(&definition.decoder),
             slots.target,
-        )?.with_upload_regions(target_uploads)?;
+        )?
+        .with_upload_regions(target_uploads)?;
         let readout = NativeGraphCharge::from_checked(
             crate::programs::graph::readout::checked_readout_family_storage(
                 backend,
@@ -422,10 +427,18 @@ impl AssessmentHeaderBounds {
                 .and_then(|bytes| bytes.checked_add(graph.recorded_graph_bytes))
                 .ok_or("assessment prepared resource bound overflow")?,
             startup_additional_bytes: self.startup_additional_bytes,
-            shared_upload_bytes: super::resources::graph_shared_upload_bytes(&[
-                Some(&graph.target), Some(&graph.readout), graph.head.as_ref(),
-                graph.vision.as_ref(), Some(&graph.state),
-            ].into_iter().flatten().collect::<Vec<_>>())?,
+            shared_upload_bytes: super::resources::graph_shared_upload_bytes(
+                &[
+                    Some(&graph.target),
+                    Some(&graph.readout),
+                    graph.head.as_ref(),
+                    graph.vision.as_ref(),
+                    Some(&graph.state),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>(),
+            )?,
             staging_upload_bytes: self.staging_upload_bytes,
             // The target's sealed plans, the prepared graphs that hold
             // them and the family's constant values, and the state copy
@@ -489,6 +502,20 @@ impl AssessmentMemoryTerms {
         }
         .storage_total()
         .map_err(|error| error.to_string())?;
+        let cpu_expert_host_bytes = load
+            .expert_bank()
+            .and_then(|bank| bank.cpu.as_deref())
+            .map(|plan| {
+                // Both physical owners can prepare a CPU program group at
+                // startup; serving retains one shared group and serial lane.
+                let workspace = plan.workspace_bytes()?;
+                plan.program_bytes()?
+                    .checked_mul(2)
+                    .and_then(|bytes| bytes.checked_add(workspace))
+                    .ok_or_else(|| "CPU expert host charge overflow".to_owned())
+            })
+            .transpose()?
+            .unwrap_or(0);
         Ok(Self {
             target_weights: weights[0],
             head_weights: weights[1],
@@ -499,6 +526,7 @@ impl AssessmentMemoryTerms {
                 .map_err(|_| "assessment bank count exceeds u64")?,
             fit_depth: definition.decoder.context_limit.min(100_000),
             host_table_bytes: load.host_table_bytes()?,
+            cpu_expert_host_bytes,
             shared_weight_bytes: load.shared_weight_bytes()?,
         })
     }
@@ -565,6 +593,7 @@ impl AssessmentMemoryTerms {
             allocation_bytes,
             staging_bytes: bounds.staging_upload_bytes,
             host_table_bytes: self.host_table_bytes,
+            cpu_expert_host_bytes: self.cpu_expert_host_bytes,
             shared_weight_bytes: self.shared_weight_bytes,
         })
     }
@@ -572,15 +601,19 @@ impl AssessmentMemoryTerms {
 
 impl AssessmentMemoryCharge {
     pub fn shared_bytes(&self) -> Result<u64, String> {
-        self.shared_weight_bytes.checked_add(self.bounds.shared_upload_bytes)
+        self.shared_weight_bytes
+            .checked_add(self.bounds.shared_upload_bytes)
             .ok_or_else(|| "shared assessment bytes overflow".to_owned())
     }
 
     pub fn device_allocation_bytes(&self, shared_in_host: bool) -> Result<u64, String> {
         if shared_in_host {
-            self.allocation_bytes.checked_sub(self.shared_bytes()?)
+            self.allocation_bytes
+                .checked_sub(self.shared_bytes()?)
                 .ok_or_else(|| "shared storage exceeds assessment charge".to_owned())
-        } else { Ok(self.allocation_bytes) }
+        } else {
+            Ok(self.allocation_bytes)
+        }
     }
 
     /// Compare the charge with every domain's stable fit capacity
@@ -616,6 +649,7 @@ impl AssessmentMemoryCharge {
         let with_tables = |bytes: u64| {
             bytes
                 .checked_add(self.host_table_bytes)
+                .and_then(|bytes| bytes.checked_add(self.cpu_expert_host_bytes))
                 .and_then(|bytes| bytes.checked_add(self.bounds.sealed_graph_host_bytes.at_most))
                 .ok_or_else(|| "domain charge with host tables overflows".to_owned())
         };
@@ -701,7 +735,14 @@ mod tests {
             BackendName::Cpu,
             &[("DW", Element::f32()), ("A", Element::f32())],
             "down_weight",
-            &[("M", 4), ("O", 2), ("H", 16), ("F", 32), ("DS", 0), ("DB", 0)],
+            &[
+                ("M", 4),
+                ("O", 2),
+                ("H", 16),
+                ("F", 32),
+                ("DS", 0),
+                ("DB", 0),
+            ],
         )
         .unwrap();
         assert_eq!(
@@ -715,7 +756,14 @@ mod tests {
         let results = seismic::generated::checked_native_tensor_results::<dense_output::Entry>(
             BackendName::Cpu,
             &[("DW", Element::f32()), ("A", Element::f32())],
-            &[("M", 4), ("O", 2), ("H", 16), ("F", 32), ("DS", 0), ("DB", 0)],
+            &[
+                ("M", 4),
+                ("O", 2),
+                ("H", 16),
+                ("F", 32),
+                ("DS", 0),
+                ("DB", 0),
+            ],
         )
         .unwrap();
         assert_eq!(
@@ -729,7 +777,14 @@ mod tests {
         let call = seismic::generated::checked_native_graph_call::<dense_output::Entry>(
             BackendName::Cpu,
             &[("DW", Element::f32()), ("A", Element::f32())],
-            &[("M", 4), ("O", 2), ("H", 16), ("F", 32), ("DS", 0), ("DB", 0)],
+            &[
+                ("M", 4),
+                ("O", 2),
+                ("H", 16),
+                ("F", 32),
+                ("DS", 0),
+                ("DB", 0),
+            ],
         )
         .unwrap();
         let seismic::generated::CheckedNativeGraphCall::Checked {
@@ -2305,6 +2360,7 @@ mod tests {
             allocation_bytes,
             staging_bytes,
             host_table_bytes: 0,
+            cpu_expert_host_bytes: 0,
             shared_weight_bytes: 0,
         }
     }
@@ -2320,6 +2376,7 @@ mod tests {
             recurrent_banks: 3,
             fit_depth: 10,
             host_table_bytes: 30,
+            cpu_expert_host_bytes: 0,
             shared_weight_bytes: 0,
         };
         assert_eq!(terms.exact_resident_bytes(50).unwrap(), 100 + 20 + 5 + 50);

@@ -35,9 +35,14 @@ pub mod platform;
 mod residency;
 mod resident_weights;
 mod streaming;
+pub use planning::{CpuExpertBinding, CpuExpertPlan, requested_cpu_expert_bytes};
 pub use streaming::cache::HostExpertCache;
-pub use streaming::cpu_cache::{CpuExpertCache, CpuExpertCacheSnapshot, CpuExpertLayer, CpuExpertLayerSpec, CpuExpertLease};
+pub use streaming::cpu_cache::{
+    CpuExpertCache, CpuExpertCacheSnapshot, CpuExpertLayer, CpuExpertLayerSpec, CpuExpertLease,
+};
 pub use streaming::cpu_exchange::{CpuExpertExchange, CpuExpertRequest};
+pub use streaming::cpu_programs::CpuExpertPrograms;
+pub use streaming::cpu_service::CpuExpertService;
 mod resources;
 
 pub use completion::{Completed, Completion, CompletionWake};
@@ -46,11 +51,11 @@ pub use device_resources::{
     ResourceError, WeakFeatureRef,
 };
 pub use domain::{
-    ClaimRefusal, DeviceHeap, DomainError, DomainRequirements, DomainReservation, ExecutorDomain,
-    DeviceMemoryCharge, HeadFlight, MemoryChargeReconciliation, NativeFamily, OpenRequirements,
-    PendingOperationOutcome, PhysicalDecision, PrimingCompletionFlight, ProgramFamily,
-    ReservedResources, ResumeState, StateBindings, SubmitFailure, TargetContinuation, TargetFlight,
-    TargetHostTiming, VisionFlight, require_normal,
+    ClaimRefusal, DeviceHeap, DeviceMemoryCharge, DomainError, DomainRequirements,
+    DomainReservation, ExecutorDomain, HeadFlight, MemoryChargeReconciliation, NativeFamily,
+    OpenRequirements, PendingOperationOutcome, PhysicalDecision, PrimingCompletionFlight,
+    ProgramFamily, ReservedResources, ResumeState, StateBindings, SubmitFailure,
+    TargetContinuation, TargetFlight, TargetHostTiming, VisionFlight, require_normal,
 };
 pub use error::{
     CapacityError, DeviceError, InvariantError, PlanError, ResourceKind, SubmitError,
@@ -101,20 +106,21 @@ pub use planning::{
     ArtifactComponent, ArtifactComponentKind, AssessmentFit, AssessmentFitVerdict,
     AssessmentGraphResourceBounds, AssessmentHeaderBounds, AssessmentMemoryBounds,
     AssessmentMemoryCharge, AssessmentMemoryTerms, AttentionBinding, AttentionShape, BackendPlan,
-    CapabilityPlan, ComponentPlan, ComponentSelection, DecoderPlacement, DecoderRange, DecoderRangeLoadPlan, PlacedStateLayout, DenseBinding, DenseBranchBinding,
-    DenseScales, Dflash2Binding, DraftBlockBinding, DraftProgramPlan, EmbeddingBinding,
-    ExecutionPlan, ExecutionPlanDraft, ExecutionPlanner, ExpertBankPlan, FeaturesBinding, FeedForwardProgramSlot,
-    GraphSlots, HeadBinding, HeadProgramPlan, HostTablePlan, ImportProgramSlot,
-    MAX_DRAFT_PROPOSALS, MAX_IMAGE_CELLS, MarkovBinding, MixerProgramSlot, ModelLoadPlan,
-    NGramBinding, NativeGraphCharge, ParallelBinding, PerLayerBinding, PerLayerEntryBinding,
-    PlannedDevice, PlannedMethod, PrefillGroup, ProgramPlan, ReadoutBinding, ReadoutClassChoice, ReadoutHead,
-    RecurrentBinding, ResolvedPolicy, ResourceBytes, ResourceCapacity, ResourceLimits,
+    CapabilityPlan, ComponentPlan, ComponentSelection, DecoderPlacement, DecoderRange,
+    DecoderRangeLoadPlan, DenseBinding, DenseBranchBinding, DenseScales, Dflash2Binding,
+    DraftBlockBinding, DraftProgramPlan, EmbeddingBinding, ExecutionPlan, ExecutionPlanDraft,
+    ExecutionPlanner, ExpertBankPlan, FeaturesBinding, FeedForwardProgramSlot, GraphSlots,
+    HeadBinding, HeadProgramPlan, HostTablePlan, ImportProgramSlot, MAX_DRAFT_PROPOSALS,
+    MAX_IMAGE_CELLS, MarkovBinding, MixerProgramSlot, ModelLoadPlan, NGramBinding,
+    NativeGraphCharge, ParallelBinding, PerLayerBinding, PerLayerEntryBinding, PlacedStateLayout,
+    PlannedDevice, PlannedMethod, PrefillGroup, ProgramPlan, ReadoutBinding, ReadoutClassChoice,
+    ReadoutHead, RecurrentBinding, ResolvedPolicy, ResourceBytes, ResourceCapacity, ResourceLimits,
     ResourcePlan, ResourcePlanner, RoutedBank, RoutedBinding, ScalableWeight, SealedGraphHostBytes,
-    SelectionBinding, SelectionShape, SelectorBinding, SharedHeadProgramPlan, StartupSlots, StateCapacityPlan, StateProgramPlan,
-    StateResourcePlan, StateStorePlan, SublayerTail, TapProgramPlan, TargetBlockProgramSlot,
-    TargetProgramPlan, TensorOperations, VisionProgramPlan, WeightPlan, WeightScalePlan,
-    WeightStorageIdentity, draft_ladder, image_cell_limit, resident_element, resident_layout,
-    source_element,
+    SelectionBinding, SelectionShape, SelectorBinding, SharedHeadProgramPlan, StartupSlots,
+    StateCapacityPlan, StateProgramPlan, StateResourcePlan, StateStorePlan, SublayerTail,
+    TapProgramPlan, TargetBlockProgramSlot, TargetProgramPlan, TensorOperations, VisionProgramPlan,
+    WeightPlan, WeightScalePlan, WeightStorageIdentity, draft_ladder, image_cell_limit,
+    resident_element, resident_layout, source_element,
 };
 
 /// Whether this executor runs `definition` with its draft head selected.

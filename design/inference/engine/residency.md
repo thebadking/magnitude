@@ -21,7 +21,14 @@ applies_to:
 
 The execution plan identifies every source tensor, artifact component, resident representation,
 and byte charge before a device is opened. ResidencyStore is the sole importer and cache type for
-device weights. Its key contains artifact identity, tensor name, and resident representation with
+weights on the primary execution device. An optional, separately planned CPU
+expert service owns the target's auxiliary CPU records across physical GPU
+owners. It registers the full immutable source inventory before serving,
+imports only complete triples through the registered exact conversions, and
+retains read leases through physical CPU completion. Optional demand retention
+reuses records the ordinary GPU path already fetched; it authorizes no extra
+source reads. Its key includes source ranges, representations and geometry.
+The primary residency key contains artifact identity, tensor name, and resident representation with
 its layout, so tied weights share physical storage while distinct components, representations, and
 layouts remain separate. The layout is the one fastest for the opened backend's kernels and may
 differ by backend: one map picks the representation from the source format and the layout from

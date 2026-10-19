@@ -3,12 +3,14 @@
 //! fetched from the model file when routed (specs/26-10-11/expert-streaming.md).
 
 pub(crate) mod bank;
-pub(crate) mod layout;
-pub(crate) mod runtime;
-pub(crate) mod source;
 pub(crate) mod cache;
 pub(crate) mod cpu_cache;
 pub(crate) mod cpu_exchange;
+pub(crate) mod cpu_programs;
+pub(crate) mod cpu_service;
+pub(crate) mod layout;
+pub(crate) mod runtime;
+pub(crate) mod source;
 pub(crate) mod words;
 
 pub(crate) mod shared_bank;

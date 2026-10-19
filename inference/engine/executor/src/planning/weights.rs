@@ -612,6 +612,7 @@ pub struct RoutedBinding {
 /// A streamed routed layer's bank as its entries see it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RoutedBank {
+    pub cpu: bool,
     pub slots: u64,
     /// The stored elements of the gate, up and down records.
     pub sources: [Element; 3],
@@ -778,6 +779,7 @@ pub const BANK_KINDS: [WeightKind; 3] = [
 /// A streamed load's banks (spec 4.1, 4.3, 6.1).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExpertBankPlan {
+    pub cpu: Option<std::sync::Arc<super::CpuExpertPlan>>,
     /// Immutable physical placement of the compatible shared cache. None
     /// denotes the per-layer comparison control, never an implicit fallback.
     pub(crate) shared: Option<crate::streaming::shared_bank::SharedBankPlan>,
@@ -995,14 +997,19 @@ impl ExpertBankPlan {
         else {
             return self.held_conveyor();
         };
-        let slots = self.layers[group.layers[0]].tensors.map(|tensor| tensor.slot_bytes);
+        let slots = self.layers[group.layers[0]]
+            .tensors
+            .map(|tensor| tensor.slot_bytes);
         let lent = (0..3)
             .map(|kind| ends[kind].div_ceil(slots[kind]))
             .max()
             .unwrap_or(0);
-        let minimum = (crate::operators::routed::fused_graph::DECODE_ROWS * self.selected)
-            .min(self.experts);
-        if lent.checked_add(minimum).is_none_or(|needed| needed > group.records) {
+        let minimum =
+            (crate::operators::routed::fused_graph::DECODE_ROWS * self.selected).min(self.experts);
+        if lent
+            .checked_add(minimum)
+            .is_none_or(|needed| needed > group.records)
+        {
             return self.held_conveyor();
         }
         let first = group.records - lent;
@@ -1107,14 +1114,26 @@ impl ExpertBankPlan {
         Ok(directory)
     }
 
-
     /// Words and staging that the host accesses while device work runs.
     pub fn shared_bytes(&self) -> Result<u64, String> {
+        let exchange = if self.cpu.is_some() {
+            self.layers.iter().try_fold(0_u64, |sum, layer| {
+                let bytes = super::CpuExpertBinding::of(self, layer)
+                    .map(|binding| binding.exchange_bytes())
+                    .transpose()?
+                    .unwrap_or(0);
+                sum.checked_add(bytes)
+                    .ok_or_else(|| "CPU channel charge overflow".to_owned())
+            })?
+        } else {
+            0
+        };
         self.directory_bytes()?
+            .checked_add(exchange)
+            .ok_or("CPU channel charge overflow")?
             .checked_add(self.staging_bytes()?)
             .ok_or_else(|| "shared streaming bytes overflow".to_owned())
     }
-
 
     /// Scratch and shared control/staging held beside the resident banks.
     pub fn charged_bytes(&self) -> Result<u64, String> {
@@ -1125,13 +1144,18 @@ impl ExpertBankPlan {
             .ok_or_else(|| "streamed bytes overflow".to_owned())
     }
 
-
     /// Physical record extent of the bank a layer binds. Shared groups
     /// retain fixed placement for the entire load, including queued steps.
     pub(crate) fn records(&self, scope: WeightScope) -> Result<u64, String> {
-        let position = self.layers.iter().position(|l| l.scope == scope)
+        let position = self
+            .layers
+            .iter()
+            .position(|l| l.scope == scope)
             .ok_or("scope is outside the expert bank")?;
-        let shared = self.shared.as_ref().ok_or("a streamed load without its shared bank plan")?;
+        let shared = self
+            .shared
+            .as_ref()
+            .ok_or("a streamed load without its shared bank plan")?;
         Ok(shared.groups[shared.group_of_layer[position]].records)
     }
 
@@ -1153,6 +1177,7 @@ impl ExpertBankPlan {
     pub fn routed(&self, scope: WeightScope) -> Option<RoutedBank> {
         let layer = self.layers.iter().find(|layer| layer.scope == scope)?;
         Some(RoutedBank {
+            cpu: self.cpu.is_some() && super::CpuExpertBinding::of(self, layer).is_some(),
             slots: self.records(scope).ok()?,
             sources: layer.tensors.map(|tensor| self.pools[tensor.pool].source),
             staging_records: self.graph_staging_records(),
@@ -1180,31 +1205,44 @@ impl ExpertBankPlan {
     /// releases them, independently of the source encoding.
     pub(crate) fn graph_staging_records(&self) -> u64 {
         if self.device_staging {
-            (2 * self.round_records()).max(
-                crate::operators::routed::fused_graph::DECODE_ROWS * self.selected,
-            )
-        } else { self.staging_records }
+            (2 * self.round_records())
+                .max(crate::operators::routed::fused_graph::DECODE_ROWS * self.selected)
+        } else {
+            self.staging_records
+        }
     }
 
     pub(crate) fn device_staging_arena_bytes(&self, kind: usize) -> Result<u64, String> {
-        if !self.device_staging { return Ok(0); }
-        self.pools.iter().filter(|pool| pool.kind == kind).try_fold(0, |largest, pool| {
-            pool.record_bytes.checked_mul(self.graph_staging_records())
-                .map(|bytes| largest.max(bytes))
-                .ok_or_else(|| "device staging bytes overflow".to_owned())
-        })
+        if !self.device_staging {
+            return Ok(0);
+        }
+        self.pools
+            .iter()
+            .filter(|pool| pool.kind == kind)
+            .try_fold(0, |largest, pool| {
+                pool.record_bytes
+                    .checked_mul(self.graph_staging_records())
+                    .map(|bytes| largest.max(bytes))
+                    .ok_or_else(|| "device staging bytes overflow".to_owned())
+            })
     }
 
     pub(crate) fn device_staging_bytes(&self) -> Result<u64, String> {
         let metadata = if self.device_staging {
-            self.rounds().checked_mul(3).and_then(|rounds| rounds.checked_mul(self.list_words()))
+            self.rounds()
+                .checked_mul(3)
+                .and_then(|rounds| rounds.checked_mul(self.list_words()))
                 .and_then(|words| words.checked_add(4 * self.copy_list_words() + 1))
                 .and_then(|words| words.checked_mul(4))
                 .ok_or("device source metadata bytes overflow")?
-        } else { 0 };
-        (0..3).try_fold(metadata, |total, kind| total
-            .checked_add(self.device_staging_arena_bytes(kind)?)
-            .ok_or_else(|| "device staging bytes overflow".to_owned()))
+        } else {
+            0
+        };
+        (0..3).try_fold(metadata, |total, kind| {
+            total
+                .checked_add(self.device_staging_arena_bytes(kind)?)
+                .ok_or_else(|| "device staging bytes overflow".to_owned())
+        })
     }
 
     /// The scratch arena of routed tensor `kind`: every expert of one layer
@@ -1300,21 +1338,18 @@ impl ModelLoadPlan {
             .ok_or_else(|| "shared weight bytes overflow".to_owned())
     }
 
-
     /// A dedicated device's resident banks cannot lend host-visible staging.
     /// Keep a two-round source window rather than pinning a whole layer
     /// per source format in host RAM; completed rounds replenish it.
     pub(crate) fn with_host_expert_staging(mut self, device_staging: bool) -> Result<Self, String> {
         if let Some(bank) = &mut self.bank {
             bank.device_staging = device_staging;
-            bank.conveyor.records = crate::streaming::layout::host_conveyor_records(
-                bank.experts, bank.selected,
-            );
+            bank.conveyor.records =
+                crate::streaming::layout::host_conveyor_records(bank.experts, bank.selected);
             bank.conveyor = bank.held_conveyor()?;
         }
         Ok(self)
     }
-
 
     /// The most of one target weight's import the host holds at once. A
     /// weight uploaded as stored never lies on the host whole: its upload
@@ -1414,8 +1449,13 @@ pub(super) fn weight_bytes_by_component(load: &ModelLoadPlan) -> Result<[u64; 3]
     .enumerate()
     {
         for weight in weights {
-            if load.bank.as_ref().is_some_and(|bank|
-                bank.shared.is_some() && bank.holds(weight.role)) { continue; }
+            if load
+                .bank
+                .as_ref()
+                .is_some_and(|bank| bank.shared.is_some() && bank.holds(weight.role))
+            {
+                continue;
+            }
             let storage = (
                 weight.upload,
                 weight.shape.clone(),
@@ -1441,7 +1481,8 @@ pub(super) fn weight_bytes_by_component(load: &ModelLoadPlan) -> Result<[u64; 3]
     // (spec 6.1: the cap counts every weight the plan charges).
     if let Some(bank) = &load.bank {
         if let Some(shared) = &bank.shared {
-            bytes[0] = bytes[0].checked_add(shared.allocated_bytes)
+            bytes[0] = bytes[0]
+                .checked_add(shared.allocated_bytes)
                 .ok_or("shared bank weight count overflow")?;
         }
         bytes[0] = bytes[0]
@@ -1822,7 +1863,10 @@ impl ModelLoadPlan {
             if !matches!(plan.role.scope, WeightScope::TargetSublayer(_)) {
                 continue;
             }
-            match layers.iter_mut().find(|(scope, _)| *scope == plan.role.scope) {
+            match layers
+                .iter_mut()
+                .find(|(scope, _)| *scope == plan.role.scope)
+            {
                 Some((_, slots)) => slots[kind] = Some(index),
                 None => {
                     let mut slots = [None; 3];
@@ -1838,15 +1882,19 @@ impl ModelLoadPlan {
                     scope,
                     [0, 1, 2].map(|kind| slots[kind]).map(|slot| {
                         slot.ok_or_else(|| {
-                            format!("routed layer {scope:?} lacks separate gate, up and down experts")
+                            format!(
+                                "routed layer {scope:?} lacks separate gate, up and down experts"
+                            )
                         })
                     }),
                 ))
             })
-            .map(|layer: Result<(WeightScope, [Result<usize, String>; 3]), String>| {
-                let (scope, [gate, up, down]) = layer?;
-                Ok((scope, [gate?, up?, down?]))
-            })
+            .map(
+                |layer: Result<(WeightScope, [Result<usize, String>; 3]), String>| {
+                    let (scope, [gate, up, down]) = layer?;
+                    Ok((scope, [gate?, up?, down?]))
+                },
+            )
             .collect()
     }
 
@@ -1897,7 +1945,10 @@ impl ModelLoadPlan {
                     return Err(format!("{:?} is not a stack of expert matrices", plan.role));
                 };
                 if count != experts {
-                    return Err(format!("{:?} stacks {count} experts, not {experts}", plan.role));
+                    return Err(format!(
+                        "{:?} stacks {count} experts, not {experts}",
+                        plan.role
+                    ));
                 }
                 if plan.host_prepared() || plan.scale.is_some() {
                     return Err(format!(
@@ -1916,7 +1967,9 @@ impl ModelLoadPlan {
                 }
                 let slot_bytes = representation_bytes(plan.resident, &[1, rows, columns])?;
                 let pool = match pools.iter().position(|pool| {
-                    pool.kind == kind && pool.source == plan.source && pool.matrix == [rows, columns]
+                    pool.kind == kind
+                        && pool.source == plan.source
+                        && pool.matrix == [rows, columns]
                 }) {
                     Some(pool) => pool,
                     None => {
@@ -1963,6 +2016,7 @@ impl ModelLoadPlan {
             });
         }
         let mut bank = ExpertBankPlan {
+            cpu: None,
             shared: None,
             slots,
             experts,
@@ -1979,6 +2033,7 @@ impl ModelLoadPlan {
                 offsets: Vec::new(),
             },
         };
+        bank.cpu = super::CpuExpertPlan::of(&bank)?.map(std::sync::Arc::new);
         bank.conveyor = bank.held_conveyor()?;
         self.bank = Some(bank);
         Ok(self)
@@ -1987,15 +2042,21 @@ impl ModelLoadPlan {
     /// Stream the routed experts through a shared bank of `slots` records
     /// per layer, grouped by resident encoding. Weight ports keep their
     /// numerical geometry; physical allocation is charged by group.
-    pub(crate) fn with_shared_expert_bank(self, slots: u64, selected: u64)
-        -> Result<Self, String> {
+    pub(crate) fn with_shared_expert_bank(self, slots: u64, selected: u64) -> Result<Self, String> {
         let load = self.with_expert_bank(slots, selected)?;
         let shared = crate::streaming::shared_bank::SharedBankPlan::from_bank(
-            load.bank.as_ref().expect("formed expert bank"))?;
+            load.bank.as_ref().expect("formed expert bank"),
+        )?;
         let bank = load.bank.as_ref().expect("formed expert bank");
         let minimum = crate::operators::routed::fused_graph::DECODE_ROWS
-            .checked_mul(selected).ok_or("route union overflow")?.min(bank.experts);
-        let records = shared.groups.iter().map(|g| g.records.max(minimum)).collect::<Vec<_>>();
+            .checked_mul(selected)
+            .ok_or("route union overflow")?
+            .min(bank.experts);
+        let records = shared
+            .groups
+            .iter()
+            .map(|g| g.records.max(minimum))
+            .collect::<Vec<_>>();
         let shared = shared.with_records(bank, &records)?;
         load.place_shared(shared)
     }
@@ -2003,22 +2064,32 @@ impl ModelLoadPlan {
     /// per-layer slot count only forms source/staging metadata; it determines
     /// neither shared admission nor any shared graph/storage extent.
     #[cfg(test)]
-    pub(crate) fn with_shared_expert_bank_capacity(self, records: &[u64], selected: u64)
-        -> Result<Self, String> {
+    pub(crate) fn with_shared_expert_bank_capacity(
+        self,
+        records: &[u64],
+        selected: u64,
+    ) -> Result<Self, String> {
         let load = self.with_expert_bank(1, selected)?;
         let bank = load.bank.as_ref().expect("formed expert bank");
         let shared = crate::streaming::shared_bank::SharedBankPlan::from_bank(bank)?
             .with_records(bank, records)?;
         load.place_shared(shared)
     }
-    fn place_shared(mut self, shared: crate::streaming::shared_bank::SharedBankPlan)
-        -> Result<Self, String> {
+    fn place_shared(
+        mut self,
+        shared: crate::streaming::shared_bank::SharedBankPlan,
+    ) -> Result<Self, String> {
         let bank = self.bank.as_mut().expect("formed expert bank");
         bank.shared = Some(shared);
         let shared = crate::streaming::shared_bank::SharedBankPlan::admitted(bank)?;
         for weight in &mut self.target {
-            if !bank.holds(weight.role) { continue; }
-            let position = bank.layers.iter().position(|l| l.scope == weight.role.scope)
+            if !bank.holds(weight.role) {
+                continue;
+            }
+            let position = bank
+                .layers
+                .iter()
+                .position(|l| l.scope == weight.role.scope)
                 .expect("banked layer");
             weight.shape[0] = shared.groups[shared.group_of_layer[position]].records;
             weight.resident_bytes = representation_bytes(weight.resident, &weight.shape)?;

@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 
 /// The resident side of a streamed target: every bank starts empty (rule 5).
 pub(crate) struct ResidentBank {
+    pub cpu_experts: Option<Arc<crate::CpuExpertService>>,
     pub host_experts: Option<Arc<crate::HostExpertCache>>,
     pub tensors: BankTensors,
     /// Admitted source/control storage actually held by this opened bank.
@@ -77,8 +78,12 @@ impl ResidentBank {
         sublayers: &ResidentRoles,
         lender: Option<[seismic::Tensor; 3]>,
         host_experts: Option<Arc<crate::HostExpertCache>>,
+        cpu_experts: Option<Arc<crate::CpuExpertService>>,
         checkpoint: &mut dyn FnMut() -> Result<(), crate::ResidencyError>,
     ) -> Result<Self, crate::ResidencyError> {
+        if plan.cpu.is_some() != cpu_experts.is_some() {
+            return Err("CPU expert runtime and immutable bank plan disagree".into());
+        }
         let shared = plan
             .shared
             .as_ref()
@@ -89,6 +94,7 @@ impl ResidentBank {
         let mut paths = Vec::new();
         let mut layers = Vec::with_capacity(plan.layers.len());
         for (layer, bank) in plan.layers.iter().zip(&tensors.layers) {
+            let mut cpu_sources = Vec::new();
             let mut stored = [StoredTensor {
                 file: 0,
                 base: 0,
@@ -107,6 +113,8 @@ impl ResidentBank {
                     return Err(format!("{role:?} is not stored as packed records").into());
                 };
                 let (file, offset, bytes) = source.stored().file_range();
+                cpu_sources.push(serde_json::json!({"path":file.path(),"offset":offset,"bytes":bytes,
+                    "source":plan.pools[planned.pool].source.name(),"matrix":plan.pools[planned.pool].matrix}));
                 if Some(bytes) != planned.stored_bytes.checked_mul(plan.experts) {
                     return Err(format!(
                         "{role:?} stores {bytes} bytes, not {} experts of {}",
@@ -115,7 +123,13 @@ impl ResidentBank {
                     .into());
                 }
                 if let Some(cache) = &host_experts {
-                    cache.register_tensor(file.path(), offset, planned.stored_bytes, plan.experts, layer.scope)?;
+                    cache.register_tensor(
+                        file.path(),
+                        offset,
+                        planned.stored_bytes,
+                        plan.experts,
+                        layer.scope,
+                    )?;
                 }
                 let file = match paths.iter().position(|path| path == file.path()) {
                     Some(index) => index,
@@ -132,7 +146,7 @@ impl ResidentBank {
                 };
             }
             let words = |tensor: &seismic::Tensor| SharedWords::new(tensor.clone());
-            layers.push(StreamedLayer::new(
+            let mut runtime_layer = StreamedLayer::new(
                 words(&bank.slot_map)?,
                 words(&bank.stamps)?,
                 words(&bank.commits)?,
@@ -141,15 +155,30 @@ impl ResidentBank {
                 words(&bank.scratch_control)?,
                 [words(&bank.rings[0])?, words(&bank.rings[1])?],
                 stored,
-            ));
+            );
+            if let (Some(service), Some(exchange), Some(binding)) = (
+                &cpu_experts,
+                &bank.cpu,
+                crate::CpuExpertBinding::of(plan, layer),
+            ) {
+                let identity =
+                    serde_json::to_string(&cpu_sources).map_err(|error| error.to_string())?;
+                runtime_layer.cpu = Some(super::runtime::CpuStreamedLayer {
+                    service: service.clone(),
+                    layer: service.register(&binding, identity, plan.experts as usize)?,
+                    exchange: exchange.clone(),
+                    selected: plan.selected as usize,
+                });
+            }
+            layers.push(runtime_layer);
         }
         SharedWords::new(tensors.step.clone())?.fill(0);
         let records =
             u32::try_from(plan.staging_records).map_err(|_| "staging records exceed u32")?;
         let hints = u32::try_from(crate::streaming::layout::hint_records(plan.selected))
             .map_err(|_| "hint records exceed u32")?;
-        let conveyor = u32::try_from(plan.conveyor_records())
-            .map_err(|_| "conveyor records exceed u32")?;
+        let conveyor =
+            u32::try_from(plan.conveyor_records()).map_err(|_| "conveyor records exceed u32")?;
         let pools = plan
             .pools
             .iter()
@@ -186,16 +215,21 @@ impl ResidentBank {
         }
         let files = paths
             .iter()
-            .map(|path| ModelFile::open(path).map(|file| match &host_experts {
-                Some(cache) => file.with_cache(path, cache.clone()),
-                None => file,
-            }))
+            .map(|path| {
+                ModelFile::open(path).map(|file| match &host_experts {
+                    Some(cache) => file.with_cache(path, cache.clone()),
+                    None => file,
+                })
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let source = ExpertSource::new(files)?;
         let words = |tensor: &seismic::Tensor| SharedWords::new(tensor.clone());
         let list_words = |tensor: &seismic::Tensor, mirror: Option<&seismic::Tensor>| {
             let host = words(tensor)?;
-            match mirror { Some(mirror) => host.with_mirror(mirror.clone()), None => Ok(host) }
+            match mirror {
+                Some(mirror) => host.with_mirror(mirror.clone()),
+                None => Ok(host),
+            }
         };
         let scratch = ScratchFill::new(
             words(&tensors.scratch_flags)?,
@@ -230,15 +264,17 @@ impl ResidentBank {
             StreamingRuntime::new(layers, scratch, heartbeat, pools, source, directory, loan)?;
         runtime.trace_inventory(device, plan, &paths);
         Ok(Self {
+            cpu_experts,
             host_experts,
             tensors,
-            source_control_bytes: plan.shared_bytes()?.checked_add(plan.device_staging_bytes()?)
+            source_control_bytes: plan
+                .shared_bytes()?
+                .checked_add(plan.device_staging_bytes()?)
                 .ok_or("bank source/control bytes overflow")?,
             runtime,
             submitted: AtomicI32::new(0),
         })
     }
-
 
     /// `count` steps are being submitted as one chain, bank-served or
     /// scratch-served (spec 4.5): one step, or a layer-major group, which
@@ -266,7 +302,9 @@ impl ResidentBank {
         self.runtime.steps_submitted(
             first,
             count,
-            seeds.into_iter().map(|index| index.map(|index| first + index as i32)),
+            seeds
+                .into_iter()
+                .map(|index| index.map(|index| first + index as i32)),
         );
         (first..first + count)
             .map(|sequence| BankStep {

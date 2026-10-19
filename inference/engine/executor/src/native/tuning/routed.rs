@@ -18,10 +18,36 @@ use super::{
 use crate::operators::routed::fused_graph::{DECODE_ROWS, TILE_ROWS, grouped_blocks};
 use magnitude_family_contracts::{Operator, RouteNormalization, WeightKind, WeightScope};
 use magnitude_kernels::{
-    routed_combine, routed_expand, routed_experts, routed_gate_up, routed_group, routed_output,
-    routed_route, routed_route_shared,
+    routed_combine, routed_expand, routed_experts, routed_gate_up, routed_gate_up_cpu,
+    routed_group, routed_output, routed_output_cpu, routed_route, routed_route_shared,
 };
-use seismic::{Element, Tensor};
+use seismic::{BoundEntry, Device, Element, Entry, NativeSpecialization, Tensor};
+
+/// CPU dispatch changes one routed slot, while every remaining GPU slot
+/// follows its parent entry's selected arithmetic. The one-row companions
+/// serve only launch zero of the parent's declaration.
+fn form_cpu_companion<E: Entry>(
+    device: &Device,
+    entry: BoundEntry<E>,
+    selected: &NativeSpecialization,
+) -> Result<(), String> {
+    let mut specialization = NativeSpecialization::new();
+    for (name, value) in selected.statics() {
+        specialization = specialization.with_static(name.clone(), *value);
+    }
+    for (name, value) in selected.params() {
+        specialization = specialization.with_param(name.clone(), *value);
+    }
+    for ((launch, name), value) in selected.launch_params() {
+        if *launch == 0 {
+            specialization = specialization.with_launch_param(0, name.clone(), *value);
+        }
+    }
+    entry
+        .prepare(device, &specialization)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
 
 /// The routed geometry every case of one binding shares.
 #[derive(Clone, Copy, Debug)]
@@ -567,6 +593,7 @@ pub(crate) struct RoutedChoicesTuning {
     pub activation: Element,
     pub shape: RoutedShape,
     pub scopes: Vec<WeightScope>,
+    pub cpu_companion: bool,
 }
 
 pub(crate) struct RoutedChoicesCase {
@@ -586,10 +613,30 @@ impl EntryTuning for RoutedChoicesTuning {
 
     fn bindings(&self) -> String {
         format!(
-            "EGW={},EUW={},A={}",
+            "EGW={},EUW={},A={}{}",
             self.expert_gate.name(),
             self.expert_up.name(),
-            self.activation.name()
+            self.activation.name(),
+            if self.cpu_companion { ",CPU=1" } else { "" }
+        )
+    }
+
+    fn serving_companions(&self) -> usize {
+        usize::from(self.cpu_companion)
+    }
+    fn form_serving_companions(
+        &self,
+        device: &Device,
+        selected: &NativeSpecialization,
+    ) -> Result<(), String> {
+        form_cpu_companion(
+            device,
+            routed_gate_up_cpu::native_entry_with(routed_gate_up_cpu::Elements {
+                EGW: self.expert_gate,
+                EUW: self.expert_up,
+                A: self.activation,
+            }),
+            selected,
         )
     }
 
@@ -658,6 +705,7 @@ pub(crate) struct RoutedOutputTuning {
     pub activation: Element,
     pub shape: RoutedShape,
     pub scopes: Vec<WeightScope>,
+    pub cpu_companion: bool,
 }
 
 pub(crate) struct RoutedOutputCase {
@@ -692,10 +740,30 @@ impl EntryTuning for RoutedOutputTuning {
 
     fn bindings(&self) -> String {
         format!(
-            "EDW={},SDW={},A={}",
+            "EDW={},SDW={},A={}{}",
             self.expert_down.name(),
             self.shared_down.name(),
-            self.activation.name()
+            self.activation.name(),
+            if self.cpu_companion { ",CPU=1" } else { "" }
+        )
+    }
+
+    fn serving_companions(&self) -> usize {
+        usize::from(self.cpu_companion)
+    }
+    fn form_serving_companions(
+        &self,
+        device: &Device,
+        selected: &NativeSpecialization,
+    ) -> Result<(), String> {
+        form_cpu_companion(
+            device,
+            routed_output_cpu::native_entry_with(routed_output_cpu::Elements {
+                EDW: self.expert_down,
+                SDW: self.shared_down,
+                A: self.activation,
+            }),
+            selected,
         )
     }
 

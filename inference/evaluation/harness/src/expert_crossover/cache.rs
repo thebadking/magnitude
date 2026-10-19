@@ -118,6 +118,16 @@ pub(super) fn qualify(
             .map(|weight| [weight.shape[1], weight.shape[2]]),
     };
     let bytes = spec.record_bytes()?;
+    use magnitude_kernels::routed_cpu_expert;
+    let fused = prepare(
+        routed_cpu_expert::native_entry_with(routed_cpu_expert::Elements {
+            EGW: spec.elements[0],
+            EUW: spec.elements[1],
+            EDW: spec.elements[2],
+        }),
+        &cpu.device,
+        &[("H", weights[0].shape[2]), ("F", weights[0].shape[1])],
+    )?;
     let create = |records: u64| {
         CpuExpertCache::new(
             catalog.clone(),
@@ -182,6 +192,21 @@ pub(super) fn qualify(
         )?;
         let product = difference(&expected.product, &observed.product)?;
         let result = difference(&expected.result, &observed.result)?;
+        let held = lease.weights();
+        let fused_result = fused
+            .call(routed_cpu_expert::Args {
+                normalized: &cpu.normalized[input],
+                expert_gate: &held[0],
+                expert_up: &held[1],
+                expert_down: &held[2],
+            })
+            .map_err(why)?
+            .value;
+        require(
+            fused_result.read_to_host().map_err(why)?
+                == expected.result.read_to_host().map_err(why)?,
+            "one-submission CPU expert differs from the original CPU operator control",
+        )?;
         require(
             product["byte_equal"] == true && result["byte_equal"] == true,
             "CPU cache changed expert output",
@@ -346,7 +371,7 @@ pub(super) fn qualify(
         "failed_fill_unpublished": true, "withdrawn_fill_unpublished": true,
         "builder_skipped_on_capacity_refusal": true, "pending_fill_coalesced": true,
         "source_inventory_sealed": true, "cross_cache_key_refused": true,
-        "lease_retains_cache_owner": true,
+        "lease_retains_cache_owner": true,"single_submission_cpu_exact":true,"cpu_expert_kernel":kernel_identity(&fused),
         "scope": "Physical cache/storage and CPU operator qualification on one real weight triple and fixture readout vectors; no serving dispatch, latency or model-quality claim"}),
     )
 }

@@ -1062,6 +1062,20 @@ pub(crate) trait EntryTuning: Clone + 'static {
     fn statics(&self, inputs: &ModelInputs<'_>) -> Result<Vec<(&'static str, u64)>, String>;
     fn points(&self, limits: TuningLimits) -> Vec<PointShape>;
 
+    /// Additional serving programs that follow this unit's selected arithmetic.
+    /// Their canonical defaults form in mandatory preparation; a promotion
+    /// owes their matching artifacts on the same first-load clock.
+    fn serving_companions(&self) -> usize {
+        0
+    }
+    fn form_serving_companions(
+        &self,
+        _device: &Device,
+        _selected: &NativeSpecialization,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Project a logical graph launch onto this entry's performance
     /// representative: the rows of the point that times it, none where the
     /// unit's kernel does not serve it (another kernel for the same layers
@@ -3226,6 +3240,24 @@ impl<'a, T: EntryTuning> CaseUnit<'a, T> {
             .map_err(|error| unit_failure(&self.key, error))?;
         artifacts.observe(publication, took.as_secs_f64());
         self.artifacts.set(artifacts);
+        if self.case.serving_companions() > 0 {
+            let selected = self
+                .search
+                .terminal()
+                .map_err(|error| unit_failure(&self.key, error))?
+                .overall
+                .specialization();
+            let began = Instant::now();
+            self.case
+                .form_serving_companions(tuner.device, &selected)
+                .map_err(|error| unit_failure(&self.key, error))?;
+            eprintln!(
+                "[tuning] {} {} serving companions formed in {:.6}s",
+                self.key.0,
+                self.key.1,
+                began.elapsed().as_secs_f64()
+            );
+        }
         Ok(())
     }
 }
@@ -3300,6 +3332,7 @@ impl<'a, T: EntryTuning> SearchedUnit<'a> for CaseUnit<'a, T> {
                 None => work.quote.and(self.search.artifact_owed(true)),
             };
             work.quote.add(self.publishing.get().price(), 1);
+            work.quote.add(None, self.case.serving_companions());
         }
         Some(work)
     }

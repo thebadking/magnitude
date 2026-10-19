@@ -130,6 +130,11 @@ the same allowance, including zero-demand units; their formation is reported sep
 Census, representative discovery, candidate planning,
 optional formation, qualification, timing, confirmation and receipt publication otherwise use
 this one allowance. No independent optimizer or later load adds time.
+Serving companions that preserve a tuned entry's arithmetic form their canonical
+defaults during mandatory preparation. A promoted parent choice owes its
+matching companion artifacts before its receipt is published, within the same
+allowance and pending-work quote. These artifacts do not inherit numerical
+evidence from the parent; their fidelity remains an evaluation obligation.
 
 The served numerical contract and the timed performance objective are distinct. The former
 contains every declared row/history/ownership domain and remains immutable. Candidate eligibility
@@ -449,6 +454,18 @@ failed invocation publishes defined zero storage, the host reports failure, and
 later invocations cannot overwrite payloads a late consumer could retain. A new
 channel requires separate allocation and ownership. This protocol alone grants
 neither CPU numerical admission nor authority to alter routing or accumulation.
+An optional CPU dispatcher selects only a one-row request with one absent expert
+that needs GPU conversion. It checks CPU retention before reserving GPU records.
+The GPU confirms complete result consumption before the host marks that choice
+CPU-served; a host acknowledgement alone cannot defeat a racing watchdog.
+Other choices retain their original order and scores, projection rounding,
+shared-expert join and residual-stream join. CPU absence or unavailability
+selects the ordinary GPU work before publication of a CPU-only placement.
+The immutable bank plan includes the complete CPU binding/program inventory
+across physical owners. Its parameter-free CPU contribution and import programs
+form in the same first-load allowance as the primary programs. GPU companions
+inherit the parent's served arithmetic; preparation records their own artifact
+identities and does not transfer numerical evidence to them.
 Target readout preserves every demanded feature row, and projects only rows it selects: the
 feature and head entries each gather their hidden rows through a row table in their own
 normalization prologue, so no copy or gather node precedes them. Logits are graph locals of the
