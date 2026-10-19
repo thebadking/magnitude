@@ -444,6 +444,7 @@ before running it; fill measured fields only from saved artifacts.
 | Decode-only transfer batching | 1 | `5cac0a6f` + `09325a64…`; preserved control unchanged | Build `20261019T072428Z-stage1-build-a8119e`; lifecycle `20261019T072541Z-stage1-lifecycle-72e4ea` | Lifecycle and all 12 comparison outputs passed; mean difference below control spread | Not promoted; preserve synchronous control and candidate patch |
 | Decode reuse during prompt seeding | 2a | `801a56be` + `60459c8a…` | Build `20261019T075226Z-stage2a-build-75b7e4`; lifecycle `20261019T075554Z-stage2a-lifecycle-2c4074`; comparison `20261019T075917Z-stage2a-comparison-b3e32b`; tools `20261019T081041Z-stage2a-tools-99971b` | All lifecycle and semantic gates passed; generation time −26.585%, logical generation reads −46.570%; prefill +28.945% | Retain optional decode-reuse profile for repeated requests; preserve original default |
 | Reuse-weighted decode victims | 2b | `c9cbfcbf` + `07b58952…`; control is frozen Stage 2a | Build `20261019T082201Z-stage2b-build-5a6f9f`; lifecycle `20261019T082536Z-stage2b-lifecycle-eed91a`; comparison `20261019T082747Z-stage2b-comparison-baab09`; tools `20261019T083547Z-stage2b-tools-4a56cc` | Lifecycle, all 12 comparison outputs and held-out tools passed; generation −16.496%, logical generation reads −30.102%, prefill +0.219%, total −6.319% | Retain optional replacement alongside Stage 2a seeds; preserve prompt/LRU defaults |
+| Bounded repeated-miss prefetch | 3 | `d2b3b935` + `67eae120…`; frozen Stage 2b control | Build `20261019T085958Z-stage3-build-a9e8ac`; lifecycle/admission `20261019T090124Z-stage3-lifecycle-562553` | All six checks passed; 6,921 repeat trials, zero repeated misses or issued bytes, including the third independent request | Reject this inactive heuristic; no timing claim or source promotion; defer differently conditioned prediction |
 
 
 ### Stage 0 progress — baseline and diagnostic correction
@@ -885,14 +886,108 @@ candidate and control worktrees/executables remain frozen for the next stage.
 Stage 2 evaluation is complete: useful prompt seeding and demand replacement are retained
 as explicit options, without a new RAM payload cache or changed CUDA kernels.
 
+### Stage 3 declaration — bounded repeated-miss prefetch
+
+Start from retained Stage 2b source `d2b3b935` in an isolated `history-prefetch`
+worktree. Both sides keep the Stage 2 seed/replacement profile and managed host
+cache disabled. The candidate adds `MAGNITUDE_EXPERT_PREFETCH_POLICY=history-repeat`;
+unset or `native` preserves the existing predictor behavior. Mixed-residual
+future-router prediction remains disabled.
+
+Learn each expert's **device miss at step q given its device miss at q−1** from
+actual directory resolutions. A completed small-row step with no demand request
+for a layer supplies negative evidence; only adjacent, valid, completed small-row
+steps train. Scratch steps and failed/abandoned work cannot train this statistic.
+Counters halve every 64 bank sequences. Require at least four decayed trials and
+at least three-quarters successful repeats. This is an empirical admission
+heuristic, not a statistical confidence interval. At most two eligible experts
+per target layer are ranked by repeat fraction and supporting trials.
+
+At step submission, consider the first two local layers; after serving a demand,
+consider the next two local layers while the GPU resumes. Predictions come only
+from the preceding step's actual misses in that target layer. Skip GPU residents,
+intact free staging copies and already-staged records. Limit this history path to
+four outstanding speculative records and 16 MiB of stored payload per owner, within the
+existing hint shelf. It reserves no GPU slots and moves no bytes to device memory
+until the real router demands them. Existing demand priority, source-ticket
+lifetimes, expiry and cancellation remain authoritative.
+
+Record admitted payload/source bytes, ready versus late demand matches, unused
+bytes at expiry/reclamation, cancellation, forced staging reclamation and unresolved
+records. These counters describe requested payload, not physical SSD reads;
+process I/O remains the physical/logical cross-check. A running read retains its
+ticket through completion and may still match later demand. The predictor adds bounded
+per-expert counters and one miss inventory per in-flight step plus its immediate
+predecessor, without a weight cache. Its counters retain physical cache effects
+without changing accepted numerical state.
+
+Build fully before the lifecycle gate. Include a third independent prose request
+to exercise the same two-warmup training boundary as the timed fixture, followed
+by prefix reuse, cancellation and recovery. If it admits useful work, compare
+untraced A/B/B/A against frozen Stage 2b, requiring the usual 3%/noise bar and
+bounded traffic. Zero admission at that boundary rejects this predictor for the
+fixture without spending a full timing comparison on an inactive mechanism.
+A promising result then needs the held-out tool transition gate. Preserve any
+failure and state the measured limitation before moving to Stage 4.
+
+Initial build `20261019T085601Z-stage3-build-4f272a` passed. Review then found
+that counter snapshots also need all-hit completions, so an incremental build
+`20261019T085958Z-stage3-build-a9e8ac` includes that diagnostic correction and
+verified both sides' engine/harness provenance. No model validation ran on the
+earlier build. The final candidate identity is `d2b3b935` plus
+`67eae1200f40849471a7390d5465ad37fe17438d40a2647612029c307c39318e`.
+The complete patch includes the new predictor module. All source remains frozen
+through the six-check lifecycle/admission probe, with streaming diagnostics enabled.
+
+### Stage 3 result — no repeated device-miss opportunity
+
+`20261019T090124Z-stage3-lifecycle-562553` passed all six checks. Cold, warm,
+retain, hit and recovery each produced the exact same 308-character / 64-token
+prefix. Hit and recovery reused 757 prompt tokens. Cancellation closed after
+four content events / 15 exact characters before terminal delivery and recovery
+remained healthy. Both owners reported 147,456 bytes of predictor counters,
+in addition to the unchanged Stage 2 counters.
+
+The 678 cumulative snapshots covered 339 physical bank sequences per owner,
+including all-hit completions. The predictor observed **6,921 adjacent valid
+small-row device-miss trials**: 3,757 on one owner and 3,164 on the other.
+There were **zero repeated device misses**, zero confident candidates and zero
+issued prefetch records/bytes. The third independent request's 63 decode-step
+window alone supplied 1,644 trials, again with zero repeats or admissions.
+The ready, late, unused, cancelled, unresolved and forced-reclamation counters
+were consequently all zero. Recorded payload conservation and budget checks
+passed, but these zero counters do not qualify an active prefetch lifetime path.
+
+The same expert needing a new device load on the immediately following step
+did not occur in this fixture. This finding does not say that expert activations
+never repeat: reuse served by the GPU cache is not a device miss. The chosen
+miss-recurrence event gives this predictor no observed opportunity after Stage 2
+retention. Planning accounted for 1.222190 ms across the complete instrumented
+gate; that excludes learning and other host work and is not an A/B latency result.
+
+**Reject this candidate for the tested profile and preserve Stage 2b.** The
+declared third-request admission gate was inactive, so a full timing comparison
+and held-out tool gate were not run. No speedup, slowdown, useful-prefetch ratio
+or active-prefetch cancellation qualification is claimed. The complete source
+patch, both build records, raw checks, `admission-summary.json`, `decision.json`
+and reproduction scripts remain available locally. Experimental source stays in
+the isolated worktree and is not promoted.
+
+Predicting newly missing experts needs different conditioning: for example,
+validated cross-layer observations or a trained predictor appropriate for the
+mixed residual form. That is deferred, not established by this experiment.
+The existing future-router rejection remains in place. Revisit this path with
+evidence of predictable new misses and exposed source wait; lowering a threshold
+cannot create positive repeats in this dataset. No trained checkpoint or
+additional activation-transfer path is introduced by this stage.
+
 ## Immediate next action
 
-Begin **Stage 3: bounded-confidence expert prefetch** against the frozen Stage 2b
-profile. Use valid activation history for the mixed-residual model; retain the
-existing rejection of its inaccurate future-router predictor. Declare the
-confidence rule, byte/window budget and physical source-lifetime ownership before
-implementation. Keep demand priority and native routing authoritative. Qualify
-the candidate, then compare latency together with useful, late and wasted bytes.
-Advance through Stages 4–8 after that measured or justified disposition. Full CUDA
-graph attribution remains unavailable; do not imply a complete wait/arithmetic
-breakdown.
+Begin **Stage 4: MTP across the two placed owners**, using the frozen Stage 2b
+profile as the accepted plain control. Inspect prediction-head admission,
+feature/table ownership, verification state and rejected-suffix repair before
+changing the plain-only startup guard. Preserve the MTP proposal/acceptance and
+physical lifetime contracts. Fully build and qualify real proposals, accepted
+prefixes and cancellation/recovery before timing. Then work through Stages 5–8.
+Stage 3's repeated-miss candidate is rejected; a differently conditioned predictor
+remains deferred. Full CUDA graph attribution is still unavailable.
