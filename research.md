@@ -186,6 +186,27 @@ may have a different miss rate and require their own measurement.
 Snapshot and its reproduction script:
 `20261019T115244Z-idle-ram-diagnostic/` under the local results directory.
 
+A running check at **2026-10-19 13:18:17 UTC**, during the untimed Stage 5
+control qualification, found **55.820 GiB `Cached`, 0.555 GiB actually free
+and 53.738 GiB `MemAvailable`**, out of 62.696 GiB total. The accepted plain
+engine's RSS was 6.821 GiB and its `VmSwap` was zero. This is one sample,
+not a peak or a model-page inventory; `Cached` includes other files and shared
+pages can overlap process RSS. Allocating another cache would compete with
+these existing cached pages. Its cumulative 49.740 GB physical-read counter
+includes loading and earlier work; it is not a generation-window measurement.
+
+The later controlled Stage 5 ordinary-generation delivery windows contain
+approximately **3.94–3.95 GB logical reads** each, with **zero physical bytes
+in three windows and 6.652 MB in the fourth**. Most of this warm traffic was
+already served without physical disk reads. Cold loading and broad scans still
+incur substantial disk work, but these measurements do not establish an unused
+RAM allocation as the warm-generation fix.
+
+Active snapshot and read-only reproduction script:
+`20261019T131615Z-stage5-strict-d25818/ram-active.json` and `ram-observer.py`.
+Controlled delivery-window counters and limits:
+`20261019T133130Z-stage5-comparison-2f88c4/analysis.json`.
+
 ### Confirmed code observations
 
 - [CUDA upload](inference/seismic/backends/cuda/src/driver.rs) calls
@@ -509,6 +530,8 @@ before running it; fill measured fields only from saved artifacts.
 | Reuse-weighted decode victims | 2b | `c9cbfcbf` + `07b58952…`; control is frozen Stage 2a | Build `20261019T082201Z-stage2b-build-5a6f9f`; lifecycle `20261019T082536Z-stage2b-lifecycle-eed91a`; comparison `20261019T082747Z-stage2b-comparison-baab09`; tools `20261019T083547Z-stage2b-tools-4a56cc` | Lifecycle, all 12 comparison outputs and held-out tools passed; generation −16.496%, logical generation reads −30.102%, prefill +0.219%, total −6.319% | Retain optional replacement alongside Stage 2a seeds; preserve prompt/LRU defaults |
 | Bounded repeated-miss prefetch | 3 | `d2b3b935` + `67eae120…`; frozen Stage 2b control | Build `20261019T085958Z-stage3-build-a9e8ac`; lifecycle/admission `20261019T090124Z-stage3-lifecycle-562553` | All six checks passed; 6,921 repeat trials, zero repeated misses or issued bytes, including the third independent request | Reject this inactive heuristic; no timing claim or source promotion; defer differently conditioned prediction |
 | Placed MTP with one CUDA affine decode choice | 4 | Candidate `47f852f5` + `da537eff…`; frozen Stage 2b plain control | Build `20261019T122031Z-stage4-build-87d1df`; generated prefix `20261019T122157Z-stage4-shared-prefix-f881f0`; serving `20261019T122452Z-stage4-shared-strict-heldout-c073bf`; lifecycle `20261019T123227Z-stage4-shared-lifecycle-8d6b29`; comparison `20261019T123708Z-stage4-comparison-626259` | All correctness gates and 24 benchmark responses exact. Repeat generation −21.911%, total −0.268%; ordinary generation −2.940%, total +11.129% | Keep experimental capability; do not promote the fixed-budget profile as a general speedup. Continue Stage 5 with the plain control |
+| Four-warp CUDA bank conversion | 5a | `356ab093` + `fd8ff569…`; frozen Stage 2b plain control | Build `20261019T131221Z-stage5-build-b663af`; serving `20261019T131615Z-stage5-strict-d25818` | Ordinary continuation changed from 60-token stop to 64-token length; three attention configurations also changed after module-wide tuning invalidation | Failed serving gate; conversion effect is not isolated. Revert launch declaration and defer this experiment; no speed comparison |
+| Shared extraction for packed low/high planes | 5b | `356ab093` + `f906f66c…`; frozen Stage 2b plain control | Build `20261019T132409Z-stage5-build-c23e98`; serving `20261019T132526Z-stage5-strict-3a0610`; lifecycle `20261019T132942Z-stage5-lifecycle-6aed11`; comparison `20261019T133130Z-stage5-comparison-2f88c4` | All gates and 24 benchmark responses exact, with identical unrelated kernel configurations. Repeat generation −4.515%, total −2.101%; ordinary generation −2.850%, total −1.551% | Keep experimental packing source; ordinary primary metric remains below the declared 3% bar. Preserve Stage 2b as the accepted plain control |
 
 
 ### Stage 0 progress — baseline and diagnostic correction
@@ -1611,20 +1634,125 @@ An earlier launch, `20261019T123507Z-stage4-comparison-cc4bb0`, stopped during
 setup because the driver lacked an import; it performed no model measurements.
 That failed setup and its exact script are retained separately.
 
+### Stage 5 packed conversion experiments and controlled decision
+
+The actual Qwen SM86 bank formats include q4k/q5k gate/up planes and q5g32/q8g32s
+down planes in `mma16` layouts. Gate/up projections are already paired, repeated
+rows already share expert work, bank fill already converts gate/up/down in one
+kernel, and staging-to-shared copies already use aligned volatile vector loads
+with fallbacks. These are existing capabilities, not new optimization claims.
+
+The first candidate increased CUDA bank-fill threads from 32 to 128, using the
+existing loop over independent conversion tiles. Build `20261019T131221Z-stage5-build-b663af`
+passed build/provenance. Serving gate `20261019T131615Z-stage5-strict-d25818`
+passed repeat and tool semantics, but ordinary continuation changed from 60
+outputs with `stop` to 64 with `length`, so it was not timed.
+
+This gate also exposed a confound: native tuning identity hashes all checked
+source text. Changing the launch declaration invalidated records for unrelated
+entries. Under the same 30-second budget the candidate retained canonical
+attention settings: decode PARTS=12/WARPS=4/COLUMNS=1, compared with the control's
+qualified PARTS=48/WARPS=1/COLUMNS=4; both prefill units also changed COLUMNS=2
+to 1. `configuration-confound.json` records these three differences. The failed
+gate does **not** isolate a conversion defect. The launch declaration was
+restored without widening the budget, copying evidence to another identity,
+pinning attention, or weakening the gate. The four-warp experiment is deferred.
+
+The second candidate changes only CUDA's shared conversion helper. For split
+code planes it extracts each source code once, assembles low and high words,
+then publishes both. The previous source performed separate low/high traversals
+with a destination store between them. This halves explicit source-code
+extractions for five/six-bit fragments; it does not establish a halving of
+executed instructions or kernel time. Integer packing algebra, coefficient
+bytes, layout size, staging protocol, launch geometry and persistent allocations
+are preserved. Four-bit fragments still extract the same codes. No tuning
+declaration or floating-point recipe changes.
+
+Measured source: **`356ab093` + dirty digest
+`f906f66cfc5aecbc740d7c922943296afb10dbda79439dd8e69cd1ffa0c83e34`**.
+Build/provenance: `20261019T132409Z-stage5-build-c23e98`. Compared with the frozen
+Stage 2b control, the only production-source difference is this conversion helper;
+seven additional differences are evaluation-harness improvements already on main.
+The build retains the complete patch and reproduction script.
+
+Strict serving gate **`20261019T132526Z-stage5-strict-3a0610`** passes repeated
+prose (758 + 64), ordinary continuation (396 + 60, natural stop) and the BFCL
+triangle-area tool call (366 + 53). Text, tool arguments, usage and stop reasons
+match the control exactly. All **28 distinct selected kernel/binding configuration
+sets match** in `selected-configurations.json`, including the qualified attention
+choices. Both use plain decoding, decode-reuse seeding/replacement, lookahead,
+group 8, context 1,024 and no managed host cache.
+
+Lifecycle **`20261019T132942Z-stage5-lifecycle-6aed11`** also passes cold/retain/hit
+and recovery equality, with 757 prompt tokens reused on hit and recovery. Closing
+the response after four content events precedes the terminal response; the next
+request and health check pass. These are qualification observations, not speed
+measurements.
+
+**`20261019T133130Z-stage5-comparison-2f88c4`** completes the thermal-gated,
+untraced A/B/B/A comparison under one lease. Each launch has two warmups per
+fixture and one measured request per fixture, producing two measured passes per
+side and fixture. **All 24 responses match the strict controls**. Retained-prefix
+reuse and managed host caching are disabled; OS cache is not dropped. Loading
+and warmups are excluded.
+
+| Fixture / condition | Mean prefill | Mean generation | Mean total model time |
+| --- | ---: | ---: | ---: |
+| Repeat, plain control | 3.625759 s | 3.341379 s | 6.967138 s |
+| Repeat, shared extraction | 3.630232 s | 3.190518 s | 6.820750 s |
+| Ordinary, plain control | 3.085767 s | 2.277215 s | 5.362982 s |
+| Ordinary, shared extraction | 3.067480 s | 2.212310 s | 5.279790 s |
+
+Repeat generation improves **4.515%** (150.861 ms), exceeding the observed
+54.173/10.257 ms control/candidate spreads. Total model time improves **2.101%**.
+Ordinary generation improves **2.850%** (64.905 ms), exceeding its 4.083/0.177 ms
+spreads, and total time improves **1.551%**. The ordinary primary metric remains
+**below the declared 3% bar**; do not round it up to pass or describe it as within
+the observed noise. This is a scoped repeat-generation benefit, not promotion
+of a general profile. Neither prefill difference establishes a separate win.
+
+Logical generation-delivery reads stay near 7.23 GB for repeat and 3.95 GB for
+ordinary on both sides. The first control windows have 50.381/6.652 MB physical
+reads for repeat/ordinary; the first candidate repeat has 1.835 MB and all other
+measured windows have zero. This small physical-read imbalance limits assigning
+the complete mean difference to packing alone. The final control and second
+candidate have zero physical reads for both fixtures and still show lower
+candidate generation times. The windows include lookahead and are not exact
+device-step boundaries; they do not isolate conversion time or other remaining
+costs. Most warm source bytes were already served from RAM.
+
+The cache capacities remain 200/203 records per layer. Sampled maximum device
+charges are identical on both sides (21.458/21.578 GB), and sampled RSS stays
+approximately 7.35–7.37 GB, excluding additional filesystem cache. No new memory
+capacity is demonstrated. Raw observations, source identities, configuration
+inventory, I/O, memory/census, thermal trace, launcher and summarizer are retained
+in the comparison directory.
+
+Keep the candidate on the experimental source branch
+[`two-gpu-packed-conversion-experimental`](https://github.com/thebadking/magnitude/tree/two-gpu-packed-conversion-experimental).
+This source has not been combined or benchmarked with experimental MTP. Preserve
+the frozen candidate's measured identity; publication of byte-identical inference
+sources is not a new build or measurement. The accepted plain profile remains
+Stage 2b, and the four-warp declaration is absent from the retained candidate.
+
 ## Immediate next action
 
-Continue **Stage 5** with the frozen Stage 2b plain control. Use the current
-warm I/O evidence to distinguish source service, copies/transfers, conversion
-and resident execution before choosing one SM86 kernel or representation change.
-Inspect actual packed formats and shapes, preserve the fixed tuning budget and
-normal numerical gates, and benchmark the justified change under matched work.
+Continue **Stage 6** using the frozen Stage 2b plain control. Before implementing
+CPU miss execution, obtain a bounded measurement of source/upload service and
+a fixture-derived CPU/GPU expert crossover on this AVX2 host. Account for CPU
+conversion, queueing and activation/result transfers; retain GPU execution unless
+the crossover and affected serving measurements justify a CPU path. Do not
+infer CPU benefit merely from file-cache occupancy or low physical disk bytes.
 
-Keep Stage 4's source and artifacts as the experimental MTP control. Its current
-scope is the catalog's causal head with its own history; target-reading heads,
-vision and separate block drafters need other placement contracts. Queries remain
-parallel; the query-tile experiment is discarded. Do not serialize verification
-or relax precision/greedy parity to obtain a pass. Study the observed per-owner
-cache/headroom gap during Stage 7 before allocating more cache, then complete
-Stage 8's affected context and single-GPU qualification and cumulative comparison.
-Stage 3's repeated-miss candidate is rejected; a differently conditioned predictor
-remains deferred. Full CUDA graph attribution is still unavailable.
+Keep Stage 4's causal-head MTP and Stage 5's fragment-packing sources as separate
+experimental controls. Neither met its ordinary primary generation bar; do not
+claim their cumulative performance without a combined qualification and benchmark.
+The four-warp Stage 5 experiment requires unchanged unrelated execution choices
+before it can isolate conversion. Preserve the fixed tuning budget and ordinary
+precision/greedy gates.
+
+Study the observed per-owner cache/headroom gap during Stage 7 before allocating
+more cache, then complete Stage 8's affected context and single-GPU qualification
+and cumulative/reference comparison. Stage 3's repeated-miss candidate is
+rejected; a differently conditioned predictor remains deferred. Full CUDA graph
+attribution is still unavailable.

@@ -300,13 +300,21 @@ __device__ __forceinline__ u32 CONV_H(fragment_code)(const u8 *window, const sei
     return CONV_H(source_code)(CONV_H(src_pkt)(window, n % 16, column / CONV_SRC_PACKET_GROUP, packet0),
         (u32)(column % CONV_SRC_PACKET_GROUP));
 }
-__device__ __forceinline__ u32 CONV_H(fragment_slice)(const u8 *window, const seismic_words_t &seismic_words_value, u64 packet0,
-        u64 row0, u64 packets, u32 block, u32 step, u32 lane, u32 shift, u32 bits) {
-    u32 value = 0;
-    for (u32 slot = 0; slot < 8; ++slot)
-        value |= ((CONV_H(fragment_code)(window, seismic_words_value, packet0, row0, packets, block, step, lane, slot) >> shift) &
-            ((1u << bits) - 1u)) << (slot * bits);
-    return value;
+__device__ __forceinline__ uint2 CONV_H(fragment_slices)(const u8 *window, const seismic_words_t &seismic_words_value, u64 packet0,
+        u64 row0, u64 packets, u32 block, u32 step, u32 lane) {
+    u32 low = 0, high = 0;
+    // Extract each source code once for both resident bit planes. Complete
+    // both words before publishing either; a destination store must not
+    // force the high plane to reread the same shared source fragment.
+    for (u32 slot = 0; slot < 8; ++slot) {
+        const u32 code = CONV_H(fragment_code)(window, seismic_words_value, packet0, row0, packets, block, step, lane, slot);
+        low |= (code & 15u) << (slot * 4);
+#if defined(CONV_DST_PLANE_CODES_HI)
+        const u32 bits = CONV_DST_PLANE_CODES_HI_CODE_BITS;
+        high |= ((code >> 4) & ((1u << bits) - 1u)) << (slot * bits);
+#endif
+    }
+    return make_uint2(low, high);
 }
 #endif
 #endif
@@ -461,13 +469,14 @@ __device__ void CONV_FUNC(const u8 *window, u8 *dst,
                 make_uint4(words[0], words[1], words[2], words[3]);
         }
 #else
+        const uint2 first = CONV_H(fragment_slices)(window, seismic_words_value, packet0, row0, packets, block, step0, lane);
+        const uint2 second = CONV_H(fragment_slices)(window, seismic_words_value, packet0, row0, packets, block, step0 + 1, lane);
         {
             u64 position = ((u64)block * 32 + lane) * 16 + 4 * step0;
             *reinterpret_cast<uint2 *>(CONV_H(tile_plane_byte)(dst, seismic_words_value, slot, row0, position,
                                                        CONV_DST_PLANE_CODES_LO_BYTES_PER_ROW,
                                                        CONV_DST_PLANE_CODES_LO_ROW_OFFSET)) =
-                make_uint2(CONV_H(fragment_slice)(window, seismic_words_value, packet0, row0, packets, block, step0, lane, 0, 4),
-                           CONV_H(fragment_slice)(window, seismic_words_value, packet0, row0, packets, block, step0 + 1, lane, 0, 4));
+                make_uint2(first.x, second.x);
         }
 #if defined(CONV_DST_PLANE_CODES_HI) && CONV_DST_PLANE_CODES_HI_CODE_BITS == 1
         {
@@ -475,10 +484,7 @@ __device__ void CONV_FUNC(const u8 *window, u8 *dst,
             *reinterpret_cast<unsigned short *>(CONV_H(tile_plane_byte)(dst, seismic_words_value, slot, row0, position,
                                                                 CONV_DST_PLANE_CODES_HI_BYTES_PER_ROW,
                                                                 CONV_DST_PLANE_CODES_HI_ROW_OFFSET)) =
-                (unsigned short)(CONV_H(fragment_slice)(window, seismic_words_value, packet0, row0, packets, block, step0, lane, 4,
-                                                1) |
-                                 (CONV_H(fragment_slice)(window, seismic_words_value, packet0, row0, packets, block, step0 + 1, lane,
-                                                 4, 1) << 8));
+                (unsigned short)(first.y | (second.y << 8));
         }
 #elif defined(CONV_DST_PLANE_CODES_HI)
         {
@@ -486,8 +492,7 @@ __device__ void CONV_FUNC(const u8 *window, u8 *dst,
             *reinterpret_cast<u32 *>(CONV_H(tile_plane_byte)(dst, seismic_words_value, slot, row0, position,
                                                      CONV_DST_PLANE_CODES_HI_BYTES_PER_ROW,
                                                      CONV_DST_PLANE_CODES_HI_ROW_OFFSET)) =
-                CONV_H(fragment_slice)(window, seismic_words_value, packet0, row0, packets, block, step0, lane, 4, 2) |
-                (CONV_H(fragment_slice)(window, seismic_words_value, packet0, row0, packets, block, step0 + 1, lane, 4, 2) << 16);
+                first.y | (second.y << 16);
         }
 #endif
 #endif
