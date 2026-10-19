@@ -1001,8 +1001,17 @@ fn streamed_decode<'a, G: GraphDraft + 'a>(
                 weights,
             )
         };
-        let ahead_norm = ahead_port(graph, WeightKind::InputNorm, WeightPart::Values)?
-            .tensor().clone();
+        // NM is a shared template parameter: if this layer uses no RMS norm
+        // (HyperConnectionMix, NM=0), ahead layers also use NM=0 and must
+        // receive an absent norm port rather than InputNorm.
+        let later_has_norm = load.weights().any(|p| {
+            p.role == (WeightRole { scope: later_layer.scope, kind: WeightKind::InputNorm })
+        });
+        let ahead_norm = if later_has_norm {
+            ahead_port(graph, WeightKind::InputNorm, WeightPart::Values)?.tensor().clone()
+        } else {
+            norm.clone()
+        };
         ahead.push([
             ahead_norm,
             ahead_port(graph, WeightKind::Router, WeightPart::Values)?.tensor().clone(),
