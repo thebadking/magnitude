@@ -9,6 +9,9 @@ pub struct ReplayOptions {
     gpu_selector: String,
     #[arg(long)]
     cache_dir: Option<PathBuf>,
+    /// Evaluate an untimed scalar group-factored CPU recipe; never serving.
+    #[arg(long)]
+    grouped_cpu_recipe: bool,
 }
 
 fn string<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
@@ -181,6 +184,10 @@ pub fn run(
         .map_err(why)?;
     cpu_device.set_memory_limit(Some(1 << 30));
     gpu_device.set_memory_limit(Some(1 << 30));
+    let activations = options
+        .grouped_cpu_recipe
+        .then(|| super::grouped::Activations::new(&gpu_device))
+        .transpose()?;
     let mut paths = std::fs::read_dir(&options.capture)
         .map_err(why)?
         .map(|entry| entry.map(|e| e.path()).map_err(why))
@@ -257,7 +264,16 @@ pub fn run(
             })
             .map_err(why)?
             .value;
-        rows.push(json!({"capture":path.file_name().and_then(|s|s.to_str()),"sequence":sequence,"layer":record["layer"],"expert":record["expert"],
+        let grouped = activations.as_ref().map(|activation| {
+            let candidate = super::grouped::evaluate(&cpu,&weights,&input,&expected_gpu.product,activation)?;
+            Ok::<_,String>(json!({"cpu_silu_product":difference(&expected_gpu.product,&candidate.product)?,
+                "cpu_silu_contribution":difference(&expected_gpu.result,&candidate.result)?,
+                "gpu_silu_product":difference(&expected_gpu.product,&candidate.product_gpu_silu)?,
+                "gpu_silu_contribution":difference(&expected_gpu.result,&candidate.result_gpu_silu)?,
+                "down_same_gpu_product":difference(&expected_gpu.result,&candidate.result_same_gpu_product)?,
+                "scope":"Scalar grouped coefficients, F64 group partials and F32 folds, one part; no serving or speed claim"}))
+        }).transpose()?;
+        rows.push(json!({"capture":path.file_name().and_then(|s|s.to_str()),"sequence":sequence,"layer":record["layer"],"expert":record["expert"],"grouped_cpu_recipe":grouped,
             "retained_native_equal_fresh_import":native_equal,
             "serving_cpu_vs_fresh_cpu":difference(&actual,&expected_cpu.result)?,
             "cpu_vs_gpu_product":difference(&expected_gpu.product,&expected_cpu.product)?,
@@ -271,7 +287,8 @@ pub fn run(
     let report = json!({"status":"complete","captured_consumed_experts":rows.len(),
         "all_retained_native_equal_fresh_import":rows.iter().all(|r|r["retained_native_equal_fresh_import"].as_array().is_some_and(|a|a.iter().all(|v|v==&Value::Bool(true)))),
         "all_serving_cpu_equal_fresh_cpu":rows.iter().all(|r|r["serving_cpu_vs_fresh_cpu"]["byte_equal"]==true),
-        "rows":rows,"producer":producer,"scope":"Actual fixture-derived routed operands; canonical one-expert CPU/GPU diagnostic. No numerical admission, model-quality or speed claim"});
+        "rows":rows,"producer":producer,"activation_diagnostic":activations.as_ref().map(|a|&a.diagnostic),
+        "scope":"Actual fixture-derived routed operands; canonical one-expert CPU/GPU diagnostic. No numerical admission, model-quality or speed claim"});
     std::fs::write(
         inputs.run.path("expert-replay.json"),
         serde_json::to_vec_pretty(&report).map_err(why)?,

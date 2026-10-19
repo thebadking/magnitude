@@ -113,6 +113,12 @@ Rules for every measurement:
   differences. Capturing a computation is not proof that the GPU consumed it;
   replay and cross-backend differences grant neither numerical admission nor
   model quality or speed claims.
+  A numerical recipe experiment may compare group-factored packed projections
+  on those retained operands. It records group-partial and fold precision
+  explicitly. An exhaustive scalar activation domain is independent of model
+  inputs and can isolate pointwise publication differences; its generated
+  function table is not model output or qualification evidence. Scalar recipes
+  and function-table experiments establish no serving throughput.
 - **Tuning:** first-load tuning runs under an explicit budget. Fresh tuning ignores stored tuning results and keeps compiled kernels. The tuning trace and outcome are part of every measured run.
 
 ## Comparison

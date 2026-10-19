@@ -1,6 +1,7 @@
 //! An operator/storage diagnostic. It never dispatches experts for serving.
 mod cache;
 mod exchange;
+mod grouped;
 mod replay;
 use crate::{Inputs, Rendered, digest::sha256_hex, render::RenderedFile};
 use clap::Args;

@@ -11,9 +11,11 @@
 //! `scale * code + bias` for its coefficient group, rounded once to `f32` as
 //! the registry's decode recipe rounds it.
 //!
-//! The dot bodies accumulate `w[i] * x[i]` (fused) into lane `i % LANES` in
+//! The ordinary dot bodies accumulate `w[i] * x[i]` (fused) into lane `i % LANES` in
 //! index order and combine the lanes in the fixed tree of `reduce`, so a
 //! result depends only on the values, never on the tier or the row block.
+//! A separate scalar grouped recipe exposes its coefficient-folding arithmetic
+//! explicitly; it neither replaces the ordinary dot nor promises MMA equality.
 
 use crate::element::{Dense, f16_to_f32};
 use crate::quant::{Q8_BLOCK, Q8Block};
@@ -24,6 +26,15 @@ pub const PACKET: usize = 32;
 
 /// Byte alignment of every `rows16` plane and of the row stride.
 pub const ROW_ALIGNMENT: usize = 16;
+
+/// One affine coefficient group, before multiplying its scale into the codes.
+/// This exposes semantic coefficients through the format that owns their layout.
+pub struct AffinePacket {
+    pub codes: [i16; PACKET],
+    pub scale: f32,
+    pub bias: f32,
+    pub has_bias: bool,
+}
 
 /// Byte geometry of the rows of one weight operand.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -182,6 +193,17 @@ pub trait Format: Copy + Send + Sync + 'static {
         out: &mut [f32; PACKET],
     );
 
+    /// An exact code/scale/bias view of one 32-value affine group, if supported.
+    /// Safety requirements are those of `decode`.
+    unsafe fn affine_packet(
+        _row: *const u8,
+        _geometry: &RowGeometry,
+        _p: usize,
+        _k: usize,
+    ) -> Option<AffinePacket> {
+        None
+    }
+
     /// Values `256 b .. 256 b + 256` (below `k`) of the row at `row` dotted
     /// with the quantized activation block `x`: exact integer sums per
     /// coefficient group, combined in `f32` in group order.
@@ -276,6 +298,16 @@ impl<W: Rows8Format> Format for Rows8<W> {
         out: &mut [f32; PACKET],
     ) {
         unsafe { W::decode(row, geometry, p, k, out) }
+    }
+
+    #[inline(always)]
+    unsafe fn affine_packet(
+        row: *const u8,
+        geometry: &RowGeometry,
+        p: usize,
+        k: usize,
+    ) -> Option<AffinePacket> {
+        unsafe { W::affine_packet(row, geometry, p, k) }
     }
 
     #[inline(always)]
@@ -883,6 +915,24 @@ impl Format for Q4K {
     const NAME: &'static str = "q4k@rows16";
     const DENSE_BYTES: usize = 0;
 
+    #[inline(always)]
+    unsafe fn affine_packet(
+        row: *const u8,
+        geometry: &RowGeometry,
+        p: usize,
+        _k: usize,
+    ) -> Option<AffinePacket> {
+        let (scale, bias) = unsafe { k_coefficients(row, geometry, p) };
+        let bytes = unsafe { geometry.group(row, Plane::Codes, p >> 3).add(16 * (p & 7)) };
+        let codes = nibble_codes(unsafe { &*bytes.cast::<[u8; 16]>() }, 0).map(i16::from);
+        Some(AffinePacket {
+            codes,
+            scale,
+            bias,
+            has_bias: true,
+        })
+    }
+
     fn geometry(k: usize, _dense_stride: usize) -> RowGeometry {
         let ([codes, scales, supers, _], stride) = rows16(k, 256, &[128, 12, 4]);
         RowGeometry {
@@ -940,6 +990,25 @@ pub struct Q5K;
 impl Format for Q5K {
     const NAME: &'static str = "q5k@rows16";
     const DENSE_BYTES: usize = 0;
+
+    #[inline(always)]
+    unsafe fn affine_packet(
+        row: *const u8,
+        geometry: &RowGeometry,
+        p: usize,
+        _k: usize,
+    ) -> Option<AffinePacket> {
+        let (scale, bias) = unsafe { k_coefficients(row, geometry, p) };
+        let bytes = unsafe { geometry.group(row, Plane::Codes, p >> 3).add(16 * (p & 7)) };
+        let high = unsafe { read(geometry.group(row, Plane::High, p >> 3).add(4 * (p & 7))) };
+        let codes = nibble_codes(unsafe { &*bytes.cast::<[u8; 16]>() }, high).map(i16::from);
+        Some(AffinePacket {
+            codes,
+            scale,
+            bias,
+            has_bias: true,
+        })
+    }
 
     fn geometry(k: usize, _dense_stride: usize) -> RowGeometry {
         let ([codes, high, scales, supers], stride) = rows16(k, 256, &[128, 32, 12, 4]);
@@ -1213,6 +1282,23 @@ pub struct Q8;
 impl Format for Q8 {
     const NAME: &'static str = "q8g32s@rows16";
     const DENSE_BYTES: usize = 0;
+
+    #[inline(always)]
+    unsafe fn affine_packet(
+        row: *const u8,
+        geometry: &RowGeometry,
+        p: usize,
+        _k: usize,
+    ) -> Option<AffinePacket> {
+        let codes: [i8; PACKET] = unsafe { read(geometry.address(row, Plane::Codes, 32 * p)) };
+        let scale = f16_to_f32(unsafe { read::<u16>(geometry.address(row, Plane::Supers, 2 * p)) });
+        Some(AffinePacket {
+            codes: codes.map(i16::from),
+            scale,
+            bias: 0.0,
+            has_bias: false,
+        })
+    }
 
     fn geometry(k: usize, _dense_stride: usize) -> RowGeometry {
         let ([codes, supers, _, _], stride) = rows16(k, 32, &[32, 2]);
@@ -1766,6 +1852,24 @@ impl<const MINIMUM: bool> Format for Q5G32<MINIMUM> {
     };
     const DENSE_BYTES: usize = 0;
 
+    #[inline(always)]
+    unsafe fn affine_packet(
+        row: *const u8,
+        geometry: &RowGeometry,
+        p: usize,
+        _k: usize,
+    ) -> Option<AffinePacket> {
+        let codes = unsafe { Self::codes(row, geometry, p) }
+            .map(|c| i16::from(c) - if MINIMUM { 0 } else { 16 });
+        let (scale, bias) = unsafe { Self::coefficients(row, geometry, p) };
+        Some(AffinePacket {
+            codes,
+            scale,
+            bias,
+            has_bias: MINIMUM,
+        })
+    }
+
     fn geometry(k: usize, _dense_stride: usize) -> RowGeometry {
         let ([codes, high, supers, _], stride) = rows16(k, 32, &[16, 4, Self::SUPER_BYTES]);
         RowGeometry {
@@ -2038,6 +2142,71 @@ pub unsafe fn decode_row<W: Format>(
         unsafe { W::decode(row, &resolved, p, k, &mut packet) };
         chunk.copy_from_slice(&packet[..chunk.len()]);
     }
+}
+
+/// A scalar numerical recipe for packed affine projections. Each 32-code
+/// partial and activation sum is accumulated in F64 and rounded once to F32;
+/// scale and bias fold through separate F32 FMAs in group order. Consecutive
+/// 256-value ranges split into `parts` and reduce in part order. This is not
+/// the ordinary CPU dot and does not promise another backend's MMA bit pattern.
+pub fn affine_grouped_dot<W: Format>(
+    bytes: &[u8],
+    rows: usize,
+    k: usize,
+    first: usize,
+    x: &[f32],
+    parts: usize,
+    out: &mut [f32],
+) -> Option<()> {
+    if W::DENSE_BYTES != 0
+        || k == 0
+        || k % 64 != 0
+        || x.len() != k
+        || !matches!(parts, 1 | 2 | 4)
+        || first.checked_add(out.len())? > rows
+    {
+        return None;
+    }
+    let geometry = W::geometry(k, 0).with_base(bytes.as_ptr(), rows);
+    let stored_rows = if geometry.rows8 {
+        rows.div_ceil(8).checked_mul(8)?
+    } else {
+        rows
+    };
+    if geometry.stride.checked_mul(stored_rows)? > bytes.len() {
+        return None;
+    }
+    let superblocks = k.div_ceil(256);
+    for (index, target) in out.iter_mut().enumerate() {
+        // SAFETY: the complete row geometry and backing were checked above.
+        let row = unsafe { bytes.as_ptr().add((first + index) * geometry.stride) };
+        let resolved = geometry.for_row(row);
+        let mut partial = [0.0_f32; 4];
+        for part in 0..parts {
+            let begin = 8 * (superblocks * part / parts);
+            let end = (8 * (superblocks * (part + 1) / parts)).min(k / 32);
+            for p in begin..end {
+                // SAFETY: p names a complete packet of this live row.
+                let packet = unsafe { W::affine_packet(row, &resolved, p, k) }?;
+                let mut dot = 0.0_f64;
+                let mut sum = 0.0_f64;
+                for (code, value) in packet.codes.iter().zip(&x[p * 32..(p + 1) * 32]) {
+                    dot += f64::from(*code) * f64::from(*value);
+                    sum += f64::from(*value);
+                }
+                partial[part] = packet.scale.mul_add(dot as f32, partial[part]);
+                if packet.has_bias {
+                    partial[part] = packet.bias.mul_add(sum as f32, partial[part]);
+                }
+            }
+        }
+        let mut total = partial[0];
+        for part in 1..parts {
+            total += partial[part];
+        }
+        *target = total;
+    }
+    Some(())
 }
 
 /// The body of the dot component: rows `0..R` (from `rows`, `geometry.stride`

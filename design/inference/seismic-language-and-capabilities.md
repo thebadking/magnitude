@@ -116,6 +116,11 @@ build and at preparation.
 
 A CPU native asset is Rust compiled into the embedding binary; generated bindings give each entry a
 typed context over its ABI and include the authored file by its path. Elements the entry stores are
+interpreted through the CPU library's representation authority. Packed affine
+formats may expose exact integer codes and coefficient groups through that
+authority. A grouped projection names partial precision, fold order and part
+reduction separately from the ordinary CPU dot; the two recipes are not
+interchangeable numerical evidence. Dense result elements remain
 type parameters of the kernel over the dense types the form is compiled for: `f32`, `bf16` and `f16`
 unless the declaration's `elements (A in [..])` clause lists others. A form that covers an integer type
 only moves that element's storage, since its type then has no conversion through `f32`. Elements the
