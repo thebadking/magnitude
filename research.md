@@ -548,6 +548,7 @@ before running it; fill measured fields only from saved artifacts.
 | Physical CPU-ready cache and lease qualification | 6 prototype | `e2d68773` + `cf63e7ff…`; real block 1 weights and retained native fixture vectors | Build `20261019T160306Z-stage6-native-cache-build-d8953f`; qualification `20261019T160525Z-stage6-native-cache-qualification-10411b` | All 32 retained triples and CPU contributions exact; shared capacity, alias charges, pending/failed/withdrawn fills and owner lifetime pass | Retain on `two-gpu-native-cpu-cache-experimental`. Serving handoff, multi-layer integration, host admission at the modeled 4 GiB capacity and latency remain unmeasured |
 | CUDA/CPU activation and contribution exchange | 6 prototype | `29c77cf2` + `bc9e3058…`; same real weights and fixture readout operands | Build `20261019T163127Z-stage6-cpu-exchange-build-f2b8fc`; qualification `20261019T163154Z-stage6-cpu-exchange-qualification-b4ed4a` | 32 exact activation/contribution round trips across both GPUs, concurrent requests sharing one CPU cache, and failure/withdrawal/watchdog paths pass | Retain on `two-gpu-selective-cpu-experimental`. Production route selection, CPU program admission, full host accounting and serving performance remain pending |
 | Shared CPU expert dispatch in serving | 6 prototype | `d92f10c0` + `dd6fb7aa…`; retained as `d7958b29` on `two-gpu-cpu-dispatch-experimental` | Build `20261019T174442Z-stage6-cpu-dispatch-build-84bb82`; operators `20261019T174618Z-stage6-cpu-dispatch-operators-23bcae`; isolation `20261019T175458Z-stage6-cpu-dispatch-isolation-a505ab`; lifecycle `20261019T180054Z-stage6-cpu-dispatch-lifecycle-df0535`; incomplete comparison `20261019T180314Z-stage6-cpu-dispatch-comparison-ea41aa` | Shared native cache reaches about 3.93 GiB; 49 CPU dispatches in the isolated six-response qualification. Initial exact prose/ordinary/tool and lifecycle checks pass, but warmed ordinary continuation fails exact parity on response 12 of the alternating run, with identical GPU choices | No promotion or accepted speed result. Preserve the failed run; diagnose actual routed arithmetic and retention/handoff before another comparison |
+| Actual routed CPU operands and fresh-import replay | 6 diagnostic | `d7958b29` + `861acb77…`; retained as `59b27255` on `two-gpu-cpu-dispatch-diagnostic` | Build `20261019T182107Z-stage6-cpu-capture-build-8581d3`; capture `20261019T182609Z-stage6-cpu-routed-capture-51ed05`; derived replay `20261019T183204Z-stage6-cpu-routed-replay-c98a62` | 53 consumed records across 18 blocks: all retained native weights match fresh source imports and all CPU outputs match fresh CPU execution. CPU/GPU products match in 31/53, contributions in 25/53; down projections with the same GPU product match in 32/53. The instrumented six-request run does not reproduce the warmed output failure | No corruption observed in these records; arithmetic compatibility needs work. Preserve the failed original range check and the verified ordinary subset. No model-quality, numerical-admission or speed claim |
 
 
 ### Stage 0 progress — baseline and diagnostic correction
@@ -2232,16 +2233,73 @@ the source manifest and equivalence record. The original measured identity is
 not relabelled. This branch is experimental and its warmed failure prevents
 promotion. No unit or integration tests were added or run.
 
+### Stage 6 actual routed operands: retained bytes and arithmetic
+
+The diagnostic branch adds **`MAGNITUDE_CAPTURE_CPU_EXPERTS`**, a bounded JSON
+configuration naming an output directory, positive sequence range and at most
+128 records. It retains actual BF16 routed activations, unweighted F32 CPU
+contributions and SHA-256 fingerprints of the leased native weight triple.
+An independent marker records GPU consumption. Weight readback and bounded
+metadata require a fresh transient host claim; there is no additional retained
+weight cache. **`expert-replay`** renders the bound fixture and checks producer,
+model, source ranges, representations and payload digests before replaying fresh
+CPU and CUDA imports.
+
+Build **`20261019T182107Z-stage6-cpu-capture-build-8581d3`** passes. The capture
+run returns all six exact responses with unchanged GPU configurations, so it
+**does not reproduce the earlier warmed failure**. Its original range check fails:
+the requested 327..350 range also includes the preceding repeat. That failed
+run is retained unchanged. The recorded ordinary-request boundary is 328;
+the preceding request's one queued orphan completes at 329 and the new prompt
+at 330, fenced successfully by both owners. A derived subset selects only
+**331..350**. Each of its 53 consumed records uniquely matches a CPU-served
+expert and slot in the corresponding owner's request/source inventory.
+
+Replay **`20261019T183204Z-stage6-cpu-routed-replay-c98a62`** covers 18 blocks
+on both owners and finds:
+
+| Comparison on the actual captured operand | Byte-exact records / 53 | Maximum absolute difference | Maximum per-record relative RMS |
+| --- | ---: | ---: | ---: |
+| Retained native triple versus fresh source import | 53 | 0 | — |
+| Captured CPU contribution versus fresh CPU control | 53 | 0 | 0 |
+| CPU versus GPU gate/up product | 31 | 0.001953125 | 0.000411388 |
+| CPU versus GPU contribution | 25 | 0.00048828125 | 0.001023381 |
+| CPU versus GPU down, both given the GPU product | 32 | 0.0001220703125 | 0.000102047 |
+
+No retained-weight or CPU execution discrepancy is observed in this subset.
+This does not exclude a defect outside the captured records, verify the whole
+final routed fold, or establish the cause of the earlier unreproduced failure.
+Differences with the same down input show that the discrepancy is not confined
+to SiLU. Source inspection identifies a concrete recipe difference: CUDA sums
+integer-code products by coefficient group and folds the scale and bias into
+the F32 accumulator; the CPU decodes each weight and uses lane-wise F32 dots.
+Matching BF16 publication points alone does not make these recipes identical.
+
+Next, evaluate a grouped CPU projection recipe on these actual operands before
+changing serving. It must retain original activation publications and the GPU
+parent's selected reduction policy. No tolerance widening, copied qualification
+evidence or additional tuning budget can replace that work. Payload capacity
+and file-cache displacement remain separate performance problems.
+
+The measured diagnostic source is `d7958b29` plus
+`861acb7765188adc1dd1d800f25bde81a4dc7e5062f6dcabc0ab3e5c7c0cba40`.
+Published **`59b27255f9fa59160e83c9712e5c2d03b835dca0`** preserves all 2,944
+inference files and the gitlink byte-for-byte. Build/source manifests, original
+and derived captures, route matches, per-record comparisons and reproduction
+scripts remain with the run directories. No unit or integration tests were run.
+
 ## Immediate next action
 
 Continue **Stage 6** using the frozen Stage 2b plain serving control. The
 canonical CPU-ready crossover and retention replay justify a bounded CPU-format
 cache using eligible demand records. The physical storage/lease component and
 dual-GPU activation/contribution exchange now pass their scoped qualifications.
-The serving prototype is connected but fails warmed exact parity. First capture
-the actual routed activation and affected expert contribution around that
-failure, distinguish arithmetic differences from retention/source handoff, and
-repair the cause. Repeat affected semantic checks before restarting timing.
+The serving prototype is connected but fails warmed exact parity. Actual-operand
+replay finds no retained-byte or CPU execution discrepancy in its 53 records,
+while cross-backend arithmetic differs. Evaluate a grouped CPU recipe against
+these operands, then repair and qualify affected serving behavior. The earlier
+failure still needs reproduction or a separately verified cause. Repeat
+affected semantic checks before restarting timing.
 Account for
 cache hit rate, import cost, file-cache displacement, worker contention and
 activation/result publication; retaining another copy of raw GGUF bytes alone
