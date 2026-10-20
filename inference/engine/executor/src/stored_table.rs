@@ -40,7 +40,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// How long the filler waits for steps to read the rows of slots it needs
 /// before it fails the step: far beyond any step's device time.
@@ -196,6 +196,7 @@ struct Shared {
     /// `[entries, fields]` I32 (`DirectoryForm`).
     directory: seismic::Tensor,
     fields: u64,
+    trace: bool,
     row_bytes: usize,
     /// The table's rows in the artifact file: `rows` of `row_bytes` from
     /// `offset`.
@@ -256,6 +257,7 @@ impl StoredTable {
             slots: slots_tensor,
             directory: directory_tensor,
             fields,
+            trace: std::env::var_os("MAGNITUDE_TRACE_STORED_TABLE").is_some(),
             row_bytes: row_bytes as usize,
             source,
             offset,
@@ -448,6 +450,7 @@ impl Shared {
         rows: &[Vec<u64>],
         served: bool,
     ) -> Result<Option<StepFailure>, String> {
+        let started = self.trace.then(Instant::now);
         // Each row once, with the batch slots that name it.
         let mut naming = BTreeMap::<u64, Vec<usize>>::new();
         for (slot, rows) in rows.iter().enumerate() {
@@ -518,7 +521,8 @@ impl Shared {
             .map(|row| (self.offset + row * self.row_bytes as u64, self.row_bytes))
             .collect::<Vec<_>>();
         let mut read = vec![false; absent.len()];
-        self.source.read_ranges(&ranges, |index, bytes| {
+        let read_started = self.trace.then(Instant::now);
+        let io = self.source.read_ranges(&ranges, |index, bytes| {
             let written = bytes
                 .map_err(|error| error.to_string())
                 .and_then(|bytes| {
@@ -537,6 +541,7 @@ impl Shared {
                 }
             }
         });
+        let read_ms = read_started.map(|start| start.elapsed().as_secs_f64() * 1000.0);
         for ((row, slot), read) in absent.iter().zip(&taken).zip(read) {
             if read {
                 state.directory.hold(*row, *slot, true);
@@ -553,6 +558,17 @@ impl Shared {
             state.directory.rebuild();
         }
         self.publish(state)?;
+        if let Some(started) = started {
+            eprintln!("stored table {}", serde_json::json!({
+                "step": step, "rows": naming.len(), "misses": absent.len(),
+                "requested_bytes": absent.len() * self.row_bytes,
+                "aligned_read_bytes": io.aligned_bytes, "read_count": io.read_count,
+                "reader_threads": io.worker_count, "read_service_ms": read_ms,
+                "fill_ms": started.elapsed().as_secs_f64() * 1000.0,
+                "slot_capacity": state.named.len(), "slot_bytes": state.named.len() * self.row_bytes,
+                "source_cached_fallback": self.source.reads_cached(), "failed_slots": failed.len(),
+            }));
+        }
         Ok((!failed.is_empty()).then(|| StepFailure {
             slots: FailedSlots::Only(failed),
             error: format!("stored table rows: {}", errors.join("; ")),

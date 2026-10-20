@@ -26,7 +26,7 @@ pub use preprocessing::{
 #[cfg(unix)]
 pub use source::MappedWindow;
 pub use source::{FileSource, SourceReader};
-pub use uncached::UncachedSource;
+pub use uncached::{UncachedReadStats, UncachedSource};
 pub use token::TokenId;
 
 mod token;

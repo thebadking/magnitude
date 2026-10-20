@@ -139,7 +139,13 @@ the whole table's bit for bit.
   the rows a step names that no slot holds from the artifact (sorted, coalesced and bypassing the
   page cache: `O_DIRECT`, `F_NOCACHE` or `FILE_FLAG_NO_BUFFERING`), writes their slots and
   directory entries, then opens the step's gate (a [host gate](execution-plan.md) ahead of the
-  reader). After the reader, the step signals that it has read. A step's rows are the n-gram rows
+  reader). A source owns a bounded, lazily populated persistent reader pool;
+  concurrent callers share its admission bound. Buffers are transient to one
+  admitted batch, completion preserves each requested range's identity, and
+  source release closes the queues and joins its readers. Optional diagnostics
+  distinguish slot misses, requested and aligned read bytes, and host fill time;
+  these are not physical-device I/O or GPU stall measurements.
+  After the reader, the step signals that it has read. A step's rows are the n-gram rows
   of its slots' tokens and the tokens each sequence holds before them (`NGramHash::rows`, the rule
   the device's `ngram_rows` evaluates): of host tokens the host knows them when it queues the step;
   of selected tokens the filler waits for the step's entry graph to copy the selection into

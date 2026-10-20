@@ -15,14 +15,16 @@
 //!
 //! Requested ranges are read in ascending order, ranges whose aligned
 //! blocks touch or lie within [`COALESCE_GAP`] of each other in one read,
-//! and up to [`READERS`] reads at once: storage serves parallel reads at
+//! and up to [`READERS`] reads at once on persistent source-owned workers:
+//! storage serves parallel reads at
 //! nearly the latency of one.
 
 use crate::Error;
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::thread::JoinHandle;
 
 /// The alignment of a direct read's offset, length and buffer: the largest
 /// logical block size of the storage served.
@@ -37,6 +39,20 @@ pub const READERS: usize = 16;
 /// An artifact file opened for reads that bypass the file cache.
 #[derive(Debug)]
 pub struct UncachedSource {
+    file: Arc<UncachedFile>,
+    readers: Mutex<ReadPool>,
+}
+
+/// Planned aligned file service, not physical storage or critical-path time.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UncachedReadStats {
+    pub read_count: usize,
+    pub aligned_bytes: u64,
+    pub worker_count: usize,
+}
+
+#[derive(Debug)]
+struct UncachedFile {
     path: PathBuf,
     /// The file opened for direct reads.
     file: File,
@@ -54,26 +70,26 @@ impl UncachedSource {
         if !metadata.is_file() {
             return Err(Error::Invalid("artifact source is not a regular file".into()));
         }
-        let source = Self {
+        let file = Arc::new(UncachedFile {
             path: path.to_owned(),
             size: metadata.len(),
             file,
             cached: OnceLock::new(),
-        };
+        });
         if !direct {
-            source.fall_back()?;
+            file.fall_back()?;
         }
-        Ok(source)
+        Ok(Self { file, readers: Mutex::new(ReadPool::default()) })
     }
 
     pub fn size(&self) -> u64 {
-        self.size
+        self.file.size
     }
 
     /// Whether reads go through the file cache: the filesystem refused
     /// direct I/O.
     pub fn reads_cached(&self) -> bool {
-        self.cached.get().is_some()
+        self.file.reads_cached()
     }
 
     /// Read every range of `ranges`, `(offset, length)` in the file, and
@@ -84,47 +100,104 @@ impl UncachedSource {
         &self,
         ranges: &[(u64, usize)],
         mut take: impl FnMut(usize, Result<&[u8], &Error>),
-    ) {
+    ) -> UncachedReadStats {
         let outside = Error::Invalid("read outside artifact".into());
         let mut order = Vec::with_capacity(ranges.len());
         for (index, (offset, length)) in ranges.iter().enumerate() {
-            if offset
-                .checked_add(*length as u64)
-                .is_none_or(|end| end > self.size)
-            {
+            if offset.checked_add(*length as u64).is_none_or(|end| end > self.file.size) {
                 take(index, Err(&outside));
             } else {
                 order.push(index);
             }
         }
         order.sort_by_key(|index| ranges[*index].0);
-        let reads = coalesce(ranges, &order, self.size);
-        // Each read lands in a buffer of its own: at most READERS at once.
+        let reads = coalesce(ranges, &order, self.file.size);
+        let mut stats = UncachedReadStats {
+            read_count: reads.len(),
+            aligned_bytes: reads.iter().map(|read| read.end - read.start).sum(),
+            worker_count: 0,
+        };
+        // Serial admission bounds this source to READERS outstanding buffers,
+        // including when several consumers request rows concurrently. Workers
+        // survive calls; buffers still return before the next batch is issued.
+        let mut pool = self.readers.lock().expect("artifact reader pool");
         for batch in reads.chunks(READERS) {
-            let results = std::thread::scope(|scope| {
-                let workers = batch
-                    .iter()
-                    .map(|read| scope.spawn(move || self.read_block(read.start, read.end)))
-                    .collect::<Vec<_>>();
-                workers
-                    .into_iter()
-                    .map(|worker| worker.join().expect("an artifact read never panics"))
-                    .collect::<Vec<_>>()
-            });
+            if let Err(error) = pool.grow(batch.len(), &self.file) {
+                let error = Error::Io(error);
+                for read in batch {
+                    for index in &order[read.ranges.clone()] { take(*index, Err(&error)); }
+                }
+                continue;
+            }
+            let results = pool.read(batch);
             for (read, result) in batch.iter().zip(results) {
                 for index in &order[read.ranges.clone()] {
                     let (offset, length) = ranges[*index];
                     let at = (offset - read.start) as usize;
-                    take(
-                        *index,
-                        result
-                            .as_ref()
-                            .map(|buffer| &buffer.bytes()[at..at + length]),
-                    );
+                    take(*index, result.as_ref().map(|buffer| &buffer.bytes()[at..at + length]));
                 }
             }
         }
+        stats.worker_count = pool.workers.len();
+        stats
     }
+}
+
+#[derive(Debug, Default)]
+struct ReadPool { workers: Vec<ReadWorker> }
+
+#[derive(Debug)]
+struct ReadWorker {
+    jobs: Option<mpsc::SyncSender<(u64, u64)>>,
+    results: mpsc::Receiver<Result<Aligned, Error>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl ReadPool {
+    fn grow(&mut self, count: usize, file: &Arc<UncachedFile>) -> io::Result<()> {
+        while self.workers.len() < count {
+            let (jobs, pending) = mpsc::sync_channel::<(u64, u64)>(1);
+            let (completed, results) = mpsc::sync_channel(1);
+            let file = file.clone();
+            let thread = std::thread::Builder::new().name("artifact-reader".into()).spawn(move || {
+                while let Ok((start, end)) = pending.recv() {
+                    if completed.send(file.read_block(start, end)).is_err() { break; }
+                }
+            })?;
+            self.workers.push(ReadWorker { jobs: Some(jobs), results, thread: Some(thread) });
+        }
+        Ok(())
+    }
+
+    fn read(&self, reads: &[Read]) -> Vec<Result<Aligned, Error>> {
+        let sent = self.workers.iter().zip(reads).map(|(worker, read)| {
+            worker.jobs.as_ref().expect("open reader").send((read.start, read.end)).is_ok()
+        }).collect::<Vec<_>>();
+        self.workers.iter().zip(sent).map(|(worker, sent)| {
+            if sent {
+                worker.results.recv().unwrap_or_else(|_| Err(reader_stopped()))
+            } else { Err(reader_stopped()) }
+        }).collect()
+    }
+}
+
+fn reader_stopped() -> Error {
+    io::Error::new(io::ErrorKind::BrokenPipe, "artifact reader stopped before completion").into()
+}
+
+impl Drop for ReadPool {
+    fn drop(&mut self) {
+        // Close every queue before joining. Jobs own only the file, never the
+        // pool, so no reference cycle can keep a source or its threads alive.
+        for worker in &mut self.workers { worker.jobs.take(); }
+        for worker in &mut self.workers {
+            if let Some(thread) = worker.thread.take() { let _ = thread.join(); }
+        }
+    }
+}
+
+impl UncachedFile {
+    fn reads_cached(&self) -> bool { self.cached.get().is_some() }
 
     /// Read through the file cache from now on.
     fn fall_back(&self) -> Result<&File, Error> {
