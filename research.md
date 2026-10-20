@@ -1,6 +1,6 @@
 # Magnitude inference research and implementation stages
 
-Updated: 2026-10-19
+Updated: 2026-10-20
 
 ## Objective
 
@@ -401,7 +401,7 @@ against a reference require that reference to pass its sanity gate.
 | 5 | SM86 packed-kernel and representation improvements | Packing experiment qualified; repeat improves, ordinary gain below bar; four-warp declaration deferred after a confounded gate | 4 decision |
 | 6 | Selective CPU expert execution | Isolated crossover established; serving fails warmed parity; grouped arithmetic follow-up remains experimental | Transfer profiling, then compute crossover |
 | 7 | Adaptive placement and prompt grouping | Accounting, paired reservations and startup phases qualified experimentally; keep group 8. Capacity helps ordinary generation but exposes repeat source-page misses. Derived-cap RAM retention fails warm speed bars; no overall promotion | Recorded earlier-stage decisions |
-| 8 | Consolidated qualification and reference comparison | In progress: repaired 262K retrieval and fresh two-GPU serving/lifecycle pass. Matched timing, repaired-build smaller-model checks and initial/llama.cpp comparisons remain | Selected candidates disposed |
+| 8 | Consolidated qualification and reference comparison | In progress: repaired 262K and placed correctness gates pass; direct Stage 2b comparison clears ordinary generation bar (−10.891%) with repeat variability. Repaired smaller-model and initial/llama.cpp checks remain | Selected candidates disposed |
 
 A dependency on a decision permits a recorded revert or deferral. It does not
 require forcing an unsuccessful optimization into the code. Reorder remaining
@@ -630,6 +630,7 @@ before running it; fill measured fields only from saved artifacts.
 | Current 262K context request | 8 failure | Frozen `7a0a1f30`, group 8 and ordinary reserves | `20261019T231254Z-stage8-context-262144-d839b3` | Readiness and 2226+37 retrieval pass; 260137-input request fails without output, requiring 60,817,408 bytes with 31,689,933 available. Cache fit uses only 100000 tokens, admitting 216/217 slots | Preserve failure; isolated `82763130` accounts for full configured state before selecting cache capacity. Build and qualify before timing |
 | Full configured-context cache admission | 8 repair | Clean `82763130`, derived from failed `7a0a1f30` | Build `20261019T232622Z-stage8-context-capacity-build-8277bc`; replay `20261019T233141Z-stage8-context-capacity-max-qualification-eaa24c` | Source-verified build and independent hashes pass. Exact 2226+37 and 260137+37 retrievals pass at 262144 capacity, with zero reuse; full-depth fit selects 202/204 slots and both owner bounds fit | Maximum-context regression repaired for the checked profile. Qualify short serving/lifecycle and compare this exact build before performance promotion |
 | Repaired-build placed serving and lifecycle | 8 qualification | Accepted Stage 2b versus clean `82763130`, group 8/context 1024 | Serving `20261019T234759Z-stage8-repaired-placed-strict-823649`; lifecycle `20261019T235250Z-stage8-repaired-placed-lifecycle-699eb9` | Six exact valid responses, equal rendered tokens/native choices/usage/stops; complete tool passes. Prefix reuse, cancellation, recovery and health pass; B retains 223/224 slots | Short placed correctness gates pass. Measure the full consolidated source effect against Stage 2b with tracing disabled and alternating launches |
+| Consolidated source versus accepted Stage 2b | 8 timing | Original Stage 2b binaries versus clean `82763130`, same fixed profile | `20261019T235658Z-stage8-consolidated-comparison-29712b` | All 24 outputs exact, native choices equal, thermal gate passes. Ordinary generation −10.891%, gap beyond both spreads, total −6.158%; repeat mean generation +6.218% within B variability, including a 535.818 MB physical-read window | Retain limited ordinary-continuation benefit. No stable repeat win or broad/default promotion; complete smaller-model and initial/reference coverage |
 
 
 ### Stage 0 progress — baseline and diagnostic correction
@@ -3242,6 +3243,63 @@ paths and no kernel declarations or `seismic-std` bodies. Preserve that complete
 inventory and patch with the next comparison. This is a consolidated source
 comparison, not an isolated test of the final state-depth repair.
 
+### Stage 8 direct Stage 2b comparison — ordinary generation improves
+
+**`20261019T235658Z-stage8-consolidated-comparison-29712b`** finishes on
+2026-10-20. It holds one exclusive lease and passes the thermal gate, with
+maximum observed GPU temperature **48°C**. Four fresh launches run **A/B/B/A**:
+A is the source-verified accepted Stage 2b executable, B the repaired complete
+candidate `82763130`. Both keep context 1024, group 8, plain decoding, lookahead,
+decode-reuse policies and host retention zero. Tracing is disabled. Each launch
+has two fixed warmups per fixture before measured work. All **24 responses are
+exact**, with equal rendered input, output counts and native configurations.
+
+| Fixture | Stage 2b generation | Repaired generation | Generation change | A / B generation spread | Prefill change | Mean model-total change |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Repeat, 64 outputs | 3329.664 ms | 3536.715 ms | +6.218% | 67.705 / 833.687 ms | −13.682% | −4.136% |
+| Ordinary, 60 outputs | 2249.629 ms | 2004.620 ms | **−10.891%** | 33.833 / 9.097 ms | −2.717% | −6.158% |
+
+**The ordinary primary metric clears the declared 3% bar and both observed
+spreads.** Its 245.008 ms mean generation gap exceeds 33.833/9.097 ms spreads;
+mean model total is 5343.229→5014.168 ms, without a material prefill/total
+regression. This directly measures the consolidated source against Stage 2b;
+do not multiply earlier-stage or separate-session percentages into it.
+
+Repeat has **no stable generation win**. Its worse mean does not exceed the
+candidate's generation spread, and its lower mean model total
+(6941.729→6654.591 ms) is smaller than B's **876.012 ms total spread**. Candidate
+passes are 3953.558 and 3119.872 ms generation; preserve both. The slower pass
+records **535.818 MB physical reads**, versus 2.859 MB in B's second pass.
+Control repeat windows read 45.322/1.962 MB physically. This is consistent with
+the earlier costly-source-miss observations, without measuring their precise
+critical-path contribution. Do not discard the slow pass or subtract an
+estimated disk delay to manufacture a repeat speedup.
+
+| Generation-delivery I/O | Stage 2b, two passes | Repaired, two passes |
+| --- | ---: | ---: |
+| Repeat logical reads | 7.219 / 7.227 GB | 6.527 / 6.531 GB |
+| Ordinary logical reads | 3.793 / 3.944 GB | 3.005 / 2.993 GB |
+| Ordinary physical reads | 0 / 0 MB | 0.004 / 0 MB |
+
+Mean logical reads fall **9.612% for repeat and 22.482% for ordinary**.
+Ordinary's negligible physical reads show that its generation gain is not
+explained by avoiding SSD bytes. Avoiding expert movement is consistent with
+the observations; untraced I/O alone does not partition RAM copying, upload,
+conversion, GPU math or coordination. Delivery windows include possible
+lookahead and are not exact device-step intervals. Linux still reports
+**56.561–56.832 GiB cached and 0.411–0.540 GiB free** at measured endpoints;
+the result does not uncover a large unoccupied RAM pool.
+
+The full source inventory/patch, individual timings, physical-owner assessments,
+ready/after memory censuses, raw I/O, thermal records, `analysis.json`,
+`decision.json` and reproduction scripts remain with the run. **Retain the
+ordinary-continuation benefit as a limited profile**, with repeat variability
+explicit. No general repeat-generation, cold-start, long-context speed or
+llama.cpp win is established. Two measured passes per side/fixture limit the
+result. Complete repaired-build smaller-model and initial/reference comparisons
+before final configuration/default decisions. No unit or integration tests
+were added or run.
+
 ### Stage 8 next gate — repaired-build serving and consolidated timing
 
 The 32K and smaller dense-model checks pass. Inspection shows that the placed
@@ -3252,8 +3310,8 @@ repaired request and fresh placed serving/lifecycle gates now pass. Keep their
 source and binaries frozen for timing. This repair changes placed-cache sizing; the separate
 100000-token metadata assessment workload remains documented and unchanged.
 
-Then measure consolidated Stage 7c against accepted Stage 2b directly with
-fixed warm work and alternating launches. Add a short paired 4B timing check
+The direct consolidated Stage 2b comparison now clears the ordinary generation
+bar while retaining repeat variability. Qualify the repaired 4B path and add a short paired timing check
 to quantify the single-GPU regression bound; exact outputs alone do not prove
 unchanged speed. Finally compare the retained configuration with Stage 0 and
 the independent llama.cpp setup. Keep RAM retention, MTP, packing and CPU
@@ -3296,9 +3354,9 @@ change, and retain the earlier asynchronous-batching rejection.
 
 **Stage 8** has a passing repaired 262K-capacity / 260137-input retrieval, in
 addition to fresh placed serving/lifecycle gates on exact repaired build
-`82763130`. Compare the consolidated
-candidate directly with accepted Stage 2b, quantify the smaller-model speed
-regression bound, and compare with initial/reference implementations in
+`82763130`. Its direct comparison with Stage 2b clears ordinary generation's
+bar, with no stable repeat-generation win. Qualify and quantify the repaired
+smaller-model path, then compare with initial/reference implementations in
 alternating sessions. Do not multiply separate-session improvements. Keep RAM
 retention, MTP, packing and CPU dispatch outside the consolidated default unless
 their own declared gates pass. The capacity candidate's earlier repeat regression
