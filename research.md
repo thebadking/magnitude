@@ -31,6 +31,10 @@ architecture authority and must be consulted before implementation changes.
   at the end of this document. Experimental MTP, packing and CPU dispatch remain
   separate from the qualified consolidated plain source.
 
+The next implementation sequence is the **Unified integration roadmap** at the
+end of this document. Its stages supersede treating deferred technologies as
+independent development destinations; the results above remain historical evidence.
+
 ## Current system and evidence
 
 ### Target environment
@@ -3569,3 +3573,70 @@ reported model checks and benchmarks use the evaluation fixture flow.
   quality, more model/hardware families, concurrency, long-context speed and
   stronger repeatability bounds remain unmeasured. Existing checked retrieval,
   semantic and lifecycle behavior must keep passing when their paths change.
+
+## Unified integration roadmap
+
+Requested 2026-10-20: deliver one composable implementation improving generation,
+prefill and complete-request time, with useful MTP. Completing the previous
+research sequence did not complete that performance objective. The following
+work is planned, not implemented or qualified by this document.
+
+### One development line and promotion policy
+
+Use `two-gpu-context-capacity-experimental`, based on qualified engine source
+`82763130`, as the sole integration line. Preserve old experiment branches and
+binary identities as historical controls; do not continue separate feature
+development on them. Port the minimum reviewed changes for each feature into
+the integration line, resolving ownership against its current memory planner.
+Do not merge every experimental branch wholesale: several contain diagnostics,
+superseded implementations or known correctness failures.
+
+Each increment must work with the cumulative implementation. Keep explicit
+plain/MTP and optional-cache controls in the same source so feature costs can
+be isolated. Preserve a qualified plain fallback while MTP is being integrated.
+Use one evolving PR to the user's fork for review, then prepare an upstream PR
+from its accepted changes. Do not merge into main before the cumulative gates.
+Archive branch references in the final PR; branch deletion is unnecessary.
+
+### Ordered implementation stages
+
+| Order | Implementation | Required evidence before advancing |
+| --- | --- | --- |
+| 1 | Port the qualified MTP execution and state-repair changes onto the repaired owner/state-budget implementation. Account for draft weights, verification state, staging, scratch and expert residency together. | Same-source plain/MTP fixture and lifecycle qualification, including rejected proposals and recovery; per-owner memory census and short-context comparison. Retest maximum-context capacity for any changed allocation path; do not assume MTP inherits the plain maximum. |
+| 2 | Attribute MTP prefill, proposal, target verification, repair and expert movement costs. Reduce measured overhead, starting with duplicated memory movement and state/graph work. Examine draft-head placement only with complete boundary-transfer and residency accounting. | Faster ordinary generation and complete-request time versus integrated plain, beyond the existing 3% and spread criteria. Report prefill separately. The prior 21.9% repeat decode gain is motivation, not the expected combined result. |
+| 3 | Reduce expert traffic under one host/device budget. Measure the union of useful source pages, CPU/private buffers and GPU records; identify avoidable duplicate retention and copies. Implement bounded retention or overlapping read/import/upload only where observed stalls justify it. | Lower physical-stall exposure and lower generation time across declared warm and first-request cases, without hiding cold samples or increasing paging. Compare integrated MTP on and off to detect cache competition. Do not repeat an arbitrary cache-size sweep. |
+| 4 | Optimize prefill independently: attribute routed-expert grouping, source import, conversion, attention and owner handoff. Improve reuse/batching and bounded overlap where the measurements identify serialized work. Revisit prompt-group selection with accurate temporary-memory accounting. | Lower prefill and complete-request time on short and long fixture prompts, without generation regression or loss of context capacity. Group 1 already lost; blindly reducing the group is not a proposed fix. |
+| 5 | Integrate compatible conversion/kernel improvements individually, then evaluate whether measured host-launch gaps justify CUDA graph work. | Same-source attribution and cumulative benefit with MTP, with unrelated tuning choices controlled. Hardware/model specialization must retain the smaller single-GPU serving and performance gates. |
+| 6 | Repair selective CPU dispatch and add it to the same scheduler only if it earns a place. First resolve warmed-output divergence and projection arithmetic; then account for import, transport, cache displacement and join ordering. | Serving/recovery correctness before timing, followed by a complete-request gain over the cumulative GPU implementation. The isolated CPU-ready versus GPU-miss crossover is not sufficient. CPU dispatch is not a dependency for delivering faster MTP. |
+| 7 | Qualify and publish the cumulative release candidate. | Matched-work comparison against the installed llama.cpp configuration, integrated plain, and the frozen qualified baseline; prefill, generation, total time, variability and memory reported separately. Preserve small single-GPU performance and actual long-context correctness. |
+
+MTP priming already stops after causal K/V work; removing a supposedly redundant
+full FFN/head is not an evidence-based optimization. Investigate whether necessary
+priming can share inputs, batching or transfers while preserving exact causal
+state. Adaptive proposal depth or disabling unprofitable speculation is a later
+option if measured proposal/verification economics justify it; qualify each
+state transition, and report how often MTP actually runs.
+
+### Shared evaluation and completion criteria
+
+Use the existing fixture evaluation flow, exclusive whole-job lease, thermal
+gates and 30-second tuning allowance. Attribute performance with tracing in
+separate diagnostic runs; use untraced paired timings for decisions. Fix the
+fixture suite, generation lengths, contexts, warmup policy and number of rounds
+before a comparison. Include ordinary continuation, code, tools, repeated text,
+long prefill and both shorter and longer generation, with explicit correctness
+or quality gates for each fixture. Longer outputs may amortize MTP startup cost,
+but must not replace short requests or ordinary continuation in the report.
+
+Distinguish equal-input workload comparisons from equal-generated-work speed
+comparisons. Do not label a shorter answer as faster execution. First-request
+and warm-request results stay separate; no selective rewarming or removal of
+physical-read outliers. If variability prevents a decision, predeclare a new
+paired study rather than extending a favorable run.
+
+The objective is repeatable generation and prefill improvements, useful MTP on
+ordinary workloads, and a demonstrated llama.cpp advantage on declared matched
+workloads without losing the preserved single-GPU path. Existing single-GPU
+advantages motivate this work but do not prove that a 103.7 GiB model spanning
+two GPUs and host storage can achieve the same advantage. No particular speedup
+is promised before measurement.

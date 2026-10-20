@@ -728,6 +728,7 @@ pub(crate) fn attention<'a, G: GraphDraft + 'a>(
     residual: &WorkflowTensor,
     join: &Join,
     block: AttentionBlock<'_>,
+    mut diagnostics: Option<&mut Vec<(&'static str, WorkflowTensor)>>,
 ) -> Result<(WorkflowTensor, AttentionStatePorts, AttentionControlPorts), GraphError> {
     let shape = block.shape;
     let (rows, width, heads) = (block.rows, shape.width, shape.heads());
@@ -787,6 +788,18 @@ pub(crate) fn attention<'a, G: GraphDraft + 'a>(
             value_bound: (&bounds.value.tensor).into(),
         },
     )?;
+    if let Some(diagnostics) = diagnostics.as_mut() {
+        for (name, tensor, present) in [
+            ("attention-query", &projected.r0, !block.inject_only),
+            ("attention-gate", &projected.r1, !block.inject_only && shape.separate_gate > 0),
+            ("attention-key", &projected.r2, shape.fresh > 0),
+            ("attention-value", if shape.projected_value { &projected.r3 } else { &projected.r2 }, shape.fresh > 0),
+        ] {
+            if present {
+                diagnostics.push((name, tensor.clone()));
+            }
+        }
+    }
     // The mix entries read the projection per head.
     let projected = ProjectedRows {
         query: projected.r0.reshape(&[
@@ -848,6 +861,10 @@ pub(crate) fn attention<'a, G: GraphDraft + 'a>(
                     project_mode: 0,
                 },
             )?;
+            if let Some(diagnostics) = diagnostics.as_mut() {
+                diagnostics.push(("indexer-query", projected.r0.clone()));
+                diagnostics.push(("indexer-key", projected.r2.clone()));
+            }
             Some(SelectionInputs {
                 select: entries.select,
                 prefill: entries.prefill,
@@ -874,6 +891,9 @@ pub(crate) fn attention<'a, G: GraphDraft + 'a>(
         return Ok((residual.clone(), state, controls));
     }
     let attended = attended.ok_or("attention result is absent")?;
+    if let Some(diagnostics) = diagnostics.as_mut() {
+        diagnostics.push(("attention-result", attended.clone()));
+    }
     let output_weight = weights
         .output
         .as_ref()

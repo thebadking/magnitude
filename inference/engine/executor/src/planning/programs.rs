@@ -143,6 +143,8 @@ pub struct TargetProgramPlan {
     selection: DType,
     /// The per-layer entry the blocks' per-layer inputs come from.
     per_layer: Option<PerLayerEntryBinding>,
+    /// Raw residual feature export, independent of local head ownership.
+    residual_conditioning: Option<u64>,
 }
 
 impl TargetProgramPlan {
@@ -162,11 +164,20 @@ impl TargetProgramPlan {
             taps,
             selection,
             per_layer: None,
+            residual_conditioning: None,
         }
     }
 
     pub fn with_per_layer(self, per_layer: Option<PerLayerEntryBinding>) -> Self {
         Self { per_layer, ..self }
+    }
+
+    pub fn with_residual_conditioning(self, residual_conditioning: Option<u64>) -> Self {
+        Self { residual_conditioning, ..self }
+    }
+
+    pub fn residual_conditioning(&self) -> Option<u64> {
+        self.residual_conditioning
     }
 
     /// The per-layer entry, when the model has per-layer inputs.
@@ -389,6 +400,15 @@ pub struct ProgramPlan {
 }
 
 impl ProgramPlan {
+    /// The exact carried feature element, including remote raw-residual
+    /// consumers. Formation and its numerical fixture use this same fact.
+    pub fn conditioning_element(&self) -> Element {
+        if self.target.residual_conditioning().is_some() { Element::f32() } else {
+            self.head.as_ref().and_then(|head| head.blocks().first())
+                .map_or(self.target.embedding().activation, |head| head.conditioning)
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         definition: &ModelDefinition,
@@ -500,6 +520,7 @@ pub(super) fn derive_program_plan(
     host_tables: &[HostTablePlan],
     readout_choices: &[super::ReadoutClassChoice],
     bank: Option<&super::ExpertBankPlan>,
+    residual_conditioning: Option<u64>,
     history: KvCodec,
 ) -> Result<ProgramPlan, PlanError> {
     operators::admit(definition, head.is_some())?;
@@ -695,7 +716,8 @@ pub(super) fn derive_program_plan(
         taps,
         activation,
     )
-    .with_per_layer(per_layer_entry);
+    .with_per_layer(per_layer_entry)
+    .with_residual_conditioning(residual_conditioning);
     let draft_program = separate
         .zip(head)
         .map(|(draft, weights)| {

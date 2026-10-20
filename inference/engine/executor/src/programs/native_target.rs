@@ -197,18 +197,103 @@ impl StepSubmitter {
 }
 
 /// Diagnostic output, chosen once when the program is bound.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct TargetTrace {
     batch: bool,
     blocks: bool,
+    rows: Option<TargetRowsTrace>,
 }
 
 impl TargetTrace {
-    fn from_environment() -> Self {
-        Self {
+    fn from_environment() -> Result<Self, SubmitError> {
+        let rows = std::env::var("MAGNITUDE_TRACE_TARGET_ROWS")
+            .ok()
+            .map(|value| serde_json::from_str::<TargetRowsTrace>(&value)
+                .map_err(|error| invalid(format!("MAGNITUDE_TRACE_TARGET_ROWS: {error}"))))
+            .transpose()?;
+        if let Some(rows) = &rows {
+            if rows.start >= rows.end || rows.end - rows.start > 16 {
+                return Err(invalid("target row trace requires 1..=16 logical positions"));
+            }
+            std::fs::create_dir_all(&rows.directory).map_err(device)?;
+        }
+        Ok(Self {
             batch: std::env::var_os("MAGNITUDE_TRACE_TARGET").is_some(),
             blocks: std::env::var_os("MAGNITUDE_TRACE_TARGET_BLOCKS").is_some(),
+            rows,
+        })
+    }
+}
+
+/// A bounded, opt-in observation of completed block tensors. No numerical
+/// state or device backing is created by the observer.
+#[derive(Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TargetRowsTrace {
+    directory: std::path::PathBuf,
+    start: usize,
+    end: usize,
+}
+
+impl TargetRowsTrace {
+    #[allow(clippy::too_many_arguments)]
+    fn capture(
+        &self,
+        block: usize,
+        phase: &str,
+        hidden: &Tensor,
+        residual: Option<&Tensor>,
+        window: RowWindow,
+        batch: &TargetBatchUpload<'_>,
+        state: &RowState<'_>,
+        submitter: &mut StepSubmitter,
+    ) -> Result<(), SubmitError> {
+        use std::io::Write;
+        let mut selected = Vec::new();
+        for local in 0..window.rows as usize {
+            let row = window.first as usize + local;
+            if row >= batch.actual_rows {
+                continue;
+            }
+            let slot = usize::try_from(batch.row_slots[row])
+                .map_err(|_| invalid("traced row has no request slot"))?;
+            let first = usize::try_from(batch.segments[slot][0])
+                .map_err(|_| invalid("traced slot has no first row"))?;
+            let position = state.0.advances()[slot].position() + row - first;
+            if (self.start..self.end).contains(&position) {
+                selected.push((local, row, slot, position));
+            }
         }
+        if selected.is_empty() {
+            return Ok(());
+        }
+        // Keep every graph, bank and stored-table lease in the ordinary
+        // submission. Only observe its producer completions here.
+        submitter.flush()?;
+        wait_all(std::mem::take(&mut submitter.completions))?;
+        for (local, row, slot, position) in selected {
+            for (name, tensor) in [("hidden", Some(hidden)), ("residual", residual)] {
+                let Some(tensor) = tensor else { continue };
+                let tensor = tensor.slice_leading(local as u64, local as u64 + 1).map_err(device)?;
+                let bytes = tensor.read_to_host().map_err(device)?;
+                let stem = self.directory.join(format!("b{block:02}-{phase}-s{slot}-p{position}-{name}"));
+                let mut file = std::fs::OpenOptions::new().write(true).create_new(true)
+                    .open(stem.with_extension("bin")).map_err(device)?;
+                file.write_all(&bytes).map_err(device)?;
+                let metadata = serde_json::json!({
+                    "block": block, "phase": phase, "tensor": name,
+                    "slot": slot, "position": position, "batch_row": row,
+                    "coordinates": batch.coordinates[row], "token": batch.tokens[row],
+                    "actual_rows": batch.actual_rows, "class_rows": batch.class.rows(),
+                    "element": tensor.element().name(), "shape": tensor.extents(),
+                    "bytes": bytes.len(), "device": format!("{:?}", tensor.device().info()),
+                });
+                let mut file = std::fs::OpenOptions::new().write(true).create_new(true)
+                    .open(stem.with_extension("json")).map_err(device)?;
+                file.write_all(&serde_json::to_vec(&metadata).map_err(device)?).map_err(device)?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -530,7 +615,7 @@ impl NativeTargetProgram {
             overlays: Rc::new(RefCell::new(BTreeMap::new())),
             boundary_copy: Rc::default(),
             waiter,
-            trace: TargetTrace::from_environment(),
+            trace: TargetTrace::from_environment()?,
         })
     }
 
@@ -1092,6 +1177,7 @@ impl NativeTargetProgram {
                 run,
                 &batch,
                 &RowState(core),
+                true,
                 (readout_workspace, output),
                 graph_outputs,
                 submitter,
@@ -1144,7 +1230,8 @@ impl NativeTargetProgram {
                     return Err((invalid("distributed selection has no admitted return path"), chain));
                 }
             }
-            if core.boundary().is_some()
+            if core.boundary().is_some_and(|boundary| !boundary.allocation().tensor()
+                    .is_ok_and(|tensor| tensor.belongs_to(&self.device)))
                 || resources.boundary.is_none()
                 || resources.readout_output.is_none()
                 || resources
@@ -1272,6 +1359,7 @@ impl NativeTargetProgram {
                     run,
                     &core.batch().upload(),
                     &RowState(core),
+                    false,
                     (&mut resources.readout_workspace, output),
                     &mut resources.outputs,
                     &mut destination,
@@ -1284,6 +1372,27 @@ impl NativeTargetProgram {
                     selected_rows: selected_rows[index].take(),
                     stored_reads: stored_reads[index].clone(),
                 });
+            }
+            // Prompt boundaries belong to the head's first owner, independently
+            // of the final readout's output arena. Observe every submitted run
+            // before returning raw representation bytes across devices. Keep
+            // every output, bank ticket and state advance until normal claim.
+            if chain.iter_mut().any(|launch| launch.submission_parts_mut().0.boundary().is_some()) {
+                wait_all(std::mem::take(&mut destination.completions))?;
+                for (launch, step) in chain.iter_mut().zip(&mut steps) {
+                    let (core, ..) = launch.submission_parts_mut();
+                    if let Some(boundary) = core.boundary() {
+                        let features = &step.readout.as_ref()
+                            .ok_or_else(|| invalid("placed boundary capture has no features"))?.features;
+                        let row = core.batch().actual_rows() as u64 - 1;
+                        let source = features.tensor().slice_leading(row, row + 1).map_err(device)?;
+                        let mut tensor = boundary.allocation().tensor().map_err(device)?.clone();
+                        tensor.copy_from_device(&source).map_err(device)?;
+                    }
+                    // The completions have been observed; their successful
+                    // submissions still reconcile through their usual owners.
+                    step.sequences = 0;
+                }
             }
             Ok(steps)
         })();
@@ -1312,12 +1421,13 @@ impl NativeTargetProgram {
                 let runs = completions.by_ref().take(step.sequences - taken).collect();
                 taken = step.sequences;
                 let (core, workspace) = launch.into_submission_parts();
+                let boundary = core.boundary().cloned();
                 DeviceSubmission::new(
                     next.waiter.completion(runs),
                     core,
                     (workspace, resources.into_submission_parts()),
                     TargetOutput {
-                        boundary: None,
+                        boundary,
                         readout: step.readout,
                         commits: step.commits,
                         selected_rows: step.selected_rows,
@@ -1607,6 +1717,9 @@ impl NativeTargetProgram {
             }
         }
         let rows = window.rows;
+        if let Some(trace) = &self.trace.rows {
+            trace.capture(index, "input", &hidden, residual.as_ref(), window, batch, state, submitter)?;
+        }
         let block_started = self.trace.blocks.then(Instant::now);
         // A block with listing classes lists the history row tiles the
         // launch's rows see in the smallest class that holds them; a
@@ -1874,6 +1987,19 @@ impl NativeTargetProgram {
         hidden = outputs
             .exported(&graph.output)
             .ok_or_else(|| invalid("target block output was not exported"))?;
+        if let Some(trace) = &self.trace.rows {
+            for (name, edge) in &graph.diagnostics {
+                let tensor = outputs.exported(edge)
+                    .ok_or_else(|| invalid("target diagnostic row was not exported"))?;
+                trace.capture(index, name, &tensor, None, window, batch, state, submitter)?;
+            }
+            if let Some(middle) = &graph.diagnostic_middle {
+                let middle = outputs.exported(middle)
+                    .ok_or_else(|| invalid("target diagnostic middle was not exported"))?;
+                trace.capture(index, "middle", &middle, None, window, batch, state, submitter)?;
+            }
+            trace.capture(index, "output", &hidden, residual.as_ref(), window, batch, state, submitter)?;
+        }
         let previous = index % 2;
         if let Some(previous) = pending[previous].take() {
             graph_outputs[index % 2].recycle(previous).map_err(SubmitError::Invariant)?;
@@ -1969,6 +2095,7 @@ impl NativeTargetProgram {
         run: TargetRun,
         batch: &TargetBatchUpload<'_>,
         state: &RowState<'_>,
+        capture_boundary: bool,
         readout: (&mut NativeGraphWorkspaceLease, NativeGraphOutputLease),
         graph_outputs: &mut [TargetGraphOutputLease; 2],
         submitter: &mut StepSubmitter,
@@ -1997,7 +2124,7 @@ impl NativeTargetProgram {
             readout_output,
             submitter,
         )?;
-        if let Some(boundary) = state.0.boundary() {
+        if let Some(boundary) = state.0.boundary().filter(|_| capture_boundary) {
             let features = &result
                 .as_ref()
                 .ok_or_else(|| invalid("boundary capture has no features"))?

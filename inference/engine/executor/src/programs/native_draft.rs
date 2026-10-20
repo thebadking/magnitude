@@ -820,6 +820,7 @@ fn draft_graph<'a, G: GraphDraft + 'a>(
                 activation,
                 true,
             ),
+            None,
         )?;
         injection.push(Some(LayerPorts {
             controls,
@@ -977,6 +978,7 @@ fn draft_graph<'a, G: GraphDraft + 'a>(
                 activation,
                 false,
             ),
+            None,
         )?;
         layers.push(LayerPorts {
             controls,
@@ -2432,7 +2434,7 @@ fn write_controls(
 
 impl HeadProgram for NativeDraftProgram {
     type Submission =
-        DeviceSubmission<HeadLaunchCore, NativeGraphWorkspaceLease, Option<GraphOutputTensor>>;
+        DeviceSubmission<HeadLaunchCore, (NativeGraphWorkspaceLease, Option<crate::HeadConditioningTransfer>), Option<GraphOutputTensor>>;
 
     fn submit(
         &mut self,
@@ -2453,7 +2455,7 @@ impl HeadProgram for NativeDraftProgram {
         Ok(DeviceSubmission::new(
             self.waiter.completion(vec![completion]),
             core,
-            workspace,
+            (workspace, None),
             selections,
         ))
     }

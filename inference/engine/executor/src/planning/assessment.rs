@@ -201,7 +201,7 @@ impl AssessmentGraphResourceBounds {
         }
         // The same startup slots a load commits: one request's need.
         let slots = limits.startup_slots();
-        let (target_graph, sealed_target_graphs, target_uploads, boundary_bytes) = match owned {
+        let (target_graph, sealed_target_graphs, target_uploads, boundary_bytes) = match owned.as_ref() {
             Some(owned) => {
                 crate::programs::native_target_graph::checked_target_range_with_boundary(
                     backend,
@@ -210,7 +210,7 @@ impl AssessmentGraphResourceBounds {
                     state,
                     plan.target(),
                     limits,
-                    owned,
+                    owned.clone(),
                 )?
             }
             None => {
@@ -242,7 +242,15 @@ impl AssessmentGraphResourceBounds {
             1,
             slots.readout,
         )?;
-        let (head, head_constant_bytes) = match (plan.head(), plan.draft(), state.head_state()) {
+        // Head execution belongs to the entry owner; state-copy programs still
+        // retain the complete logical state inventory on both owners.
+        let local_head_state = if owned.as_ref().is_some_and(|range| range.start != 0) {
+            None
+        } else {
+            state.head_state()
+        };
+        let mut conditioning_bytes = 0;
+        let (head, head_constant_bytes) = match (plan.head(), plan.draft(), local_head_state) {
             // A head reading target history keeps no state of its own.
             (None, None, None) if plan.shared_head().is_some() => {
                 let shared = plan
@@ -314,19 +322,23 @@ impl AssessmentGraphResourceBounds {
                 let history = head_state.sole_history()?;
                 let history_rows =
                     u64::try_from(history.rows).map_err(|_| "head history rows exceed u64")?;
+                let classes = crate::programs::native_head::head_graph_classes(
+                    limits, history_rows, history.slab_rows,
+                    head_state.span_limit(), method.draft_rows(),
+                )?;
+                if owned.is_some() {
+                    conditioning_bytes = crate::programs::native_head::checked_conditioning_transfer_bytes(
+                        backend, load, &definition.decoder, head_block, binding, &classes,
+                    )?.checked_mul(slots.head.activations as u64)
+                        .ok_or("head conditioning pool charge overflows")?;
+                }
                 let head_graph = crate::programs::native_head::checked_head_family_storage(
                     backend,
                     load,
                     &definition.decoder,
                     head_block,
                     binding,
-                    crate::programs::native_head::head_graph_classes(
-                        limits,
-                        history_rows,
-                        history.slab_rows,
-                        head_state.span_limit(),
-                        method.draft_rows(),
-                    )?,
+                    classes,
                 )?;
                 (
                     Some(NativeGraphCharge::from_checked(
@@ -398,6 +410,7 @@ impl AssessmentGraphResourceBounds {
         )?
         .checked_add(binding_constant_bytes)
         .and_then(|bytes| bytes.checked_add(boundary_bytes))
+        .and_then(|bytes| bytes.checked_add(conditioning_bytes))
         .ok_or("checked graph resource bound overflow")?;
         Ok(Self {
             target,
@@ -436,12 +449,17 @@ pub(super) fn range_memory_charge(
     owner: usize,
 ) -> Result<RangeMemoryCharge, String> {
     let policy = draft.policy();
+    let local_method = if owner == 0 { policy.method() } else { PlannedMethod::Plain };
+    let local_selection = ComponentSelection {
+        head: range.physical_load().head().is_some(),
+        vision: false,
+    };
     let terms = AssessmentMemoryTerms::derive(
         definition,
         range.physical_load(),
-        policy.selection(),
+        local_selection,
         policy.codec(),
-        policy.method(),
+        local_method,
         policy.limits(),
     )?;
     let programs = range
@@ -470,7 +488,7 @@ pub(super) fn range_memory_charge(
         definition,
         range.graph_load(),
         state,
-        policy.method(),
+        local_method,
         policy.codec(),
         policy.limits(),
         draft.device().backend(),
@@ -486,9 +504,14 @@ pub(super) fn range_memory_charge(
     // Import ends before the initial state is allocated. Preparation has
     // neither the model's physical weights nor its graph pools and is
     // bounded independently, without subtracting later host-shared holdings.
-    let loading_peak = range.import_peak_bytes().max(
-        *startup.get(owner).ok_or("unknown startup state owner")?,
-    );
+    let initial_state = *startup.get(owner).ok_or("unknown startup state owner")?;
+    // The optional head imports during warmup, after initial state allocation.
+    let loading_peak = if local_selection.head {
+        range.import_peak_bytes().checked_add(initial_state)
+            .ok_or("head import and initial state charge overflow")?
+    } else {
+        range.import_peak_bytes().max(initial_state)
+    };
     let memory = terms.charge_loading_peak(
         header.with_graph_resource_bound(&graph)?,
         *fit.get(owner).ok_or("unknown fit state owner")?,

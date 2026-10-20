@@ -15,6 +15,9 @@ store coalesces logically adjacent spans within one slab, and batching preserves
 so no span crosses a slab. The span class limit is the largest span bound of the loaded store's
 history domains, each `ceil(row limit / rows per slab) + 16` (see
 [state transactions](state-transactions.md)).
+Joining accepted history with tentative rows coalesces physically adjacent
+ranges within one slab, in logical order, for causal, indexer and Shared reads.
+The join preserves the canonical spans of the equivalent committed history.
 Causal target rows using a compressed cache include their earlier reserved destinations in
 visible history after ordered cache preparation; their own row remains dense fresh input.
 Declared bidirectional media and separate draft blocks retain their own fresh-row semantics.
@@ -58,6 +61,12 @@ paired lookahead.
 A successor-dependent head's device entry can join one independently owned prior feature with
 the leading features of the current target chunk. The join uses planned head scratch and
 preserves activation storage exactly; it does not read the features through the host.
+When the target producer is on another device, transport first copies the exact
+conditioning representation into an admitted independent input slot on the head
+owner. Bounded host staging is permitted for that transport; it performs no
+numerical conversion. Producer output leases and consumer transfer slots remain
+owned until their respective physical work completes. The local join retains
+the same successor and previous-row semantics.
 A program whose attention graphs have a class that lists history row tiles derives the list from the
 batch's visible spans per history domain (`magnitude_batching::history_tiles`: distinct, ascending,
 `-1` padded 256-row tiles) and selects the smallest such class the list fits; a launch whose rows see
@@ -74,6 +83,17 @@ and output leases and follows the same submit, complete, and reconcile lifecycle
 
 Batching does not depend on execution or contain device values. Execution does not reinterpret
 independent arrays to reconstruct row alignment inside a native program.
+
+An opt-in block diagnostic may retain exact raw input and output rows over a bounded
+logical-position range. It observes all queued producer completions before reading
+retained tensors without changing numerical state. Additional intermediate exports
+belong to the sealed graph's layout, admission charges and sharing identity;
+the observer allocates no device storage during submission.
+Named intermediate exports use their producers' actual descriptors rather than
+an independent shape or representation definition.
+Exports retain the representation, shape, logical position, validated row mapping
+and owner. Duplicate output identities fail instead of silently replacing evidence.
+Diagnostic synchronization is excluded from production timing claims.
 
 ## Acceptance criteria
 

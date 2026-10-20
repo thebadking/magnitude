@@ -52,6 +52,7 @@ use in_flight::{PrimingFlight, TargetRequests, TargetWork, decode_selected};
 pub use ownership::OpenRequirements;
 pub use state::{DeviceMemoryCharge, MemoryChargeReconciliation};
 pub use target::TargetHostTiming;
+pub(crate) use draft::append_within_slabs;
 pub(crate) use target::{
     AppendedRuns, accepted_history, cached_causal_domain, indexer_domain, indexer_history,
 };
@@ -553,11 +554,16 @@ impl ExecutorDomain<NativeFamily> {
         execution: Rc<ExecutionPlan>, definition: Rc<ModelDefinition>,
         memory: DeviceHeap, programs: Rc<AttestedPrograms>, resources: AllocatedResources,
         resident: crate::ResidentTarget, target_state: StoreBindings,
+        head_loader: Option<ComponentLoader<ResidentHead>>, head_state: Option<StoreBindings>,
         peer_execution: Rc<ExecutionPlan>, peer_memory: DeviceHeap, peer_programs: Rc<AttestedPrograms>,
         peer_resources: AllocatedResources, peer_resident: crate::ResidentTarget,
     ) -> Result<(Self, StateBindings), String> {
-        if execution.policy().method() != crate::PlannedMethod::Plain {
-            return Err("placed executor requires plain execution".into());
+        let drafts = matches!(execution.policy().method(), crate::PlannedMethod::Mtp { .. });
+        if !matches!(execution.policy().method(), crate::PlannedMethod::Plain | crate::PlannedMethod::Mtp { .. })
+            || head_loader.is_some() != drafts || head_state.is_some() != drafts
+            || drafts && !definition.head.as_ref().is_some_and(|head|
+                head.history == magnitude_family_contracts::HeadHistory::Own) {
+            return Err("placed executor requires plain execution or an own-history causal head".into());
         }
         if execution.policy().limits().lookahead && !programs.target_graphs()
             .is_some_and(|graphs| graphs.supports_selected_return()) {
@@ -572,9 +578,9 @@ impl ExecutorDomain<NativeFamily> {
         }
         let peer_resources = Rc::new(RefCell::new(peer_resources));
         let family = NativeFamily::new_placed(programs, resident, peer_programs, peer_resident,
-            peer_resources.clone(), definition.decoder.clone())?;
+            peer_resources.clone(), resources.conditioning().cloned(), definition.decoder.clone())?;
         let (mut executor, bindings) = Self::with_family(execution, definition, resources, memory,
-            target_state, None, None, None, family);
+            target_state, head_state, head_loader, None, family);
         executor.domain.set_graph_output_device(peer_memory.device().clone());
         executor.peer = Some(PeerDeviceResources {
             execution: peer_execution, memory: RefCell::new(peer_memory), resources: peer_resources, static_holding: None,

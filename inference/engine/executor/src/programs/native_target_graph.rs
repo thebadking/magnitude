@@ -506,12 +506,13 @@ impl PlannedSealedGraphs {
 /// lengths: `weights` weight ports, `constants` constants and `state` state
 /// ports. What the planner counts from a block's template and what
 /// `PreparedTargetBlockGraph::prepare` leaves a graph holding.
-fn owned_vectors_heap(weights: usize, constants: usize, state: usize) -> HostHeap {
+fn owned_vectors_heap(weights: usize, constants: usize, state: usize, diagnostics: usize) -> HostHeap {
     use std::mem::size_of;
     let mut heap = HostHeap::default();
     heap.hold(weights, size_of::<(WeightPort, NativePort)>());
     heap.hold(constants, size_of::<GraphConstant>());
     heap.hold(state, size_of::<NativePort>());
+    heap.hold(diagnostics, size_of::<(&'static str, WorkflowTensor)>());
     heap
 }
 
@@ -768,6 +769,7 @@ struct BlockGraphShape {
     /// Interior blocks cannot stand in for the stream widening or exit mix.
     widens_streams: bool,
     mixes_exit: bool,
+    diagnostic_middle: bool,
     /// Where a separate draft taps the block.
     tapped: TapPositions,
     /// A streamed routed layer's place among the bank's layers
@@ -962,6 +964,7 @@ fn block_graph_shapes(
                         .is_some(),
                 mixes_exit: index + 1 == geometry.blocks.len()
                     && matches!(geometry.exit.norm, ExitNorm::HyperConnectionHead(_)),
+                diagnostic_middle: diagnostic_middle(index).map_err(|error| error.to_string())?,
                 tapped: tapped[index].positions(),
                 streaming: crate::streaming::layout::block_key(load, index)?,
             })
@@ -2376,6 +2379,8 @@ pub(crate) fn checked_entry_graph_storage(
 #[derive(Clone)]
 pub(crate) struct PreparedTargetBlockGraph {
     pub residual: Option<WorkflowTensor>,
+    pub diagnostic_middle: Option<WorkflowTensor>,
+    pub diagnostics: Vec<(&'static str, WorkflowTensor)>,
     pub plan: NativeGraphPlan,
     pub hidden: NativePort,
     pub weights: Vec<(WeightPort, NativePort)>,
@@ -3030,9 +3035,9 @@ impl PreparedTargetBlockGraph {
         graph
             .export(&parts.output)
             .map_err(|error| error.to_string())?;
-        if let Some(residual) = &parts.residual {
-            graph.export(residual).map_err(|error| error.to_string())?;
-        }
+        if let Some(residual) = &parts.residual { graph.export(residual).map_err(|error| error.to_string())?; }
+        if let Some(middle) = &parts.diagnostic_middle { graph.export(middle).map_err(|error| error.to_string())?; }
+        for (_, tensor) in &parts.diagnostics { graph.export(tensor).map_err(|error| error.to_string())?; }
         let plan = graph.seal().map_err(|error| error.to_string())?;
         // The graph's constants are the family's values, and its vectors
         // hold exactly their elements: what it owns then follows from its
@@ -3041,9 +3046,11 @@ impl PreparedTargetBlockGraph {
             family.share(constant);
         }
         let mut state = parts.state;
+        let mut diagnostics = parts.diagnostics;
         weights.shrink_to_fit();
         constants.shrink_to_fit();
         state.shrink_to_fit();
+        diagnostics.shrink_to_fit();
         Ok(Self {
             plan,
             hidden,
@@ -3056,6 +3063,8 @@ impl PreparedTargetBlockGraph {
             ngram: parts.ngram,
             step_sequence: parts.step_sequence,
             residual: parts.residual,
+            diagnostic_middle: parts.diagnostic_middle,
+            diagnostics,
             output: parts.output,
         })
     }
@@ -3068,6 +3077,7 @@ impl PreparedTargetBlockGraph {
             self.weights.capacity(),
             self.constants.capacity(),
             self.state.ports().capacity(),
+            self.diagnostics.capacity(),
         )
     }
 }
@@ -3088,6 +3098,8 @@ struct BlockGraphInputs<'a> {
 
 struct BlockGraphParts {
     residual: Option<WorkflowTensor>,
+    diagnostic_middle: Option<WorkflowTensor>,
+    diagnostics: Vec<(&'static str, WorkflowTensor)>,
     output: WorkflowTensor,
     state: BlockStatePorts,
     controls: BlockControlPorts,
@@ -3098,6 +3110,21 @@ struct BlockGraphParts {
     ngram: Option<NGramStepPorts>,
     /// The step-sequence input of a streamed routed layer that sets the step.
     step_sequence: Option<NativePort>,
+}
+
+/// Diagnostic exports are part of both the sealed layout and the block's
+/// sharing identity, so their retained storage is admitted before loading.
+fn diagnostic_middle(block: usize) -> Result<bool, GraphError> {
+    if std::env::var_os("MAGNITUDE_TRACE_TARGET_ROWS").is_none() {
+        return Ok(false);
+    }
+    match std::env::var("MAGNITUDE_TRACE_TARGET_MIDDLE_BLOCK") {
+        Ok(value) => value.parse::<usize>()
+            .map(|index| index == block)
+            .map_err(|error| format!("MAGNITUDE_TRACE_TARGET_MIDDLE_BLOCK: {error}").into()),
+        Err(std::env::VarError::NotPresent) => Ok(false),
+        Err(error) => Err(error.to_string().into()),
+    }
 }
 
 /// The width of block `block_index`'s input rows: the embedded rows into
@@ -3180,6 +3207,8 @@ fn block_graph<'a, G: GraphDraft + 'a>(
         }
         _ => hidden.clone(),
     };
+    let mut diagnostics = Vec::new();
+    let observe = diagnostic_middle(block_index)?;
     let (mixed, mut state_ports, controls) = sublayers.mixer(
         graph,
         mixer_entries,
@@ -3187,6 +3216,7 @@ fn block_graph<'a, G: GraphDraft + 'a>(
         &hidden,
         weights,
         constants,
+        observe.then_some(&mut diagnostics),
     )?;
     if let Some(taps) = taps.as_mut().filter(|taps| taps.positions.middle) {
         if paired.feed_forward.is_none() {
@@ -3194,6 +3224,7 @@ fn block_graph<'a, G: GraphDraft + 'a>(
         }
         taps.ports.middle = Some(taps.tap(graph, &mixed)?);
     }
+    let diagnostic_middle = observe.then(|| mixed.clone());
     let (output, step_sequence) = sublayers.feed_forward(
         graph,
         feed_forward_entries,
@@ -3249,6 +3280,8 @@ fn block_graph<'a, G: GraphDraft + 'a>(
     }
     Ok(BlockGraphParts {
         residual,
+        diagnostic_middle,
+        diagnostics,
         output,
         state: state_ports,
         controls,
@@ -3352,10 +3385,10 @@ fn checked_block_graph_draft(
         &mut constants,
     )?;
     GraphDraft::export(&mut graph, &parts.output)?;
-    if let Some(residual) = &parts.residual {
-        GraphDraft::export(&mut graph, residual)?;
-    }
-    let owned = owned_vectors_heap(weights.len(), constants.len(), parts.state.ports().len());
+    if let Some(residual) = &parts.residual { GraphDraft::export(&mut graph, residual)?; }
+    if let Some(middle) = &parts.diagnostic_middle { GraphDraft::export(&mut graph, middle)?; }
+    for (_, tensor) in &parts.diagnostics { GraphDraft::export(&mut graph, tensor)?; }
+    let owned = owned_vectors_heap(weights.len(), constants.len(), parts.state.ports().len(), parts.diagnostics.len());
     Ok((graph, constants, owned, incoming_hidden_bytes))
 }
 

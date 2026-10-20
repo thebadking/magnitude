@@ -1548,6 +1548,7 @@ impl ModelLoadPlan {
             &self.host_tables,
             &self.readout_choices,
             self.bank.as_ref(),
+            self.residual_conditioning,
             history,
         )
     }

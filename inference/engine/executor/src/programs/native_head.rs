@@ -803,6 +803,7 @@ fn head_graph_draft<'a, G: GraphDraft + 'a>(
                 causal_cache: false,
                 selection: None,
             },
+            None,
         )?;
         let (Some(output_norm), Some(out_rows)) = (&output_norm, &out_rows) else {
             graph.set_class_scope(None);
@@ -1151,6 +1152,36 @@ pub(crate) fn checked_head_family_storage(
         .map(|(resources, _)| resources)
 }
 
+/// Project cross-owner conditioning from the same checked external ports that
+/// the sealed head uses. The current chunk and prior row are distinct holdings.
+pub(crate) fn checked_conditioning_transfer_bytes(
+    backend: BackendName,
+    load: &ModelLoadPlan,
+    geometry: &Decoder,
+    head: CausalHeadBlock<'_>,
+    binding: HeadBinding,
+    classes: &[HeadGraphClass],
+) -> Result<u64, GraphError> {
+    let checked = CheckedHeadEntries::new(binding, backend)?;
+    let mut bytes = 0u64;
+    for prefix in [false, true] {
+        let class = classes.iter().filter(|class| class.device && class.prefix == prefix)
+            .max_by_key(|class| class.entry_rows)
+            .ok_or("head has no checked device conditioning class")?;
+        let draft = head_graph_draft(
+            NativeGraphMetadata::new(backend), checked.entries()?, load,
+            geometry, head, binding.feed_forward, *class, backend,
+        )?;
+        let port = if prefix { draft.previous } else { draft.conditioning }
+            .ok_or("head has no checked conditioning port")?;
+        let metadata = draft.plan.tensor_metadata(port.tensor())
+            .ok_or("head conditioning descriptor is absent")?;
+        bytes = bytes.checked_add(metadata.canonical_bytes)
+            .ok_or("head conditioning transfer charge overflows")?;
+    }
+    Ok(bytes)
+}
+
 fn certify_head_family(
     backend: BackendName,
     load: &ModelLoadPlan,
@@ -1312,6 +1343,25 @@ pub(crate) fn verify_head_family_certificates(
 }
 
 impl PreparedHeadGraphs {
+    /// Derive transfer storage from sealed external input descriptors, including
+    /// F32 residual chains. Shapes and dtype are not inferred from hidden width.
+    pub(crate) fn conditioning_transfer_metadata(&self) -> Result<(seismic::NativeTensorMetadata, seismic::NativeTensorMetadata), String> {
+        let current = self.classes.iter().filter(|(class, _)| class.device)
+            .filter_map(|(_, graph)| graph.conditioning.as_ref()
+                .and_then(|port| graph.plan.tensor_metadata(port.tensor())))
+            .max_by_key(|meta| meta.canonical_bytes).ok_or("head has no sealed device conditioning input")?;
+        let previous = self.classes.iter().filter(|(class, _)| class.device && class.prefix)
+            .find_map(|(_, graph)| graph.previous.as_ref()
+                .and_then(|port| graph.plan.tensor_metadata(port.tensor())))
+            .ok_or("head has no sealed previous-row conditioning input")?;
+        if current.extents.len() != 2 || previous.extents.len() != 2
+            || previous.extents[0] != 1 || current.extents[1] != previous.extents[1]
+            || current.element != previous.element {
+            return Err("head conditioning input descriptors disagree".into());
+        }
+        Ok((current, previous))
+    }
+
     pub fn binding_constant_bytes(&self) -> Result<u64, String> {
         distinct_storage_bytes(
             self.classes
@@ -1607,9 +1657,14 @@ pub struct NativeHeadProgram {
     geometry: Decoder,
     graphs: BoundHeadGraphs,
     waiter: CompletionWaiter,
+    conditioning: Option<crate::resources::HeadConditioningPool>,
 }
 
 impl NativeHeadProgram {
+    pub(crate) fn install_conditioning(&mut self, pool: crate::resources::HeadConditioningPool) {
+        self.conditioning = Some(pool);
+    }
+
     pub(crate) fn constant_bytes(&self) -> Result<u64, &'static str> {
         self.graphs.constant_bytes()
     }
@@ -1620,6 +1675,7 @@ impl NativeHeadProgram {
             geometry,
             graphs,
             waiter,
+            conditioning: None,
         })
     }
 
@@ -1630,7 +1686,7 @@ impl NativeHeadProgram {
         core: &HeadLaunchCore,
         workspace: &mut NativeGraphWorkspaceLease,
         output: NativeGraphOutputLease,
-    ) -> Result<(seismic::NativeGraphCompletion, Option<GraphOutputTensor>), SubmitError> {
+    ) -> Result<(seismic::NativeGraphCompletion, Option<GraphOutputTensor>, Option<crate::HeadConditioningTransfer>), SubmitError> {
         let batch = core.batch();
         let entry = batch.upload();
         let chain = batch.chain().collect::<Vec<_>>();
@@ -1688,6 +1744,15 @@ impl NativeHeadProgram {
             return Err(invalid("head graph passes differ from the batch's steps"));
         }
         let mut bindings = bound.bindings();
+        let mut transfer = None;
+        if let crate::HeadConditioning::Features { current, .. } = core.conditioning() {
+            let device = planes.first().ok_or_else(|| invalid("head history has no plane"))?.device();
+            if !current.tensor().belongs_to(&device) {
+                transfer = Some(self.conditioning.as_ref()
+                    .ok_or_else(|| invalid("foreign head features have no admitted transfer storage"))?
+                    .acquire().map_err(|error| invalid(error.to_string()))?);
+            }
+        }
         for pass in &graph.passes {
             if pass.planes.len() != planes.len() {
                 return Err(invalid(
@@ -1731,8 +1796,19 @@ impl NativeHeadProgram {
                 previous,
             } => {
                 if let (Some(port), Some(previous)) = (&graph.previous, previous) {
+                    let previous = previous.allocation().tensor().map_err(device)?;
+                    let local = if let Some(transfer) = &mut transfer {
+                        // Cached boundaries normally already belong to this
+                        // owner. The second branch keeps transport explicit.
+                        if previous.belongs_to(&transfer.previous.device()) {
+                            previous.clone()
+                        } else {
+                            transfer.previous.copy_from_device(previous).map_err(device)?;
+                            transfer.previous.clone()
+                        }
+                    } else { previous.clone() };
                     bindings
-                        .set(port, previous.allocation().tensor().map_err(device)?)
+                        .set(port, &local)
                         .map_err(device)?;
                 }
                 if let Some(port) = &graph.conditioning {
@@ -1740,7 +1816,12 @@ impl NativeHeadProgram {
                         .tensor()
                         .slice_leading(0, entry_rows as u64)
                         .map_err(|error| invalid(format!("head conditioning features: {error}")))?;
-                    bindings.set(port, &features).map_err(device)?;
+                    let local = if let Some(transfer) = &mut transfer {
+                        let mut local = transfer.current.slice_leading(0, entry_rows as u64).map_err(device)?;
+                        local.copy_from_device(&features).map_err(device)?;
+                        local
+                    } else { features };
+                    bindings.set(port, &local).map_err(device)?;
                 }
             }
         }
@@ -1817,13 +1898,13 @@ impl NativeHeadProgram {
                     .ok_or_else(|| invalid("head graph omitted its selections"))
             })
             .transpose()?;
-        Ok((completion, selections))
+        Ok((completion, selections, transfer))
     }
 }
 
 impl HeadProgram for NativeHeadProgram {
     type Submission =
-        DeviceSubmission<HeadLaunchCore, NativeGraphWorkspaceLease, Option<GraphOutputTensor>>;
+        DeviceSubmission<HeadLaunchCore, (NativeGraphWorkspaceLease, Option<crate::HeadConditioningTransfer>), Option<GraphOutputTensor>>;
 
     fn submit(
         &mut self,
@@ -1836,7 +1917,7 @@ impl HeadProgram for NativeHeadProgram {
                 None => Err(invalid("head graph output lease is absent")),
             }
         };
-        let (completion, selections) = match queued {
+        let (completion, selections, transfer) = match queued {
             Ok(queued) => queued,
             Err(error) => return Err((error, launch)),
         };
@@ -1844,7 +1925,7 @@ impl HeadProgram for NativeHeadProgram {
         Ok(DeviceSubmission::new(
             self.waiter.completion(vec![completion]),
             core,
-            workspace,
+            (workspace, transfer),
             selections,
         ))
     }

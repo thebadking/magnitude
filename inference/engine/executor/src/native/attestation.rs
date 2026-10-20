@@ -946,11 +946,7 @@ impl AttestedPrograms {
         if target.taps().is_some() {
             bytes += bytes!(tap_rows) + bytes!(project_rows) + bytes!(feature_rows);
         }
-        if plan.head().is_some_and(|head| {
-            head.blocks()
-                .iter()
-                .any(|block| block.conditioning == Element::f32())
-        }) {
+        if target.residual_conditioning().is_some() {
             bytes += bytes!(feature_rows);
         }
         if let Some(head) = plan.head() {

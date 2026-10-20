@@ -1017,8 +1017,17 @@ pub(crate) struct TargetBoundaryPlan {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct HeadConditioningPlan {
+    pub current: seismic::NativeTensorMetadata,
+    pub previous: seismic::NativeTensorMetadata,
+    pub slots: usize,
+    pub bytes: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResourcePlan {
     boundary: Option<TargetBoundaryPlan>,
+    conditioning: Option<HeadConditioningPlan>,
     decoder_range: Option<super::DecoderRange>,
     pub(super) domain_capacity_bytes: u64,
     /// Included in aggregate charges, but held outside the allocation domain.
@@ -1043,6 +1052,7 @@ pub struct ResourcePlan {
 
 impl ResourcePlan {
     pub(crate) fn boundary(&self) -> Option<&TargetBoundaryPlan> { self.boundary.as_ref() }
+    pub(crate) fn conditioning(&self) -> Option<&HeadConditioningPlan> { self.conditioning.as_ref() }
 
     /// Admit the second owner's persistent transfer slots using the sealed
     /// source outputs and destination input. Revalidate the full startup peak.
@@ -1118,6 +1128,7 @@ impl ResourcePlan {
     pub(super) fn validate(mut self) -> Result<Self, String> {
         let scratch = graph_scratch_bytes(&self.graph_charges())?
             .checked_add(self.boundary.as_ref().map_or(0, |boundary| boundary.bytes))
+            .and_then(|bytes| bytes.checked_add(self.conditioning.as_ref().map_or(0, |plan| plan.bytes)))
             .ok_or("boundary scratch charge overflows")?;
         if self.bytes.scratch != scratch {
             return Err(
@@ -1128,8 +1139,14 @@ impl ResourcePlan {
         let loading_peak = if self.decoder_range.is_some() {
             let state = self.bytes.history.checked_add(self.bytes.recurrent_banks)
                 .ok_or("range initial state bytes overflow")?;
+            let import_and_state = if self.head_state.is_some() {
+                state.checked_add(self.qualification_peak_bytes)
+                    .ok_or("head import and initial state charge overflow")?
+            } else {
+                state.max(self.qualification_peak_bytes)
+            };
             self.steady_committed_bytes.checked_sub(state)
-                .and_then(|bytes| bytes.checked_add(state.max(self.qualification_peak_bytes)))
+                .and_then(|bytes| bytes.checked_add(import_and_state))
                 .ok_or("range loading peak byte count overflow")?
         } else {
             self.steady_committed_bytes.checked_add(self.qualification_peak_bytes)
@@ -1228,11 +1245,15 @@ impl StateResourcePlan {
             .placement
             .as_ref()
             .ok_or("state has no decoder device placement")?;
-        self.target_state.initial_committed_bytes_by_owner(
+        let mut bytes = self.target_state.initial_committed_bytes_by_owner(
             &self.history_owners,
             &self.recurrent_owners,
             placement.ranges().len(),
-        )
+        )?;
+        bytes[0] = bytes[0].checked_add(self.head_state.as_ref()
+            .map(|state| state.initial_committed_bytes()).transpose()?.unwrap_or(0))
+            .ok_or("placed head startup charge overflows")?;
+        Ok(bytes)
     }
 
     /// Materialize the already projected domains on the exact selected opened
@@ -1331,13 +1352,17 @@ impl StateResourcePlan {
             .placement
             .as_ref()
             .ok_or("per-owner fit requires placed state")?;
-        self.target_state.fit_bytes_by_owner(
+        let mut bytes = self.target_state.fit_bytes_by_owner(
             depth,
             banks,
             &self.history_owners,
             &self.recurrent_owners,
             placement.ranges().len(),
-        )
+        )?;
+        bytes[0] = bytes[0].checked_add(self.head_state.as_ref()
+            .map(|state| state.history_bytes_at_depth(depth)).transpose()?.unwrap_or(0))
+            .ok_or("placed head fit charge overflows")?;
+        Ok(bytes)
     }
 
     /// The state slabs a load commits at startup, before any request.
@@ -1382,6 +1407,7 @@ impl ResourcePlanner {
     pub fn state_plan_placed(
         definition: &ModelDefinition,
         load: &ModelLoadPlan,
+        method: PlannedMethod,
         codec: KvCodec,
         limits: ResourceLimits,
         placement: &super::DecoderPlacement,
@@ -1398,8 +1424,11 @@ impl ResourcePlanner {
         {
             return Err("state placement differs from the model's decoder extent".into());
         }
-        if load.head.is_some() || load.vision.is_some() {
-            return Err("distributed state currently requires plain text target execution".into());
+        if load.vision.is_some()
+            || !matches!(method, PlannedMethod::Plain | PlannedMethod::Mtp { .. })
+            || load.head.is_some() && !definition.head.as_ref().is_some_and(|head|
+                head.history == magnitude_family_contracts::HeadHistory::Own) {
+            return Err("placed drafting requires a causal head with its own history".into());
         }
         if capacities
             .iter()
@@ -1418,7 +1447,7 @@ impl ResourcePlanner {
         Self::state_plan_with_placement(
             definition,
             load,
-            PlannedMethod::Plain,
+            method,
             codec,
             limits,
             capacity,
@@ -1561,7 +1590,7 @@ impl ResourcePlanner {
             let mut history = None::<usize>;
             let mut requests = None::<usize>;
             for (owner, capacity) in owner_capacities.iter().enumerate() {
-                let domains = layout
+                let mut domains = layout
                     .target_history
                     .iter()
                     .filter(|domain| !matches!(domain, HistoryDomainLayout::Shared { .. }))
@@ -1569,6 +1598,7 @@ impl ResourcePlanner {
                     .filter(|(_, assigned)| **assigned == owner)
                     .map(|(domain, _)| domain.clone())
                     .collect::<Vec<_>>();
+                if owner == 0 { domains.extend(layout.head_history.iter().cloned()); }
                 let components = layout
                     .target_recurrent
                     .iter()
@@ -1715,7 +1745,9 @@ impl ResourcePlanner {
                 .into_iter()
                 .try_fold(0u64, |total, bytes| total.checked_add(bytes))
                 .ok_or("distributed state charge overflows")?;
-            startup
+            startup.checked_add(head_state.as_ref()
+                .map(|state| state.initial_committed_bytes()).transpose()?.unwrap_or(0))
+                .ok_or("placed head startup charge overflows")?
                 .checked_sub(history)
                 .ok_or("history charge exceeds distributed startup")?
         } else {
@@ -1749,6 +1781,7 @@ impl ResourcePlanner {
         load: &super::DecoderRangeLoadPlan,
         target_graphs: &PreparedTargetGraphs,
         target_readout_graphs: &PreparedTargetReadoutGraphs,
+        head_graphs: Option<&PreparedDrafterGraphs>,
         state_graphs: &PreparedStateCopyGraphs,
     ) -> Result<ResourcePlan, String> {
         let placement = state
@@ -1767,6 +1800,10 @@ impl ResourcePlanner {
             return Err("range graph or decoder extent differs from placement".into());
         }
         let startup = state.startup_state_bytes_by_owner()?[owner];
+        let head_state = (owner == 0).then(|| state.head_state.clone()).flatten();
+        if head_graphs.is_some() != head_state.is_some() || head_graphs.is_some() != load.physical_load().head.is_some() {
+            return Err("range head graphs, state and physical inventory disagree".into());
+        }
         let history = state
             .target_state
             .domains
@@ -1779,7 +1816,8 @@ impl ResourcePlanner {
                     .checked_add(layout.address_table_bytes)
                     .and_then(|bytes| bytes.checked_add(layout.slab_bytes))
                     .ok_or_else(|| String::from("range history charge overflows"))
-            })?;
+            })?.checked_add(head_state.as_ref().map(|state| state.startup_history_bytes())
+                .transpose()?.unwrap_or(0)).ok_or("range head history charge overflows")?;
         let slots = state.limits.startup_slots();
         let target_graph = NativeGraphCharge::from_prepared(target_graphs, slots.target)?;
         // Entry/readout are still prepared on each owner and must be charged.
@@ -1791,6 +1829,17 @@ impl ResourcePlanner {
             FamilyFootprint::serial(state_graphs.family()),
             slots.state,
         )?;
+        let head_graph = head_graphs.map(|graphs| NativeGraphCharge::from_footprint(
+            FamilyFootprint::serial(graphs.family()), slots.head)).transpose()?;
+        let conditioning = head_graphs.map(|graphs| {
+            let (current, previous) = graphs.conditioning_transfer_metadata()?;
+            let bytes = current.canonical_bytes.checked_add(previous.canonical_bytes)
+                .and_then(|bytes| bytes.checked_mul(slots.head.activations as u64))
+                .ok_or("head conditioning transfer charge overflows")?;
+            Ok::<_, String>(HeadConditioningPlan { current, previous, slots: slots.head.activations, bytes })
+        }).transpose()?;
+        let charges = [Some(&target_graph), Some(&target_readout_graph), head_graph.as_ref(), Some(&state_graph)]
+            .into_iter().flatten().collect::<Vec<_>>();
         let prepared_programs = crate::AttestedPrograms::planned_invocation_workspace_bytes(
             &load
                 .graph_load()
@@ -1803,29 +1852,31 @@ impl ResourcePlanner {
         .map_err(|error| error.to_string())?;
         let bytes = ResourceBytes {
             target_weights: load.weight_bytes(),
-            head_weights: 0,
+            head_weights: weight_bytes_by_component(load.physical_load())?[1],
             vision_weights: 0,
             history,
             recurrent_banks: startup
                 .checked_sub(history)
                 .ok_or("range history exceeds startup state")?,
             prepared_programs,
-            scratch: graph_scratch_bytes(&[&target_graph, &target_readout_graph, &state_graph])?,
+            scratch: graph_scratch_bytes(&charges)?.checked_add(conditioning.as_ref().map_or(0, |plan| plan.bytes))
+                .ok_or("range conditioning scratch charge overflows")?,
         };
         let host_shared_bytes = match shared_role {
             crate::platform::DomainRole::Allocation => 0,
             crate::platform::DomainRole::Staging => load.physical_load().shared_weight_bytes()?
-                .checked_add(graph_shared_upload_bytes(&[&target_graph, &target_readout_graph, &state_graph])?)
+                .checked_add(graph_shared_upload_bytes(&charges)?)
                 .ok_or("range shared storage charge overflows")?,
         };
         ResourcePlan {
             boundary: None,
+            conditioning,
             decoder_range: Some(load.range().clone()),
             domain_capacity_bytes: state.owner_capacities[owner].domain_bytes,
             host_shared_bytes,
             capacity: state.capacity,
             target_state: state.target_state.clone(),
-            head_state: None,
+            head_state,
             retained_entry_bytes: state.retained_entry_bytes,
             bytes,
             qualification_peak_bytes: load.import_peak_bytes(),
@@ -1838,7 +1889,7 @@ impl ResourcePlanner {
             )?,
             target_graph,
             target_readout_graph,
-            head_graph: None,
+            head_graph,
             vision_graph: None,
             state_graph,
             steady_committed_bytes: 0,
@@ -1987,6 +2038,7 @@ impl ResourcePlanner {
         }
         ResourcePlan {
             boundary: None,
+            conditioning: None,
             decoder_range: None,
             domain_capacity_bytes: capacity_bytes.domain_bytes,
             host_shared_bytes,
@@ -2199,6 +2251,7 @@ mod slab_plan_tests {
         let state = ResourcePlanner::state_plan_placed(
             &definition,
             &load,
+            PlannedMethod::Plain,
             KvCodec::Dense,
             limits,
             &placement,
@@ -2322,7 +2375,7 @@ mod slab_plan_tests {
         }).collect()).unwrap();
         let capacities = vec![ResourceCapacity { domain_bytes: 256 << 20,
             tensor_operations: TensorOperations::Absent }; 2];
-        let state = ResourcePlanner::state_plan_placed(&definition, &load, KvCodec::Dense,
+        let state = ResourcePlanner::state_plan_placed(&definition, &load, PlannedMethod::Plain, KvCodec::Dense,
             limits, &placement, &capacities).unwrap();
         let baseline = devices.iter().map(|device| device.memory_usage().charged).collect::<Vec<_>>();
         assert!(state.allocate_target_state_placed(&[devices[1].clone(), devices[0].clone()]).is_err());

@@ -64,6 +64,7 @@ use std::{cell::RefCell, rc::Rc};
 /// The independently retained history kernels selected from the same device
 /// facts and row bound during planning and preparation.
 pub(super) struct AttentionHistoryClasses {
+    pub shared_decode: bool,
     pub verify: bool,
     pub verify_four: bool,
     pub verify_eight: bool,
@@ -76,11 +77,15 @@ pub(super) fn attention_history_classes(
     max_rows: u64,
     tensor_operations: bool,
 ) -> AttentionHistoryClasses {
-    let verify = matches!(
+    let affine = binding.history.encoding() == magnitude_state::HistoryEncoding::Affine;
+    // Wide CUDA query groups share one qualified arithmetic choice across
+    // decode and verification. Planning counts the same retained kernels.
+    let shared_decode = affine && backend == BackendName::Cuda
+        && (9..=16).contains(&binding.shape.group) && binding.shape.width <= 256;
+    let verify = !shared_decode && matches!(
         backend,
         BackendName::Metal | BackendName::Vulkan | BackendName::Cuda
     ) && max_rows >= 2;
-    let affine = binding.history.encoding() == magnitude_state::HistoryEncoding::Affine;
     let verify_four = affine
         && verify
         && separates_packed_attention_rows(
@@ -90,6 +95,7 @@ pub(super) fn attention_history_classes(
             max_rows,
         );
     AttentionHistoryClasses {
+        shared_decode,
         verify,
         verify_four,
         verify_eight: verify_four && max_rows >= 5,
@@ -1035,11 +1041,7 @@ impl<'a> Preparation<'a> {
                 feature_copy,
                 "activation",
                 feature_copy::Elements {
-                    A: plan
-                        .head()
-                        .and_then(|head| head.blocks().first())
-                        .map_or(plan.target().embedding().activation, |head| head
-                            .conditioning)
+                    A: plan.conditioning_element()
                 }
             ),
             copy_rows_f32: copy(&mut self.spec, Element::f32(), "A=f32")?,
@@ -1051,11 +1053,7 @@ impl<'a> Preparation<'a> {
     }
 
     fn target(&mut self, plan: &ProgramPlan) -> Result<(), CatalogFailure> {
-        if plan.head().is_some_and(|head| {
-            head.blocks()
-                .iter()
-                .any(|head| head.conditioning == Element::f32())
-        }) {
+        if plan.target().residual_conditioning().is_some() {
             self.target.residual_features = fixed!(
                 self.spec,
                 feature_rows,
@@ -1581,12 +1579,15 @@ impl<'a> Preparation<'a> {
                     )
             }
             magnitude_state::HistoryEncoding::Affine => {
+                let shared_decode = classes.shared_decode;
                 let split_decode = classes.verify;
                 let mut single = mix();
                 // The base kernel serves only single-row decode when the
                 // graph binds separate verification kernels. Pricing their
                 // rows here as well would duplicate the same served work.
-                if split_decode {
+                if shared_decode {
+                    single.decode_rows = Some(1..crate::operators::attention::graph::DECODE_ROWS + 1);
+                } else if split_decode {
                     single.decode_rows = Some(1..2);
                 }
                 let decode = self

@@ -293,6 +293,7 @@ impl std::error::Error for AllocationError {}
 /// allocated separately during component materialization.
 pub struct AllocatedResources {
     boundary: Option<TargetBoundaryPool>,
+    conditioning: Option<HeadConditioningPool>,
     domain: ResourceDomainId,
     /// The device's one graph workspace, which every pool's activations bind.
     arena: seismic::NativeExecutionArena,
@@ -391,6 +392,7 @@ impl AllocatedResources {
                 .map_or(0, VisionGraphPool::committed_bytes),
         )
         .and_then(|bytes| bytes.checked_add(self.boundary.as_ref().map_or(0, |pool| pool.bytes)))
+        .and_then(|bytes| bytes.checked_add(self.conditioning.as_ref().map_or(0, |pool| pool.bytes)))
         .ok_or("graph pool charge overflows")
     }
 
@@ -407,6 +409,9 @@ impl AllocatedResources {
     }
     pub fn head_graph(&self) -> Option<&NativeGraphPool> {
         self.head_graph.as_ref()
+    }
+    pub(crate) fn conditioning(&self) -> Option<&HeadConditioningPool> {
+        self.conditioning.as_ref()
     }
     pub fn vision_graph(&self) -> Option<&VisionGraphPool> {
         self.vision_graph.as_ref()
@@ -460,6 +465,53 @@ impl AllocatedResources {
                 .vision_graph
                 .as_mut()
                 .map_or(0, VisionGraphPool::release_idle)
+    }
+}
+
+/// A head activation retains these independent input tensors until completion.
+/// They cannot share the graph workspace arena, whose bytes later queued work
+/// may already be using when a host-staged transfer writes its inputs.
+#[derive(Clone)]
+pub(crate) struct HeadConditioningPool {
+    free: std::rc::Rc<std::cell::RefCell<Vec<(Tensor, Tensor)>>>,
+    bytes: u64,
+}
+
+/// Opaque ownership of an admitted cross-device conditioning slot.
+pub struct HeadConditioningTransfer {
+    pub(crate) current: Tensor,
+    pub(crate) previous: Tensor,
+    free: std::rc::Rc<std::cell::RefCell<Vec<(Tensor, Tensor)>>>,
+}
+
+impl Drop for HeadConditioningTransfer {
+    fn drop(&mut self) {
+        self.free.borrow_mut().push((self.current.clone(), self.previous.clone()));
+    }
+}
+
+impl HeadConditioningPool {
+    fn new(plan: &crate::planning::HeadConditioningPlan, device: &Device) -> Result<Self, AllocationError> {
+        let slots = (0..plan.slots).map(|_| {
+            let allocate = |meta: &seismic::NativeTensorMetadata| Tensor::zeros(device, meta.element, &meta.extents)
+                .map_err(|error| AllocationError::Device(error.to_string()));
+            Ok((allocate(&plan.current)?, allocate(&plan.previous)?))
+        }).collect::<Result<Vec<_>, AllocationError>>()?;
+        let actual = slots.iter().try_fold(0u64, |sum, (current, previous)|
+            sum.checked_add(current.storage_bytes()).and_then(|sum| sum.checked_add(previous.storage_bytes())));
+        if actual != Some(plan.bytes) {
+            return Err(AllocationError::Plan(InvariantError {
+                context: "head conditioning pool", detail: "allocated storage differs from admission".into(),
+            }));
+        }
+        Ok(Self { free: std::rc::Rc::new(std::cell::RefCell::new(slots)), bytes: plan.bytes })
+    }
+
+    pub(crate) fn acquire(&self) -> Result<HeadConditioningTransfer, crate::CapacityError> {
+        let (current, previous) = self.free.borrow_mut().pop().ok_or(crate::CapacityError {
+            resource: crate::ResourceKind::Workspace, required: 1, available: 0,
+        })?;
+        Ok(HeadConditioningTransfer { current, previous, free: self.free.clone() })
     }
 }
 
@@ -623,6 +675,7 @@ impl ResourceAllocator {
         domain: ResourceDomainId,
         target_graphs: &PreparedTargetGraphs,
         target_readout_graphs: &PreparedTargetReadoutGraphs,
+        head_graphs: Option<&PreparedDrafterGraphs>,
         state_graphs: &PreparedStateCopyGraphs,
     ) -> Result<AllocatedResources, AllocationError> {
         let matches = plan.decoder_range().is_some_and(|range| {
@@ -640,7 +693,7 @@ impl ResourceAllocator {
             domain,
             target_graphs,
             target_readout_graphs,
-            None,
+            head_graphs,
             None,
             state_graphs,
         )
@@ -728,8 +781,10 @@ impl ResourceAllocator {
         let state_graph =
             NativeGraphPool::new(domain.clone(), state_graphs.family(), state_charge, &arena)?;
         let boundary = plan.boundary().map(|plan| TargetBoundaryPool::new(plan, device)).transpose()?;
+        let conditioning = plan.conditioning().map(|plan| HeadConditioningPool::new(plan, device)).transpose()?;
         let allocated = AllocatedResources {
             boundary,
+            conditioning,
             domain: domain.clone(),
             arena,
             target_graph,

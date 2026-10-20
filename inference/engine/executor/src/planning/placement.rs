@@ -141,6 +141,7 @@ impl DecoderPlacement {
         let state = super::ResourcePlanner::state_plan_placed(
             definition,
             load,
+            draft.policy().method(),
             draft.policy().codec(),
             draft.policy().limits(),
             self,
@@ -191,7 +192,9 @@ impl DecoderPlacement {
                             "name":weight.descriptor.name,"source_bytes":weight.source_bytes,
                             "resident_bytes":weight.resident_bytes,"shape":weight.shape,
                         })),
-                        "fit_state_bytes":memory.exact_resident_bytes.checked_sub(candidate.weight_bytes()).ok_or("range resident charge differs from weights")?,
+                        "fit_state_bytes":memory.exact_resident_bytes
+                            .checked_sub(super::weight_bytes_by_component(candidate.physical_load())?.into_iter().sum())
+                            .ok_or("range resident charge differs from weights")?,
                         "host_shared_weight_bytes":memory.shared_weight_bytes,
                         "host_shared_graph_upload_bytes":memory.bounds.shared_upload_bytes,
                         "fit_depth":charge.state_depth,"weight_cap":weight_cap,
@@ -243,12 +246,16 @@ impl DecoderPlacement {
             .get(owner)
             .ok_or("unknown decoder range owner")?
             .clone();
-        if load.head.is_some() || load.vision.is_some() || load.residual_conditioning.is_some() {
+        if load.vision.is_some() {
             return Err(
-                "decoder range import currently requires plain text target execution".into(),
+                "decoder range import requires text execution".into(),
             );
         }
-        let graph_load = load.for_decoder_graph_range(range.blocks.clone(), records)?;
+        let mut graph_load = load.for_decoder_graph_range(range.blocks.clone(), records)?;
+        // Only the entry owner imports the head and shares its embedding and
+        // projection. Every target owner retains the conditioning annotation:
+        // the final owner's readout must publish the original residual streams.
+        if owner != 0 { graph_load.head = None; }
         let mut physical_load = graph_load.clone();
         let owns = |scope| match scope {
             WeightScope::Target => true,
@@ -274,9 +281,11 @@ impl DecoderPlacement {
             .unplaced_output
             .retain(|weight| owns(weight.role.scope));
         let weight_bytes = super::weight_bytes_by_component(&physical_load)?[0];
-        // Qualification belongs to preparation, before persistent weights.
-        // The importer authorizes only its actual selected source windows.
-        let import_peak_bytes = physical_load.target_upload_peak_bytes()?;
+        // Qualification ends before import. Include the optional head's
+        // source window, which is imported after initial state exists.
+        let import_peak_bytes = super::source_import_peak_bytes(
+            physical_load.weights().map(|weight| weight.source_bytes).max().unwrap_or(0),
+        )?;
         Ok(DecoderRangeLoadPlan {
             range,
             decoder_blocks: self.ranges.last().unwrap().blocks.end,

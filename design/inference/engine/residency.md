@@ -211,3 +211,8 @@ requires are explicitly present in its inventory and charged on that device.
 Opened device identity must match both the range selector and its attested
 kernels; a catalog ordinal alone does not establish an opened-device match.
 A decoder extent mismatch is rejected before target preload.
+An own-history causal prediction head belongs to the first range's inventory
+and loader. It reuses that owner's target embedding and projection. Other ranges
+import no head weights; they retain the conditioning metadata needed for the
+final target readout. Each range's import peak includes every component that
+its loader can materialize, including the head on its owner.

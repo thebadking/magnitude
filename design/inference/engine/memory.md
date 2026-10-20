@@ -439,6 +439,12 @@ logical resource domain registers the final owner's device for graph-produced
 features and logits. Owned tensors and conditioning retain their original
 allocation-device checks; admitting a graph producer does not admit arbitrary
 foreign allocations.
+An own-history prediction head on the first owner charges its head weights,
+history, graph resources and conditioning transfer slots there. Those transfer
+slots derive their shape and representation from sealed head inputs and use
+independent backing, never prewritten bytes in the shared graph workspace arena.
+Every slot is retained through head completion. An independently retained prompt
+boundary remains on the head owner and cannot pin the final target output arena.
 Allocation, growth rollback and reclamation retain
 one logical transaction across all owners. State growth obtains a separate peak
 claim from every owning heap before provisioning; refusal releases all earlier

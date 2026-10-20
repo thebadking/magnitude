@@ -4,11 +4,7 @@ use super::*;
 impl<'a> QualificationView<'a> {
     pub(super) fn qualify_feature_copy(&self, device: &Device) -> Result<(), CatalogFailure> {
         let failure = |error: String| qualification("feature_copy", "activation", error);
-        let element = match self.geometry.activation_dtype {
-            magnitude_family_contracts::ActivationDType::F16 => Element::f16(),
-            magnitude_family_contracts::ActivationDType::BF16 => Element::bf16(),
-        };
-        let element = self.plan.head().and_then(|head| head.blocks().first()).map_or(element, |head| head.conditioning);
+        let element = self.plan.conditioning_element();
         let row_bytes = if element == Element::f32() { 64 } else { 32 };
         let bytes = (0..4 * row_bytes).map(|i| i as u8).collect::<Vec<_>>();
         let source = Tensor::from_host(device, element, &[4, 16], &bytes)

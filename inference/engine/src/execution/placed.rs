@@ -8,6 +8,7 @@ struct Owner {
     programs: Rc<AttestedPrograms>,
     resources: AllocatedResources,
     resident: ResidentTarget,
+    head_loader: Option<ComponentLoader<magnitude_executor::ResidentHead>>,
     startup: StartupClaims,
 }
 
@@ -24,11 +25,11 @@ pub(super) fn build_placed(
     )
     .map_err(internal)?;
     if placement.ranges().len() != 2
-        || manifest.model.method != ResolvedMethod::Plain
+        || !matches!(manifest.model.method, ResolvedMethod::Plain | ResolvedMethod::Mtp { history: HeadHistory::Own, .. })
         || manifest.definition.vision.is_some()
     {
         return Err(internal(
-            "two-device startup requires two ranges and plain text execution",
+            "two-device startup requires text execution with plain decoding or an own-history causal head",
         ));
     }
     let catalog = Rc::new(catalog);
@@ -60,6 +61,7 @@ pub(super) fn build_placed(
     let state = ResourcePlanner::state_plan_placed(
         &manifest.definition,
         source,
+        prepared[0].draft.policy().method(),
         manifest.model.kv_codec,
         limits,
         &placement,
@@ -126,6 +128,7 @@ pub(super) fn build_placed(
             owner.range.as_ref().unwrap(),
             &targets[index],
             &readouts[index],
+            owner.programs.drafter_graphs(),
             owner
                 .programs
                 .state_graphs()
@@ -179,6 +182,7 @@ pub(super) fn build_placed(
             identity.clone(),
             programs.target_graphs().unwrap(),
             programs.target_readout_graphs().unwrap(),
+            programs.drafter_graphs(),
             programs.state_graphs().unwrap(),
         )
         .map_err(|error| internal(error.to_string()))?;
@@ -236,12 +240,16 @@ pub(super) fn build_placed(
             )
             .map_err(|error| internal(error.to_string()))?;
         report_load_memory(&format!("range {:?} imported", range.range().blocks), &device);
+        let head_loader = range.physical_load().head().is_some()
+            .then(|| ComponentLoader::head(residency, Rc::new(manifest.definition.clone()), package.clone()))
+            .transpose().map_err(|error| internal(error.to_string()))?;
         owners.push(Owner {
             execution,
             device,
             programs,
             resources,
             resident,
+            head_loader,
             startup,
         });
     }
@@ -260,6 +268,8 @@ pub(super) fn build_placed(
         report_load_memory(&format!("range {:?} initial state allocated",
             owner.execution.resources().decoder_range().unwrap().blocks), &owner.device);
     }
+    let head_state = state.head_state().map(|head| head.allocate(devices[0].clone()))
+        .transpose().map_err(internal)?;
     for owner in &mut owners {
         let constants = owner
             .programs
@@ -285,6 +295,8 @@ pub(super) fn build_placed(
         first.resources,
         first.resident,
         target_state,
+        first.head_loader,
+        head_state,
         second.execution,
         second.startup.into_heap(),
         second.programs,
@@ -293,7 +305,7 @@ pub(super) fn build_placed(
     )
     .map_err(internal)?;
     domain.register_allocated_holdings().map_err(internal)?;
-    let bindings = warm_up(&mut domain, bindings, false)?;
+    let bindings = warm_up(&mut domain, bindings, matches!(manifest.model.method, ResolvedMethod::Mtp { .. }))?;
     Ok(LoadAttempt::Loaded(NativeDomain {
         domain,
         bindings,

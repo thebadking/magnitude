@@ -20,6 +20,13 @@ pub enum PreparedDrafterGraphs {
 }
 
 impl PreparedDrafterGraphs {
+    pub(crate) fn conditioning_transfer_metadata(&self) -> Result<(seismic::NativeTensorMetadata, seismic::NativeTensorMetadata), String> {
+        match self {
+            Self::Head(graphs) => graphs.conditioning_transfer_metadata(),
+            _ => Err("placed conditioning requires a causal head with its own history".into()),
+        }
+    }
+
     pub fn family(&self) -> &NativeGraphFamily {
         match self {
             Self::Head(graphs) => graphs.family(),
@@ -52,6 +59,13 @@ pub enum NativeDrafterProgram {
 }
 
 impl NativeDrafterProgram {
+    pub(crate) fn install_conditioning(&mut self, pool: crate::resources::HeadConditioningPool) -> Result<(), String> {
+        match self {
+            Self::Head(program) => { program.install_conditioning(pool); Ok(()) }
+            _ => Err("placed conditioning requires a causal head with its own history".into()),
+        }
+    }
+
     pub(crate) fn constant_bytes(&self) -> Result<u64, &'static str> {
         match self {
             Self::Head(program) => program.constant_bytes(),
@@ -63,7 +77,7 @@ impl NativeDrafterProgram {
 
 impl HeadProgram for NativeDrafterProgram {
     type Submission =
-        DeviceSubmission<HeadLaunchCore, NativeGraphWorkspaceLease, Option<GraphOutputTensor>>;
+        DeviceSubmission<HeadLaunchCore, (NativeGraphWorkspaceLease, Option<crate::HeadConditioningTransfer>), Option<GraphOutputTensor>>;
 
     fn submit(
         &mut self,

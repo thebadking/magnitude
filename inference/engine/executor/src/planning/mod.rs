@@ -1022,4 +1022,4 @@ pub(crate) mod tests {
 #[cfg(test)]
 pub(crate) use weights::{BankLayer, ScratchPlan, StagingPoolPlan};
 
-pub(crate) use resources::TargetBoundaryPlan;
+pub(crate) use resources::{HeadConditioningPlan, TargetBoundaryPlan};

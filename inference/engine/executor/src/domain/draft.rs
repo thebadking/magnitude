@@ -187,8 +187,15 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
 /// `spans` with each span merged into its predecessor when they are
 /// adjacent and the merged span stays within one `slab_rows`-row slab.
 pub(super) fn coalesce_within_slabs(spans: &[[i32; 2]], slab_rows: u32) -> Vec<[i32; 2]> {
-    let slab = |row: i32| row / slab_rows as i32;
     let mut merged: Vec<[i32; 2]> = Vec::with_capacity(spans.len());
+    append_within_slabs(&mut merged, spans, slab_rows);
+    merged
+}
+
+/// Join accepted and tentative ranges in logical order, preserving slab
+/// boundaries and the same canonical spans a committed history holds.
+pub(crate) fn append_within_slabs(merged: &mut Vec<[i32; 2]>, spans: &[[i32; 2]], slab_rows: u32) {
+    let slab = |row: i32| row / slab_rows as i32;
     for &span in spans {
         match merged.last_mut() {
             Some(previous) if previous[1] == span[0] && slab(previous[0]) == slab(span[1] - 1) => {
@@ -197,7 +204,6 @@ pub(super) fn coalesce_within_slabs(spans: &[[i32; 2]], slab_rows: u32) -> Vec<[
             _ => merged.push(span),
         }
     }
-    merged
 }
 
 #[cfg(test)]
