@@ -86,6 +86,13 @@ do not repeat a full maximum-context run for every unrelated change.
 
 ### RAM occupancy and actual disk traffic
 
+**Current answer:** Most spare RAM is already occupied by file cache. The repaired
+Stage 8 profile measures 56.561–56.832 GiB cached and only 0.411–0.540 GiB free
+during the controlled comparison. Its repeat case still includes a 535.818 MB
+physical-read window, so useful page retention can matter. Allocating another
+cache competes for occupied RAM; the derived-cap experiment below did not
+establish a warm-generation benefit or prevention of those slow requests.
+
 The machine already uses most spare RAM for cached model pages. During the
 Stage 2a tool qualification, `free` showed approximately 3.2 GiB actually free
 and 54 GiB in buffers/cache. These are system totals, not the engine's RSS.
@@ -401,7 +408,7 @@ against a reference require that reference to pass its sanity gate.
 | 5 | SM86 packed-kernel and representation improvements | Packing experiment qualified; repeat improves, ordinary gain below bar; four-warp declaration deferred after a confounded gate | 4 decision |
 | 6 | Selective CPU expert execution | Isolated crossover established; serving fails warmed parity; grouped arithmetic follow-up remains experimental | Transfer profiling, then compute crossover |
 | 7 | Adaptive placement and prompt grouping | Accounting, paired reservations and startup phases qualified experimentally; keep group 8. Capacity helps ordinary generation but exposes repeat source-page misses. Derived-cap RAM retention fails warm speed bars; no overall promotion | Recorded earlier-stage decisions |
-| 8 | Consolidated qualification and reference comparison | In progress: repaired 262K and correctness gates pass; ordinary generation −10.891% versus Stage 2b with repeat variability. Repaired 4B single-GPU timings show no regression across the declared bar; initial/llama.cpp checks remain | Selected candidates disposed |
+| 8 | Consolidated qualification and reference comparison | In progress: repaired 262K, single-GPU preservation and initial/llama.cpp serving gates pass. Ordinary generation −10.891% versus Stage 2b with repeat variability; initial/llama.cpp alternating timings remain | Selected candidates disposed |
 
 A dependency on a decision permits a recorded revert or deferral. It does not
 require forcing an unsuccessful optimization into the code. Reorder remaining
@@ -632,6 +639,8 @@ before running it; fill measured fields only from saved artifacts.
 | Repaired-build placed serving and lifecycle | 8 qualification | Accepted Stage 2b versus clean `82763130`, group 8/context 1024 | Serving `20261019T234759Z-stage8-repaired-placed-strict-823649`; lifecycle `20261019T235250Z-stage8-repaired-placed-lifecycle-699eb9` | Six exact valid responses, equal rendered tokens/native choices/usage/stops; complete tool passes. Prefix reuse, cancellation, recovery and health pass; B retains 223/224 slots | Short placed correctness gates pass. Measure the full consolidated source effect against Stage 2b with tracing disabled and alternating launches |
 | Consolidated source versus accepted Stage 2b | 8 timing | Original Stage 2b binaries versus clean `82763130`, same fixed profile | `20261019T235658Z-stage8-consolidated-comparison-29712b` | All 24 outputs exact, native choices equal, thermal gate passes. Ordinary generation −10.891%, gap beyond both spreads, total −6.158%; repeat mean generation +6.218% within B variability, including a 535.818 MB physical-read window | Retain limited ordinary-continuation benefit. No stable repeat win or broad/default promotion; complete smaller-model and initial/reference coverage |
 | Repaired dense 4B on one GPU | 8 coverage/timing | Stage 2b versus `82763130`, catalog Qwen3.5 4B Q4, GPU0/context 1024 | Serving `20261020T000807Z-stage8-repaired-small-strict-74eefb`; lifecycle `20261020T000919Z-stage8-repaired-small-lifecycle-370363`; timing `20261020T001030Z-stage8-consolidated-small-comparison-dcc3b4` | Six serving and 24 timing responses exact, native choices equal, one-GPU census and lifecycle pass. Generation −0.171%/−0.076%; no regression crosses the 3%/spread criterion | Checked smaller-model behavior/performance preserved. No useful new small-model speedup or coverage of every smaller model claimed |
+| Rebuilt initial-source serving control | 8 qualification | Clean rebuilt `5cac0a6f` versus `82763130`; initial prompt/LRU versus explicit decode reuse | `20261020T002633Z-stage8-initial-strict-6ae25c` | All six responses valid and exact across builds; identical rendered tokens, native choices, usage and stops | Control qualifies for cumulative alternating timing. No equivalence to missing archived Stage 0 executable claimed |
+| Installed llama.cpp serving control | 8 qualification | Unsloth build 11541, `ce8c04021`, executable `402c9be2…`; 26 GPU layers, f16 KV, no drafting | `20261020T002221Z-stage8-llama-serving-qualification-f9d33a` | All three fixtures valid, rendered token arrays identical to native rendering, executable/modules unchanged. Repeat text and usage match Magnitude; ordinary prose and output length differ | Repeat permits matched generated work. Preserve ordinary serving difference; no ordinary execution-speed verdict or independent distributional quality claim |
 
 
 ### Stage 0 progress — baseline and diagnostic correction
@@ -3341,7 +3350,47 @@ Raw timing, memory and I/O records, `analysis.json`, `decision.json` and
 reproduction scripts remain with the run. No unit or integration tests were
 added or run.
 
-### Stage 8 next gate — repaired-build serving and consolidated timing
+### Stage 8 initial and independent serving gates — pass
+
+**`20261020T002633Z-stage8-initial-strict-6ae25c`** qualifies rebuilt clean
+initial source `5cac0a6f` against repaired `82763130`. Both retain group 8,
+lookahead, plain decoding, context 1024, host-cache zero and the 30-second tuning
+allowance. A uses its original prompt-frequency/LRU policies; B explicitly uses
+decode-reuse seeds/victims. All six repeat/ordinary/tool responses pass exact
+text, usage, stopping and selected native-configuration parity. The cumulative
+source inventory contains 40 inference/design paths and no kernel-declaration
+or seismic-std changes. This remains a new committed-source control, without
+equivalence to the missing archived dirty executable.
+
+**`20261020T002221Z-stage8-llama-serving-qualification-f9d33a`** qualifies the
+installed Unsloth llama.cpp build **11541 / `ce8c04021`**, executable SHA-256
+**`402c9be2de05d4cc427eebf7fece6c962eff17119a7202dc137213f953fe9cd3`**.
+The executable and local shared-library inventories are unchanged through the
+job. It uses the same catalog GGUF, 26 GPU layers, f16 K/V, context 1024, one
+slot, Flash Attention, plain generation and no retained prompt cache. For each
+fixture, its own `/apply-template` and `/tokenize` results exactly match the
+native renderer's input tokens; inference still receives the original chat
+fixture. Repeat, ordinary and complete tool responses all pass their intrinsic
+serving checks. This is not independent distributional/F32 quality evidence.
+
+Repeat produces identical text and 758-input / 64-output usage in both engines.
+Ordinary uses the same 396 input tokens but different generated prose: Magnitude
+stops at 60 output tokens, while llama.cpp reaches its 64-token limit. The direct
+comparison therefore declares **repeat as the matched-work speed cell** and
+retains ordinary as descriptive serving latency, without an execution-speed
+verdict. Different operators, KV representations and reported rate conventions
+remain explicit; engine counters are never rewritten to force agreement.
+
+**Next timing declarations:** compare rebuilt initial A / repaired B in A/B/B/A
+order with both short fixtures, and stock llama.cpp A / repaired B in a separate
+A/B/B/A lease. Each launch runs two warmups per fixture, then one measured pass;
+there are two measured passes per side. Keep the thermal gate, frozen binaries,
+exact qualification outputs and no retained prefixes. The native comparison's
+primary remains ordinary generation; the cross-engine comparison's primary is
+the matched repeat's reported generation duration. Both use the existing 3%
+and both-spreads bar and preserve prefill/total tradeoffs and every failed cell.
+
+### Stage 8 control recovery and remaining timing
 
 The 32K and smaller dense-model checks pass. Inspection shows that the placed
 fit assessment caps its state-depth estimate at **100000**, so 32K coverage
