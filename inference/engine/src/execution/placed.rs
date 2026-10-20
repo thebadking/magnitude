@@ -201,14 +201,15 @@ pub(super) fn build_placed(
         };
         let peak = range
             .weight_bytes()
-            .checked_add(range.import_peak_bytes())
+            .checked_add(plan.bytes().head_weights)
+            .and_then(|bytes| bytes.checked_add(range.import_peak_bytes()))
             .and_then(|bytes| bytes.checked_sub(shared))
             .ok_or_else(|| internal("range import charge overflow"))?;
         let staged = range
             .import_peak_bytes()
             .checked_add(shared)
             .ok_or_else(|| internal("range staging overflow"))?;
-        startup.claim("range target import", peak, staged)?;
+        startup.claim("range component import", peak, staged)?;
         report_load_memory(&format!("range {:?} before import", range.range().blocks), &device);
         let mut residency =
             ResidencyStore::new_range(device.clone(), programs.clone(), &range, identity)
@@ -216,6 +217,22 @@ pub(super) fn build_placed(
         if let Some(cache) = &host_experts { residency.keep_host_experts(cache.clone()); }
         if let Some(cache) = &manifest.kernel_cache {
             residency.keep_table_rows(cache.join("table-rows"));
+        }
+        if range.physical_load().head().is_some() {
+            let observer_catalog = catalog.clone();
+            let observer_device = device.clone();
+            let reserves = manifest.reserves;
+            let mut observed = Instant::now();
+            residency.load_head_observed(&manifest.definition, &package,
+                Box::new(move |_, _, checkpoint| {
+                    if checkpoint || observed.elapsed() >= IMPORT_OBSERVATION_INTERVAL {
+                        observed = Instant::now();
+                        require_normal(&observer_catalog, &observer_device, &reserves)?;
+                    }
+                    Ok(())
+                })).map_err(|error| internal(error.to_string()))?
+                .ok_or_else(|| internal("placed head import produced no enabled head"))?;
+            report_load_memory("placed head imported before target banks", &device);
         }
         let observer_catalog = catalog.clone();
         let observer_device = device.clone();

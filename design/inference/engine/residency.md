@@ -180,7 +180,12 @@ the whole table's bit for bit.
 The target component is imported before engine readiness. Enabled optional head and vision
 components are held by typed one-shot ComponentLoaders. Each loader owns its import store and
 caches either its assembled component or its typed failure. The head loader inherits the target
-store so tied embedding and output weights retain their exact resident tensors; the vision loader
+store so tied embedding and output weights retain their exact resident tensors. A placed
+load imports its enabled head before allocating target expert banks, under the same
+complete component-import claim and pressure observation. This keeps large source
+and destination allocations ahead of fragmented cache holdings. Target import and
+later head binding reuse those exact cached weights; binding claims only still-missing
+weights and its constants. The vision loader
 owns an isolated projector store. A separate draft (DFlash, DSpark, DFlash2) is the head lane's drafter: its
 fusion weights are target weights (every target step fuses the draft's taps), imported with the
 target from the draft component, and its loader imports the rest of the draft component through

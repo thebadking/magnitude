@@ -987,8 +987,9 @@ at the load's full configured context, including its in-flight recurrent banks,
 checked range graphs, invocation storage, incoming boundary buffers
 and the physical import/qualification peak. An own-history draft head adds its
 slab-rounded context and checked conditioning-transfer ports to its entry owner;
-other owners do not inherit those holdings. Head import during warmup overlaps
-initial state and is bounded with it, independently of pre-import qualification.
+other owners do not inherit those holdings. Initial head import precedes target
+expert-bank allocation. Optional head reimport can overlap allocated state and
+remains bounded with it, independently of pre-import qualification.
 Host-shared staging and graph uploads
 are excluded from dedicated device charge. Each owner's stable capacity and
 ordinary reserve remain independent; a whole-decoder weight-only allowance is

@@ -1288,13 +1288,41 @@ impl ResidencyStore {
         &mut self,
         definition: &magnitude_family_contracts::ModelDefinition,
         package: &magnitude_artifacts::Package,
-        mut observer: ImportObserver,
+        observer: ImportObserver,
     ) -> Result<crate::ResidentTarget, crate::ResidencyError> {
         crate::resident_weights::validate_definition_package(definition, package)?;
         if self.owned_blocks.as_ref().is_some_and(|(_, blocks)| *blocks != definition.decoder.blocks.len()) {
             return Err(crate::ResidencyError::Invalid("range import differs from the planned decoder extent".into()));
         }
         let weights = self.load_plan().target().to_vec();
+        let owned_blocks = self.owned_blocks.as_ref().map(|(blocks, _)| blocks.clone());
+        self.observe_import(&weights, observer, |store| {
+            store.preload_components(
+                package, &weights,
+                crate::resident_weights::activation_dtype(definition.decoder.activation_dtype),
+            )?;
+            crate::resident_weights::import_target(definition, package, store, owned_blocks.as_ref())
+        })
+    }
+
+    /// Import an enabled head before range caches consume the device's large
+    /// free ranges. Later assembly borrows these same residency entries.
+    pub fn load_head_observed(
+        &mut self,
+        definition: &magnitude_family_contracts::ModelDefinition,
+        package: &magnitude_artifacts::Package,
+        observer: ImportObserver,
+    ) -> Result<Option<crate::ResidentHead>, crate::ResidencyError> {
+        let weights = self.load_plan().head().unwrap_or_default().to_vec();
+        self.observe_import(&weights, observer, |store| store.load_head(definition, package))
+    }
+
+    fn observe_import<T>(
+        &mut self,
+        weights: &[WeightPlan],
+        mut observer: ImportObserver,
+        import: impl FnOnce(&mut Self) -> Result<T, crate::ResidencyError>,
+    ) -> Result<T, crate::ResidencyError> {
         let mut storage = HashSet::new();
         let total = weights
             .iter()
@@ -1308,24 +1336,16 @@ impl ResidencyStore {
             total,
             observer,
         });
-        let owned_blocks = self.owned_blocks.as_ref().map(|(blocks, _)| blocks.clone());
-        let target = self
-            .preload_components(
-                package,
-                &weights,
-                crate::resident_weights::activation_dtype(definition.decoder.activation_dtype),
-            )
-            .map_err(crate::ResidencyError::from)
-            .and_then(|()| crate::resident_weights::import_target(definition, package, self, owned_blocks.as_ref()));
+        let imported = import(self);
         let mut progress = self
             .import_progress
             .take()
-            .expect("the target import owns its progress");
-        if target.is_ok() && progress.completed < progress.total {
+            .expect("the component import owns its progress");
+        if imported.is_ok() && progress.completed < progress.total {
             (progress.observer)(progress.total, progress.total, true)
                 .map_err(WeightImportError::Refused)?;
         }
-        target
+        imported
     }
 
     pub fn load_head(

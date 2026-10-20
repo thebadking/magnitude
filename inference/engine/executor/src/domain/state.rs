@@ -290,18 +290,27 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
                 .any(|operation| matches!(operation, Operation::Forward { prime: Some(_), .. }));
         let (resident_bytes, upload_peak) = match operations.first() {
             Some(_) if head && !self.family.head_is_bound() => {
-                let binding_constants = self
+                let loader = self
                     .head_loader
                     .as_ref()
-                    .ok_or_else(|| DomainError::Input("head component is disabled".into()))?
+                    .ok_or_else(|| DomainError::Input("head component is disabled".into()))?;
+                let binding_constants = loader
                     .binding_constant_bytes()
                     .map_err(DomainError::Input)?;
+                // Placed startup can import the head before target banks.
+                // Existing residency is already charged; binding it cannot
+                // claim all of its weights a second time.
+                let imported = loader.resident_bytes().map_err(|e| DomainError::Input(e.into()))?
+                    .checked_sub(self.family.target_weight_bytes().map_err(DomainError::Input)?)
+                    .ok_or_else(|| DomainError::Input("head residency omits target holdings".into()))?;
+                let remaining = self.execution.resources().bytes().head_weights
+                    .checked_sub(imported)
+                    .ok_or_else(|| DomainError::Input("head residency exceeds its plan".into()))?;
                 (
-                    self.execution.resources().bytes().head_weights,
-                    self.execution
+                    remaining,
+                    (if remaining == 0 { 0 } else { self.execution
                         .load()
-                        .head_upload_peak_bytes()?
-                        .max(binding_constants),
+                        .head_upload_peak_bytes()? }).max(binding_constants),
                 )
             }
             Some(Operation::Encode { .. }) if !self.family.vision_is_bound() => (
