@@ -401,7 +401,7 @@ against a reference require that reference to pass its sanity gate.
 | 5 | SM86 packed-kernel and representation improvements | Packing experiment qualified; repeat improves, ordinary gain below bar; four-warp declaration deferred after a confounded gate | 4 decision |
 | 6 | Selective CPU expert execution | Isolated crossover established; serving fails warmed parity; grouped arithmetic follow-up remains experimental | Transfer profiling, then compute crossover |
 | 7 | Adaptive placement and prompt grouping | Accounting, paired reservations and startup phases qualified experimentally; keep group 8. Capacity helps ordinary generation but exposes repeat source-page misses. Derived-cap RAM retention fails warm speed bars; no overall promotion | Recorded earlier-stage decisions |
-| 8 | Consolidated qualification and reference comparison | In progress: repaired 262K and placed correctness gates pass; direct Stage 2b comparison clears ordinary generation bar (−10.891%) with repeat variability. Repaired smaller-model and initial/llama.cpp checks remain | Selected candidates disposed |
+| 8 | Consolidated qualification and reference comparison | In progress: repaired 262K and correctness gates pass; ordinary generation −10.891% versus Stage 2b with repeat variability. Repaired 4B single-GPU timings show no regression across the declared bar; initial/llama.cpp checks remain | Selected candidates disposed |
 
 A dependency on a decision permits a recorded revert or deferral. It does not
 require forcing an unsuccessful optimization into the code. Reorder remaining
@@ -631,6 +631,7 @@ before running it; fill measured fields only from saved artifacts.
 | Full configured-context cache admission | 8 repair | Clean `82763130`, derived from failed `7a0a1f30` | Build `20261019T232622Z-stage8-context-capacity-build-8277bc`; replay `20261019T233141Z-stage8-context-capacity-max-qualification-eaa24c` | Source-verified build and independent hashes pass. Exact 2226+37 and 260137+37 retrievals pass at 262144 capacity, with zero reuse; full-depth fit selects 202/204 slots and both owner bounds fit | Maximum-context regression repaired for the checked profile. Qualify short serving/lifecycle and compare this exact build before performance promotion |
 | Repaired-build placed serving and lifecycle | 8 qualification | Accepted Stage 2b versus clean `82763130`, group 8/context 1024 | Serving `20261019T234759Z-stage8-repaired-placed-strict-823649`; lifecycle `20261019T235250Z-stage8-repaired-placed-lifecycle-699eb9` | Six exact valid responses, equal rendered tokens/native choices/usage/stops; complete tool passes. Prefix reuse, cancellation, recovery and health pass; B retains 223/224 slots | Short placed correctness gates pass. Measure the full consolidated source effect against Stage 2b with tracing disabled and alternating launches |
 | Consolidated source versus accepted Stage 2b | 8 timing | Original Stage 2b binaries versus clean `82763130`, same fixed profile | `20261019T235658Z-stage8-consolidated-comparison-29712b` | All 24 outputs exact, native choices equal, thermal gate passes. Ordinary generation −10.891%, gap beyond both spreads, total −6.158%; repeat mean generation +6.218% within B variability, including a 535.818 MB physical-read window | Retain limited ordinary-continuation benefit. No stable repeat win or broad/default promotion; complete smaller-model and initial/reference coverage |
+| Repaired dense 4B on one GPU | 8 coverage/timing | Stage 2b versus `82763130`, catalog Qwen3.5 4B Q4, GPU0/context 1024 | Serving `20261020T000807Z-stage8-repaired-small-strict-74eefb`; lifecycle `20261020T000919Z-stage8-repaired-small-lifecycle-370363`; timing `20261020T001030Z-stage8-consolidated-small-comparison-dcc3b4` | Six serving and 24 timing responses exact, native choices equal, one-GPU census and lifecycle pass. Generation −0.171%/−0.076%; no regression crosses the 3%/spread criterion | Checked smaller-model behavior/performance preserved. No useful new small-model speedup or coverage of every smaller model claimed |
 
 
 ### Stage 0 progress — baseline and diagnostic correction
@@ -3300,6 +3301,46 @@ result. Complete repaired-build smaller-model and initial/reference comparisons
 before final configuration/default decisions. No unit or integration tests
 were added or run.
 
+### Stage 8 repaired smaller model — serving, lifecycle and timing pass
+
+Serving **`20261020T000807Z-stage8-repaired-small-strict-74eefb`** compares
+fresh Stage 2b and repaired `82763130` on catalog Qwen3.5 4B Q4, only GPU0,
+context 1024, group 8, plain decoding and lookahead. All **six responses** match
+exactly in text/tool arguments, usage and stop, with identical rendered tokens
+and selected native configurations. Repeat/ordinary each generate 64 tokens;
+the complete canonical tool call generates 41. The candidate's invocation
+inventory agrees at **53/53/53 bytes**. Both builds' model/context charges
+agree, and the candidate classifies **5,909,555 fewer compute bytes**.
+
+Lifecycle **`20261020T000919Z-stage8-repaired-small-lifecycle-370363`** passes
+cold, retain, hit, cancellation, recovery and health on that repaired build.
+All four completed responses are the exact 308-character prefix; hit/recovery
+reuse 757 tokens. Cancellation closes after four events / 15 exact characters
+before terminal delivery. Ready/after censuses identify exactly the intended
+one GPU. Source proofs, hashes, observations and combined analysis are retained.
+
+Timing **`20261020T001030Z-stage8-consolidated-small-comparison-dcc3b4`** then
+runs A/B/B/A under one lease and a passing thermal gate. Both profiles keep the
+same options, ordinary admission and 30-second preparation allowance; inference
+tracing is disabled. Two fixed warmups per fixture precede each measured pass.
+All **24 responses are exact**, native choices match across launches and every
+ready/after census contains exactly GPU0.
+
+| 4B fixture, 64 outputs | Stage 2b generation | Repaired generation | Generation change | A / B spread | Model-total change |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Repeat | 398.766 ms | 398.085 ms | −0.171% | 0.084 / 0.250 ms | −0.127% |
+| Ordinary | 396.639 ms | 396.339 ms | −0.076% | 0.073 / 0.043 ms | −0.064% |
+
+Neither fixture clears a 3% generation improvement bar; **no generation
+regression crosses the declared 3%/spread criterion** either. Prefill changes
+are +0.025%/+0.009%, without a material total-time tradeoff. This preserves the
+checked smaller-model performance within that criterion, rather than claiming
+another useful speedup. It covers this dense 4B model on one SM86 GPU at short
+context, not all smaller models, hardware, cold starts or concurrent workloads.
+Raw timing, memory and I/O records, `analysis.json`, `decision.json` and
+reproduction scripts remain with the run. No unit or integration tests were
+added or run.
+
 ### Stage 8 next gate — repaired-build serving and consolidated timing
 
 The 32K and smaller dense-model checks pass. Inspection shows that the placed
@@ -3311,9 +3352,8 @@ source and binaries frozen for timing. This repair changes placed-cache sizing; 
 100000-token metadata assessment workload remains documented and unchanged.
 
 The direct consolidated Stage 2b comparison now clears the ordinary generation
-bar while retaining repeat variability. Qualify the repaired 4B path and add a short paired timing check
-to quantify the single-GPU regression bound; exact outputs alone do not prove
-unchanged speed. Finally compare the retained configuration with Stage 0 and
+bar while retaining repeat variability. The repaired 4B serving/lifecycle and
+paired timing checks now pass their preservation criterion. Compare the retained configuration with Stage 0 and
 the independent llama.cpp setup. Keep RAM retention, MTP, packing and CPU
 dispatch outside this candidate; their previous dispositions remain in force.
 The original Stage 0 `bench-target` executables are no longer present in the
@@ -3322,6 +3362,13 @@ comparison. Recover or rebuild a traceable initial-source control before
 claiming a cumulative Stage 0 result, and distinguish a rebuilt control from
 the exact archived executable. The installed llama.cpp reference remains
 available; verify its binary/version and actual serving conditions in its job.
+A clean detached checkout of initial commit `5cac0a6f` is now prepared as
+`stage0-rebuilt`. Its Cargo manifest/lock and CLI source match the later tree;
+the actual initial inference implementation remains unchanged. Rebuild this
+source with recorded provenance and label it a clean committed-source control,
+without claiming byte equivalence to the missing archived dirty build. Before
+reusing the shared Cargo target, verify the independent repaired copies and
+remove only stale workspace outputs, retaining pinned registry dependencies.
 
 ## Immediate next action
 
@@ -3355,8 +3402,8 @@ change, and retain the earlier asynchronous-batching rejection.
 **Stage 8** has a passing repaired 262K-capacity / 260137-input retrieval, in
 addition to fresh placed serving/lifecycle gates on exact repaired build
 `82763130`. Its direct comparison with Stage 2b clears ordinary generation's
-bar, with no stable repeat-generation win. Qualify and quantify the repaired
-smaller-model path, then compare with initial/reference implementations in
+bar, with no stable repeat-generation win. The repaired smaller-model path now
+passes serving/lifecycle and its paired preservation criterion. Compare with initial/reference implementations in
 alternating sessions. Do not multiply separate-session improvements. Keep RAM
 retention, MTP, packing and CPU dispatch outside the consolidated default unless
 their own declared gates pass. The capacity candidate's earlier repeat regression
