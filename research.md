@@ -19,7 +19,15 @@ architecture authority and must be consulted before implementation changes.
 
 ## Current outcome
 
-- Unified candidate `b94e1f36` now combines placed MTP with the repaired owner
+- **New CPU-placement evidence:** selective CPU experts with GPU attention in
+  llama.cpp reduce matched-repeat generation from 5.314 s to 1.915 s (2.775x),
+  prefill by 11.666%, and total model time by 40.761%, in one ABBA session.
+  This is a stronger comparison control, not a Magnitude speedup.
+- Persistent PLE readers are implemented and serving-qualified on the unified
+  branch. Paired timing establishes no latency gain; the deterministic benefit
+  is bounded thread reuse. See **CPU experts and host PLE investigation** below.
+
+- Unified candidate `c285eb42` builds on `b94e1f36`, combining placed MTP with the repaired owner
   capacity planner on `two-gpu-context-capacity-experimental`. Its plain/MTP
   serving outputs, usage and stops agree on repeat, ordinary and tool fixtures.
   **Integration qualification remains incomplete:** ordinary prefix retention
@@ -3778,3 +3786,197 @@ Bounded block-row evidence is in
 5. Continue MTP overhead and prefill work from the unified roadmap using these
    measurements. MTP remains opt-in; CPU dispatch stays out until its separate
    correctness failure is resolved. No main merge or default promotion yet.
+
+## CPU experts and host PLE investigation, 2026-10-20
+
+This work continues on `two-gpu-context-capacity-experimental`; no new feature
+branch or CPU-dispatch merge. Candidate `c285eb42` adds persistent artifact
+readers and optional PLE counters to the integrated MTP/owner-planner source.
+The ordinary retained-prefix discrepancy described above remains open.
+
+### Distinguish the host paths
+
+The main four GGUF files are shards, not separate CPU and GPU execution models.
+The PLE table is a lookup source, distinct from routed-expert matrix arithmetic.
+Magnitude already keeps requested PLE rows in a shared host cache:
+2,949,120 slots, 90 bytes per row, 265,420,800 bytes of payload capacity
+(253.125 MiB, excluding directories and other metadata). The persisted startup
+seed contains 316,545 rows: 28,489,050 useful bytes, about 10.7% of slot capacity.
+The full PLE tensor is 28,800,138,240 bytes at offset 682,453,280 in shard 2.
+Increasing this slot allocation cannot help requests whose rows already hit.
+
+`20261020T122722Z-host-io-attribution-af4cc6` traced positional reads with file
+and offset attribution, excluding payload contents. Startup issued 124,348 PLE
+reads from 124,348 distinct threads, requesting 6,177,402,880 aligned bytes.
+During the observed request there were no PLE reads. Other model reads were
+41,590,151,680 logical bytes in prefill and 839,006,720 during partial generation.
+These include expert and other model weights; they are not exclusively expert
+reads and logical bytes are not physical storage bytes. The traced engine
+unloaded under memory pressure before finishing: this is a partial diagnostic,
+not serving or performance qualification. Summed syscall times overlap.
+
+### Implemented: persistent, bounded artifact readers
+
+Previously each coalesced read created a scoped thread, with batches of 16.
+`c285eb42` instead lazily creates at most 16 source-owned workers, uses bounded
+queues, serializes admission per source, and closes queues before joining on
+drop. Read buffers remain batch-owned; this introduces no retained payload cache.
+Aligned/coalesced ranges, direct-I/O fallback and per-range errors are preserved.
+`MAGNITUDE_TRACE_STORED_TABLE=1` reports rows, misses, aligned service bytes,
+reader count and fill timing without model payloads. Telemetry is disabled for
+paired timing. The residency design describes the ownership and bounds.
+
+Build: `20261020T123124Z-unified-mtp-build-dacfb6`. Independently preserved
+executables and SHA-256 identities allow comparison after Cargo cleanup.
+Strict serving: `20261020T123947Z-host-reader-strict-bdf5b7` passes repeat,
+ordinary and tool fixtures with exact plain/MTP text, usage and stop parity.
+Accepted/proposed drafts: 31/31, 24/34, 26/26 respectively, including rejection.
+This does not supersede the failed cross-retention lifecycle gate.
+
+The lightweight counters show:
+
+- Plain: 186 subsequent table calls, 25,536 requested rows, zero misses.
+- MTP: 98 subsequent calls, 25,584 requested rows, 128 misses (speculative rows),
+  approximately 6.69 ms summed read service across nine fills; zero failed slots.
+- Both startup seeds use 124,348 reads but only 16 threads; seed read service is
+  11.33/11.36 seconds in this untimed qualification. No old/new speed claim is
+  inferred from those two same-candidate observations.
+
+Static seed-offset analysis shows 64 KiB coalescing gaps produce 6.177 GB of
+aligned service, versus 1.287 GB and 290,173 requests when only touching blocks
+are merged. Intermediate gaps: 4 KiB gives 1.352 GB/274,253 requests; 16 KiB gives
+1.864 GB/231,965 requests. This is an I/O tradeoff to measure, not evidence that
+one policy is faster. A larger PLE cache is not justified by these warm fixtures.
+
+### CPU arithmetic: useful architecture, separate correctness obligation
+
+The prior native CPU dispatcher remains excluded. The recorded 53 captured
+expert operands establish that retained weights and fresh CPU weights agree;
+the remaining problem is arithmetic reproduction. Grouped scalar accumulation
+improved exact routed contributions from 25/53 to 43/53, and half-group rounding
+to 44/53. Raw GPU gate/up/down captures reproduce all 53 parent contributions;
+the remaining CPU differences cross BF16 rounding boundaries. The exhaustive
+finite BF16 SiLU check already passed. These facts do not prove that every
+serving divergence has the same cause, and do not qualify the dispatcher.
+
+A new llama.cpp control isolates placement: leave the first 23 layers' experts
+on CPU, while attention and other decoder work stay on GPU. Use `-ngl 99`,
+`--n-cpu-moe 23`, `--fit off`, `--override-tensor per_layer_token_embd=CPU`,
+and `--tensor-split 35,14`, with the same installed executable/modules, f16 KV,
+1024 context, drafting off and prefix reuse off. The comparison control uses
+26 GPU layers (23 complete CPU decoder layers).
+
+The initial equal split failed before readiness with a 37,778.71 MiB CUDA1
+allocation (`20261020T124632Z-host-expert-llama-qualification-33c4a8`). Moving the
+boundary to account for CPU experts gives CUDA weight allocations of
+21,147.83/21,708.62 MiB. The corrected run
+`20261020T124757Z-host-expert-llama-qualification-01f660` passes all three
+intrinsic fixtures and exact native-rendered prompt tokens. Repeat and tool
+outputs agree with the whole-layer control; ordinary text differs. This is
+qualification of a llama.cpp architectural control, not native CPU dispatch.
+
+### Controlled CPU-placement result
+
+`20261020T124911Z-host-expert-llama-comparison-633ea0` passed the thermal gate,
+then ran A/B/B/A under one exclusive lease. Each launch had two warmups per
+fixture followed by one measured pass. All 24 responses matched their own
+qualified configuration's text, usage and stop, with zero reused prefix tokens.
+Installed binary/module hashes were unchanged.
+
+| Matched repeat, 758 input / 64 output | Whole-layer CPU control | CPU experts, GPU attention | Change |
+| --- | ---: | ---: | ---: |
+| Prefill | 4.237636 s | 3.743278 s | -11.666% |
+| Generation | 5.314445 s | 1.915325 s | -63.960%; 2.775x speed |
+| Total model time | 9.552081 s | 5.658603 s | -40.761% |
+
+Generation spreads were 37.398/18.865 ms, far below the 3399.121 ms gap;
+prefill spreads were 6.316/32.482 ms versus a 494.358 ms gap. The gain exceeds
+3% and both observed spreads. Server-reported generation rates are about
+11.85 versus 32.89 tokens/s (its interval excludes the first predicted token).
+These are short, warm, single-concurrency results, not maximum-context or
+cold-start guarantees.
+
+Ordinary times were 2.357/2.002 s prefill and 5.270/1.872 s generation, but the
+outputs differ across configurations: these are descriptive latencies, not a
+matched-output speed verdict. Physical read deltas on measured repeat were
+192,512 bytes in each control pass and 118,784/98,304 bytes in the CPU-expert
+passes. Both were effectively warm in RAM; saved disk service does not explain
+a 3.4-second generation gap. The placement change also alters the GPU boundary;
+it is a complete configuration result, not a single-operator attribution.
+
+This result strengthens the case for CPU expert arithmetic while retaining
+attention/recurrent work on GPU. It also establishes that the earlier
+whole-layer llama.cpp control was not the best configuration explored on this
+host. The new control should be used in future comparisons. This is not a new
+same-session native-versus-llama.cpp comparison and does not establish a native
+speedup. Magnitude must still fix CPU arithmetic and memory admission, then
+measure its own implementation against this stronger control.
+
+### Reader-pool comparison: correctness passes, no latency win established
+
+`20261020T125920Z-host-reader-comparison-dc3d89` compares preserved `b94e1f36`
+(A) with `c285eb42` (B), plain decoding only. Thermal-gated A/B/B/A, identical
+rendered tokens, two warmups per fixture per launch, two measured passes per
+condition. Every launch restores the same PLE row seed snapshot into a private
+cache directory; other cached artifacts are shared. No OS cache flushing.
+All 24 responses match reference text, usage and stops. Recorded selected
+kernel configurations are identical. This comparison does not waive the
+separate retained-prefix/MTP lifecycle gate.
+
+| Fixture | A prefill | B prefill | A generation | B generation | Generation spread A/B |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Repeat | 4.861 s | 3.447 s | 4.791 s | 4.660 s | 3.315 / 3.062 s |
+| Ordinary | 5.539 s | 3.070 s | 2.458 s | 1.999 s | 0.900 / 0.004 s |
+
+**Neither generation result passes the declared bar.** Repeat's 2.74% mean
+reduction is below 3% and far below either spread. Ordinary's 18.70% reduction
+is smaller than the control spread. Prefill mean differences likewise do not
+exceed both observed spreads. Startup is A 36.37/36.52 s, B 35.37/36.55 s:
+36.445 versus 35.960 s means, a 1.33% difference below B's 1.18-second spread.
+No startup, prefill or generation speedup is established. The deterministic
+benefit retained on the experimental integration branch is reducing startup
+thread creation from 124,348 to at most 16, with bounded source admission.
+It is not a performance promotion or a main/default merge.
+
+Per-process physical-read deltas explain why the means are insufficient:
+repeat generation reads A 2.087 GB/14.320 MB and B 11.321 MB/1.891 GB. Both
+implementations have a fast, nearly resident pass and a slow storage-heavy
+pass. Logical read service stays around 6.48 GB. Repeat prefill logical service
+is approximately 21.04–21.07 GB per measured request. Ordinary generation has
+A 514.23 MB/0 bytes and B 8 KiB/3.82 MB physical reads. These counters establish
+storage/cache-state variability; they do not identify each file without tracing.
+The earlier table telemetry isolates PLE as a small serving contributor.
+
+### Revised implementation sequence on the integration branch
+
+1. Keep `c285eb42` as the bounded-reader implementation with exact serving
+   evidence, without claiming measured latency gains. Do not increase PLE slots
+   based on these warm fixtures. Measure coalescing policy separately only when
+   startup or miss-heavy PLE workloads become the target.
+2. Resolve the existing CPU expert arithmetic discrepancies using the captured
+   gate/up/down operands. Preserve the declared numerical and serving gates.
+   Do not merge the known-failing CPU dispatcher or weaken tolerances.
+3. Implement selective CPU-expert placement with GPU attention/recurrent work
+   on the same integration line. Charge CPU weight residency, conversion,
+   staging and per-device GPU weights explicitly. Partition by actual resident
+   bytes after expert placement, not an equal decoder-layer count. Start from
+   a fixed, auditable placement before adding adaptive dispatch.
+4. Qualify the integrated hybrid path against its own same-source baseline,
+   then alternate against the stronger llama.cpp CPU-expert control above.
+   Record physical reads and RAM/VRAM residency so an apparent warm-cache gain
+   is not mistaken for an execution improvement. Include both prefill and
+   generation; repeat is currently the matched-output cross-engine fixture.
+5. Resolve the final-row retained-prefix numerical discrepancy before promoting
+   integrated MTP. Then compare hybrid plain versus hybrid MTP under one lease,
+   with rejection/lifecycle checks, and qualify context capacity and single-GPU
+   preservation. MTP proposal acceptance alone is not a speedup result.
+
+The previous whole-layer llama.cpp comparison remains historical evidence;
+future claims must account for the substantially stronger configuration found
+here. No native-over-llama.cpp win, native CPU-dispatch qualification, integrated
+MTP speedup, or new maximum-context result is claimed by this investigation.
+
+At 1.2 GiB free disk, evaluation job
+`20261020T124740Z-unified-stale-build-cleanup-197a6e` removed regenerable Cargo
+artifacts (10.0 GiB reported). Preserved executable identities, source, fixtures
+and run evidence remain available; subsequent free space was about 9.4 GiB.
