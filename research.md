@@ -1,6 +1,6 @@
 # Magnitude inference research and implementation stages
 
-Updated: 2026-10-19
+Updated: 2026-10-20
 
 ## Objective
 
@@ -16,6 +16,20 @@ and keep useful experimental controls opt-in.
 This is a research and execution plan. Proposed techniques and acceptance bars
 are not measured speedups. The applicable documents under `design/` remain the
 architecture authority and must be consulted before implementation changes.
+
+## Current outcome
+
+- Repaired source `82763130` passes the actual 260137-input retrieval at 262144
+  capacity, placed serving/lifecycle checks, and Qwen3.5 4B single-GPU preservation.
+- Ordinary generation improves 10.891% against Stage 2b beyond the declared bar
+  and both spreads. Rebuilt-initial means are lower but fail the spread bar.
+- The direct matched-repeat comparison establishes no generation win over the
+  installed llama.cpp configuration. Native source-page misses remain variable.
+- Most spare RAM already holds file cache. The larger managed-cache trial does
+  not establish a speed gain; keep it optional. No general default promotion.
+- The final configuration, evidence identities and deferred gates are recorded
+  at the end of this document. Experimental MTP, packing and CPU dispatch remain
+  separate from the qualified consolidated plain source.
 
 ## Current system and evidence
 
@@ -86,6 +100,14 @@ do not repeat a full maximum-context run for every unrelated change.
 
 ### RAM occupancy and actual disk traffic
 
+**Current answer:** Most spare RAM is already occupied by file cache. Across
+the repaired Stage 8 comparisons, native endpoints have roughly 56.6–56.8 GiB
+cached and 0.4–0.5 GiB free. The final cross-engine comparison records a
+2.312 GB physical-read repeat window despite that occupancy. Useful page
+retention can matter, but allocating another cache competes for occupied RAM.
+The derived-cap experiment below did not establish a warm-generation benefit
+or prevention of these slow requests. `MemAvailable` includes reclaimable cache.
+
 The machine already uses most spare RAM for cached model pages. During the
 Stage 2a tool qualification, `free` showed approximately 3.2 GiB actually free
 and 54 GiB in buffers/cache. These are system totals, not the engine's RSS.
@@ -119,10 +141,170 @@ without losing more useful Linux cache or adding costly copies. Record file
 residency, logical/physical reads, swap activity and latency together. High
 `MemAvailable` alone is not evidence of an unused RAM opportunity.
 
+For the current CPU-cache experiment, the active **18:00:04 UTC** sample below
+has only **0.379 GiB actually free**, with **53.150 GiB `Cached`**. Increasing
+the native CPU cache therefore competes with existing file-cache contents.
+The incomplete same-source comparison observes `Cached` falling from
+55.908 to 51.821 GiB and physical reads rising from 50.618 to 1,400.558 MB
+in its one completed repeat pair. That is not a causal performance result,
+but it prevents treating the 4 GiB allocation as previously unused capacity.
+Earlier accepted warm windows have zero physical reads despite gigabytes of
+logical reads. A larger cache can help only where it improves useful residency
+or avoids source service, conversion or uploads without a larger displacement
+cost; simply allocating all reported available memory is not an established fix.
+
+A fresh **2026-10-19 19:11:02 UTC** idle snapshot finds **62.696 GiB total,
+55.576 GiB `Cached`, 4.545 GiB actually free and 60.531 GiB `MemAvailable`**,
+with no Magnitude/harness process running. This is not inference peak occupancy
+or an inventory of model pages; `Cached` includes other files. The snapshot and
+read-only reproduction script are retained in
+`20261019T191102Z-idle-ram-diagnostic/`.
+
+Stage 7a's controlled comparison provides another active example: all four
+candidate generation-delivery windows have **zero physical read bytes**, with
+approximately **7.188 GB logical reads for repeat** and **3.878 GB for ordinary**.
+At delivery completion, Linux reports **56.432–56.569 GiB cached,
+0.445–0.519 GiB actually free and 53.711–53.775 GiB available**. This is
+reclaimable cache rather than unused RAM. The candidate adds GPU expert storage,
+not an anonymous host payload cache. These are delivery windows with possible
+lookahead, not exact device-step boundaries. Raw I/O and RAM observations are in
+`20261019T194631Z-stage7-owner-budget-comparison-a0f388/analysis.json`.
+
+The later Stage 7b group 1 comparison records physical misses despite warming:
+**100.770/0 MB** in repeat and **385.081/0 MB** in ordinary generation-delivery
+windows. RAM remains occupied: **56.583–56.706 GiB cached** and only
+**0.378–0.486 GiB free**. Zero physical reads in Stage 7a therefore cannot be
+generalized to every profile or request. Retain the changed cache behavior with
+the grouping result, rather than treating available RAM as unoccupied space.
+
+A fresh active sample at **2026-10-19 21:49:46 UTC**, while the Stage 7c
+candidate is serving its 1024-context qualification, finds **62.696 GiB
+total, 55.433 GiB `Cached`, 0.532 GiB actually free and 53.739 GiB
+`MemAvailable`**. The engine has **6.811 GiB RSS and zero process swap**.
+This is one live snapshot, not a peak or model-page inventory; cached files and
+mapped RSS can overlap. Its raw `/proc` observations and reproduction script
+are in `20261019T214830Z-stage7-startup-attention-inventory-strict-a9ddbd/`.
+
+The subsequent Stage 7c comparison directly observes a costly physical-miss
+case: the second candidate repeat delivery window reads **1,061.032 MB from
+storage**, versus 5.263 MB in its first pass, while its endpoint still has
+**56.799 GiB cached and only 0.428 GiB free**. Ordinary candidate windows read
+0/0.004 MB physically, despite about 3.005 GB of logical source reads each.
+Useful page retention can therefore help particular requests, while most spare
+RAM already holds file pages. The next diagnostic must identify displaced
+required records and source stalls; another anonymous cache competes for that
+same RAM. The model's 103.688 GiB source still exceeds host memory. Full results
+are in `20261019T215322Z-stage7-startup-attention-inventory-comparison-f330d9/`.
+
+The derived-cap follow-up now measures the alternative directly, on the same
+frozen `7a0a1f30` binary. A **33 GiB cap** retains **15.190 GiB** more classified
+host model storage after the repeat/ordinary request sequence. Linux file cache
+falls from **56.490–56.833 GiB to 41.355–41.524 GiB**, while actually free RAM
+stays **0.406–0.480 GiB** with retention enabled. This uses RAM previously
+holding file pages. Logical generation-delivery reads fall **99.630% for repeat
+and 98.942% for ordinary**, but generation changes only **−0.535% / +0.137%**,
+failing both 3% bars. Both cache-off measured repeat windows already have few or
+no physical reads; this comparison cannot establish prevention of the earlier
+costly miss. Keep the managed cache opt-in. Full qualifications, alternating
+comparison, memory census and limits are recorded under Stage 7c below.
+
 Local evidence: `20261019T075917Z-stage2a-comparison-b3e32b/` contains
 `ram-residency.json`, its reproduction script, measured I/O windows and
 `memory-summary.json`. The residency snapshot was taken after qualification;
 it did not interfere with timed A/B/B/A requests.
+
+A fresh read-only check at **2026-10-19 09:22 UTC**, with no inference process
+running and both GPUs idle, found the following:
+
+| Host RAM observation | GiB |
+| --- | ---: |
+| OS-usable total | 62.696 |
+| Actually free | 6.892 |
+| Linux `Cached` | 53.508 |
+| `MemAvailable`, including reclaimable cache | 60.664 |
+| Main GGUF pages resident, measured with `mincore` | 46.313 |
+
+This idle snapshot does not establish peak inference occupancy. It confirms that
+the apparent 60.7 GiB available is largely RAM already serving as file cache.
+The remaining free RAM can absorb additional pages, subject to runtime reserves;
+an explicit cache also competes with existing cached pages. More useful retention
+can help cold reads and broad prompt scans, but simply allocating more RAM has
+not demonstrated a warm-generation win. In the Stage 2b candidate's measured
+generation delivery windows, roughly 4.84 GB of logical reads corresponded to
+only 6.14 MB of process-attributed physical reads. Investigate RAM copies,
+host-to-device uploads, conversion and expert reuse alongside physical misses;
+these counters alone do not isolate which remaining operation dominates latency.
+The managed-cache historical comparison above remains the reason it is opt-in.
+
+Fresh snapshot and its non-warming reproduction script are under
+`inference/evaluation/results/20261019T092219Z-idle-ram-diagnostic/`.
+
+A running observation at **2026-10-19 10:34:27 UTC**, during the untimed
+four-position main-engine probe, found **55.886 GiB `Cached`, 0.454 GiB actually
+free, and 54.013 GiB `MemAvailable`**. The harness RSS was about 6.48 GiB and
+its `VmSwap` was zero. This is a single sample, not peak host occupancy; Linux
+`Cached` also includes non-model files. Its process I/O showed 9.24 GB of
+cumulative physical reads, including loading/setup; that counter must not be
+presented as a warm-generation window. The earlier controlled warm
+measurements remain the evidence for low physical generation traffic. Cache
+warmth and phase must accompany any claim that disk is the bottleneck.
+
+Snapshot and read-only observer:
+`20261019T103247Z-stage4-main-features-3ebbf3/ram-103427.json` and
+`ram-observer.py` under the local results directory.
+
+A further read-only snapshot at **2026-10-19 11:52:44 UTC** found **53.363 GiB
+`Cached`, 7.590 GiB actually free and 60.773 GiB `MemAvailable`** out of
+62.696 GiB total. No Magnitude process was running and both GPUs were idle;
+an existing sleeping llama-server had approximately 3 MiB RSS and 3.25 GiB
+swapped out. System swap occupancy is not evidence that the earlier active
+Magnitude probe was swapping; its sampled `VmSwap` was zero. The snapshot did
+not inventory model-page residency, and `Cached` includes other files.
+
+The practical answer is conditional: retain more useful expert pages when
+physical misses are costly, while preserving runtime headroom. Here most spare
+RAM is already serving the filesystem cache. Stage 2b's two candidate generation
+delivery windows each had approximately **4.84 GB logical reads and 6.14 MB
+physical reads**. Those windows do not show a warm disk-bandwidth bottleneck or
+establish which remaining operation dominates. The existing managed-cache
+comparison also failed to demonstrate a speedup. Prioritize measuring source
+service time, RAM copies, uploads, conversions and GPU expert reuse before
+allocating another cache. Cold loading and broader or changing expert demand
+may have a different miss rate and require their own measurement.
+
+Snapshot and its reproduction script:
+`20261019T115244Z-idle-ram-diagnostic/` under the local results directory.
+
+A running check at **2026-10-19 13:18:17 UTC**, during the untimed Stage 5
+control qualification, found **55.820 GiB `Cached`, 0.555 GiB actually free
+and 53.738 GiB `MemAvailable`**, out of 62.696 GiB total. The accepted plain
+engine's RSS was 6.821 GiB and its `VmSwap` was zero. This is one sample,
+not a peak or a model-page inventory; `Cached` includes other files and shared
+pages can overlap process RSS. Allocating another cache would compete with
+these existing cached pages. Its cumulative 49.740 GB physical-read counter
+includes loading and earlier work; it is not a generation-window measurement.
+
+The later controlled Stage 5 ordinary-generation delivery windows contain
+approximately **3.94–3.95 GB logical reads** each, with **zero physical bytes
+in three windows and 6.652 MB in the fourth**. Most of this warm traffic was
+already served without physical disk reads. Cold loading and broad scans still
+incur substantial disk work, but these measurements do not establish an unused
+RAM allocation as the warm-generation fix.
+
+Active snapshot and read-only reproduction script:
+`20261019T131615Z-stage5-strict-d25818/ram-active.json` and `ram-observer.py`.
+Controlled delivery-window counters and limits:
+`20261019T133130Z-stage5-comparison-2f88c4/analysis.json`.
+
+A read-only check at **2026-10-19 16:16:43 UTC**, after the physical-cache
+qualification exited, found **55.475 GiB `Cached`, 4.740 GiB actually free and 60.433 GiB
+`MemAvailable`**. No Magnitude process was running and both GPUs were idle.
+This is not peak inference occupancy or a model-page inventory. Most available
+RAM remains reclaimable file cache; allocating another raw-weight cache would
+compete with it. The operator result below identifies a different possible use:
+retaining CPU-ready expert records could avoid both packing and GPU transfers,
+if a bounded selective CPU path passes serving qualification.
+Snapshot and reproduction script: `20261019T161643Z-idle-ram-diagnostic/`.
 
 ### Confirmed code observations
 
@@ -130,10 +312,11 @@ it did not interfere with timed A/B/B/A requests.
   `cuMemcpyHtoDAsync` and then synchronizes the transfer stream before returning.
   The [expert streaming runtime](inference/engine/executor/src/streaming/runtime.rs)
   invokes this path separately for each fetched expert tensor.
-- [Placed startup](inference/engine/src/execution/placed.rs) currently requires
-  two ranges and plain text execution. Prediction-head support exists in
-  [the Qwen4 family](inference/engine/families/qwen4exp/src/head.rs), but that does
-  not establish MTP support across the two owners.
+- In the frozen plain control, [placed startup](inference/engine/src/execution/placed.rs)
+  requires two ranges and plain text execution. Prediction-head support in
+  [the Qwen4 family](inference/engine/families/qwen4exp/src/head.rs) did not by
+  itself establish MTP across owners. Stage 4 adds that capability on the
+  experimental branch described below.
 - [Expert prediction](inference/engine/executor/src/operators/routed/fused_graph.rs)
   is disabled for mixed or unnormalized residual forms. The previous predictor
   wasted source traffic on this model; re-enabling it unchanged is not a plan.
@@ -234,13 +417,13 @@ against a reference require that reference to pass its sanity gate.
 | --- | --- | --- | --- |
 | 0 | Current baseline and critical-path measurement | Baseline established; attribution limits recorded | Current checkout |
 | 1 | Batched asynchronous expert transfers | Disposed: prompt candidate failed; decode candidate not promoted | 0 |
-| 2 | Trace-informed GPU expert retention | 2a generation bar passed; tool gate and optional-profile decision next | 1 decision |
-| 3 | Confidence-limited expert prefetch | Pending | 2 decision |
-| 4 | MTP across the two owners | Pending | 3 decision |
-| 5 | SM86 packed-kernel and representation improvements | Pending | 4 decision |
-| 6 | Selective CPU expert execution | Exploratory | Measured transfer/compute crossover |
-| 7 | Adaptive placement and prompt grouping | Pending | Accepted earlier stages |
-| 8 | Consolidated qualification and reference comparison | Pending | Selected candidates disposed |
+| 2 | Trace-informed GPU expert retention | 2a and 2b retained as opt-in; controlled timing and tool gates passed | 1 decision |
+| 3 | Confidence-limited expert prefetch | Repeated-miss candidate rejected after no actionable predictions; other conditioning deferred | 2 decision |
+| 4 | MTP across the two owners | Qualified experimental capability; repeat generation improves, ordinary primary bar fails and total time regresses | 3 decision |
+| 5 | SM86 packed-kernel and representation improvements | Packing experiment qualified; repeat improves, ordinary gain below bar; four-warp declaration deferred after a confounded gate | 4 decision |
+| 6 | Selective CPU expert execution | Isolated crossover established; serving fails warmed parity; grouped arithmetic follow-up remains experimental | Transfer profiling, then compute crossover |
+| 7 | Adaptive placement and prompt grouping | Accounting, paired reservations and startup phases qualified experimentally; keep group 8. Capacity helps ordinary generation but exposes repeat source-page misses. Derived-cap RAM retention fails warm speed bars; no overall promotion | Recorded earlier-stage decisions |
+| 8 | Consolidated qualification and reference comparison | Declared coverage complete: repaired 262K, serving/lifecycle and single-GPU preservation pass. Ordinary generation −10.891% versus Stage 2b; rebuilt-initial gains fail the spread bar. No matched-repeat win over llama.cpp; retain source-page variability and optional profiles | Selected candidates disposed |
 
 A dependency on a decision permits a recorded revert or deferral. It does not
 require forcing an unsuccessful optimization into the code. Reorder remaining
@@ -444,6 +627,37 @@ before running it; fill measured fields only from saved artifacts.
 | Decode-only transfer batching | 1 | `5cac0a6f` + `09325a64…`; preserved control unchanged | Build `20261019T072428Z-stage1-build-a8119e`; lifecycle `20261019T072541Z-stage1-lifecycle-72e4ea` | Lifecycle and all 12 comparison outputs passed; mean difference below control spread | Not promoted; preserve synchronous control and candidate patch |
 | Decode reuse during prompt seeding | 2a | `801a56be` + `60459c8a…` | Build `20261019T075226Z-stage2a-build-75b7e4`; lifecycle `20261019T075554Z-stage2a-lifecycle-2c4074`; comparison `20261019T075917Z-stage2a-comparison-b3e32b`; tools `20261019T081041Z-stage2a-tools-99971b` | All lifecycle and semantic gates passed; generation time −26.585%, logical generation reads −46.570%; prefill +28.945% | Retain optional decode-reuse profile for repeated requests; preserve original default |
 | Reuse-weighted decode victims | 2b | `c9cbfcbf` + `07b58952…`; control is frozen Stage 2a | Build `20261019T082201Z-stage2b-build-5a6f9f`; lifecycle `20261019T082536Z-stage2b-lifecycle-eed91a`; comparison `20261019T082747Z-stage2b-comparison-baab09`; tools `20261019T083547Z-stage2b-tools-4a56cc` | Lifecycle, all 12 comparison outputs and held-out tools passed; generation −16.496%, logical generation reads −30.102%, prefill +0.219%, total −6.319% | Retain optional replacement alongside Stage 2a seeds; preserve prompt/LRU defaults |
+| Bounded repeated-miss prefetch | 3 | `d2b3b935` + `67eae120…`; frozen Stage 2b control | Build `20261019T085958Z-stage3-build-a9e8ac`; lifecycle/admission `20261019T090124Z-stage3-lifecycle-562553` | All six checks passed; 6,921 repeat trials, zero repeated misses or issued bytes, including the third independent request | Reject this inactive heuristic; no timing claim or source promotion; defer differently conditioned prediction |
+| Placed MTP with one CUDA affine decode choice | 4 | Candidate `47f852f5` + `da537eff…`; frozen Stage 2b plain control | Build `20261019T122031Z-stage4-build-87d1df`; generated prefix `20261019T122157Z-stage4-shared-prefix-f881f0`; serving `20261019T122452Z-stage4-shared-strict-heldout-c073bf`; lifecycle `20261019T123227Z-stage4-shared-lifecycle-8d6b29`; comparison `20261019T123708Z-stage4-comparison-626259` | All correctness gates and 24 benchmark responses exact. Repeat generation −21.911%, total −0.268%; ordinary generation −2.940%, total +11.129% | Keep experimental capability; do not promote the fixed-budget profile as a general speedup. Continue Stage 5 with the plain control |
+| Four-warp CUDA bank conversion | 5a | `356ab093` + `fd8ff569…`; frozen Stage 2b plain control | Build `20261019T131221Z-stage5-build-b663af`; serving `20261019T131615Z-stage5-strict-d25818` | Ordinary continuation changed from 60-token stop to 64-token length; three attention configurations also changed after module-wide tuning invalidation | Failed serving gate; conversion effect is not isolated. Revert launch declaration and defer this experiment; no speed comparison |
+| Shared extraction for packed low/high planes | 5b | `356ab093` + `f906f66c…`; frozen Stage 2b plain control | Build `20261019T132409Z-stage5-build-c23e98`; serving `20261019T132526Z-stage5-strict-3a0610`; lifecycle `20261019T132942Z-stage5-lifecycle-6aed11`; comparison `20261019T133130Z-stage5-comparison-2f88c4` | All gates and 24 benchmark responses exact, with identical unrelated kernel configurations. Repeat generation −4.515%, total −2.101%; ordinary generation −2.850%, total −1.551% | Keep experimental packing source; ordinary primary metric remains below the declared 3% bar. Preserve Stage 2b as the accepted plain control |
+| Separate source and blocking upload service | 6 diagnostic | `6572bbd2` + `e84abda8…`; accepted plain profile, Stage 5 frozen output controls | Build `20261019T135156Z-stage6-build-63ee63`; diagnostic `20261019T135740Z-stage6-source-service-5f527a`; trace-disabled lifecycle `20261019T140411Z-stage6-lifecycle-7f6abd` | Six exact responses and identical selected configurations; both owner traces present. Ordinary blocking uploads average 327.121 µs per 3.125 MB expert; trace-disabled retention/cancellation/recovery passes | Retain opt-in diagnostics. No speed or CPU-crossover claim; measure matched CPU work next |
+| Canonical expert operator crossover | 6 diagnostic | `513376a8` + `3ccacadb…`; fresh native feature export, real block 1 weights | Capture `20261019T144558Z-stage6-feature-capture-a916e2`; build `20261019T150219Z-stage6-crossover-build-7d6fd6`; timed comparison `20261019T150238Z-stage6-crossover-bd17b2` | All 32 groups pass per-backend path equality; 384 complete traced samples. CPU-ready one-expert pipeline 0.182 ms versus 0.811 ms GPU miss; CPU import 0.781 ms versus 0.799 ms with overlapping pass means | Retain harness. Prototype bounded CPU-ready retention and selective execution next; no CPU dispatch or serving speedup yet |
+| Actual miss/victim identities and bounded retention replay | 6 diagnostic | `2f7fbcc1` + `6186426f…`; same accepted plain profile | Build `20261019T152721Z-stage6-request-build-553dbd`; trace `20261019T152836Z-stage6-request-trace-26f7b0`; trace-disabled lifecycle `20261019T153420Z-stage6-request-lifecycle-fe37ac` | Six exact responses and unchanged configurations. 4 GiB payload-only demand replay hits 269/916 eligible completed repeat frames and 121/599 ordinary; victim replay hits 92/916 and 116/599 | Prefer demand retention for the prototype. Replay does not establish CPU execution, RAM admission or serving gain |
+| Physical CPU-ready cache and lease qualification | 6 prototype | `e2d68773` + `cf63e7ff…`; real block 1 weights and retained native fixture vectors | Build `20261019T160306Z-stage6-native-cache-build-d8953f`; qualification `20261019T160525Z-stage6-native-cache-qualification-10411b` | All 32 retained triples and CPU contributions exact; shared capacity, alias charges, pending/failed/withdrawn fills and owner lifetime pass | Retain on `two-gpu-native-cpu-cache-experimental`. Serving handoff, multi-layer integration, host admission at the modeled 4 GiB capacity and latency remain unmeasured |
+| CUDA/CPU activation and contribution exchange | 6 prototype | `29c77cf2` + `bc9e3058…`; same real weights and fixture readout operands | Build `20261019T163127Z-stage6-cpu-exchange-build-f2b8fc`; qualification `20261019T163154Z-stage6-cpu-exchange-qualification-b4ed4a` | 32 exact activation/contribution round trips across both GPUs, concurrent requests sharing one CPU cache, and failure/withdrawal/watchdog paths pass | Retain on `two-gpu-selective-cpu-experimental`. Production route selection, CPU program admission, full host accounting and serving performance remain pending |
+| Shared CPU expert dispatch in serving | 6 prototype | `d92f10c0` + `dd6fb7aa…`; retained as `d7958b29` on `two-gpu-cpu-dispatch-experimental` | Build `20261019T174442Z-stage6-cpu-dispatch-build-84bb82`; operators `20261019T174618Z-stage6-cpu-dispatch-operators-23bcae`; isolation `20261019T175458Z-stage6-cpu-dispatch-isolation-a505ab`; lifecycle `20261019T180054Z-stage6-cpu-dispatch-lifecycle-df0535`; incomplete comparison `20261019T180314Z-stage6-cpu-dispatch-comparison-ea41aa` | Shared native cache reaches about 3.93 GiB; 49 CPU dispatches in the isolated six-response qualification. Initial exact prose/ordinary/tool and lifecycle checks pass, but warmed ordinary continuation fails exact parity on response 12 of the alternating run, with identical GPU choices | No promotion or accepted speed result. Preserve the failed run; diagnose actual routed arithmetic and retention/handoff before another comparison |
+| Actual routed CPU operands and fresh-import replay | 6 diagnostic | `d7958b29` + `861acb77…`; retained as `59b27255` on `two-gpu-cpu-dispatch-diagnostic` | Build `20261019T182107Z-stage6-cpu-capture-build-8581d3`; capture `20261019T182609Z-stage6-cpu-routed-capture-51ed05`; derived replay `20261019T183204Z-stage6-cpu-routed-replay-c98a62` | 53 consumed records across 18 blocks: all retained native weights match fresh source imports and all CPU outputs match fresh CPU execution. CPU/GPU products match in 31/53, contributions in 25/53; down projections with the same GPU product match in 32/53. The instrumented six-request run does not reproduce the warmed output failure | No corruption observed in these records; arithmetic compatibility needs work. Preserve the failed original range check and the verified ordinary subset. No model-quality, numerical-admission or speed claim |
+| Grouped CPU arithmetic on actual routed operands | 6 numerical proof of concept | `59b27255` + `9b0ba2cf…`; retained as `67a7a69a` on `two-gpu-cpu-grouped-experimental` | Build `20261019T184915Z-stage6-cpu-grouped-build-cbaf1b`; replay `20261019T185406Z-stage6-cpu-grouped-replay-54fe61` | Grouped scalar product agreement improves to 50/53, contribution agreement to 43/53, and down on the same GPU product to 44/53. All finite BF16 inputs have identical CPU/CUDA BF16 SiLU publication on this system; substituting GPU SiLU does not change replay results | Remaining projection differences require diagnosis before serving integration. No timing, numerical admission or serving-speed claim |
+| Verified raw CUDA projection accumulators | 6 diagnostic | `67a7a69a` + `786553b4…`; retained as `efd99574` | Build `20261019T191623Z-stage6-cpu-raw-projection-build-32773e`; replay `20261019T191741Z-stage6-cpu-raw-projection-replay-164fd7` | F32 observations reconstruct every normal GPU product and contribution exactly in all 53 records. Whole-group CPU partials differ after BF16 narrowing at 3/33,920 gate, 1/33,920 up and 11/135,680 down coordinates | Projection differences are directly observed before publication; the earlier warmed failure remains unreproduced. No serving/timing claim |
+| Intermediate half-group rounding | 6 numerical proof of concept | `efd99574` + `6e1a4556…`; retained as `394d3764` | Build `20261019T192052Z-stage6-cpu-half-rounding-build-3ea984`; replay `20261019T192208Z-stage6-cpu-half-rounding-replay-25e54b` | GPU raw bytes remain identical. Rounding each 16-product half leaves products at 50/53 exact and improves contributions only from 43/53 to 44/53; same-input down remains 44/53 | Intermediate rounding alone does not repair compatibility. Keep CPU serving experimental; investigate independent GPU capacity work next |
+| Complete per-owner expert-cache allocation bound | 7a | `d2b3b935` + `98a33646…`; published source-equivalent as `5e42c2a2` on `two-gpu-owner-budget-published` | Build `20261019T193611Z-stage7-owner-budget-build-b28ef8`; serving `20261019T193817Z-stage7-owner-budget-strict-3049d1`; lifecycle `20261019T194424Z-stage7-owner-budget-lifecycle-4f5d62`; comparison `20261019T194631Z-stage7-owner-budget-comparison-a0f388` | Six exact serving responses and lifecycle pass; all 24 comparison responses exact with identical kernel choices. Capacity grows from 200/203 to 201/206 records per layer, adding 289.102 MiB GPU payload. Ordinary generation −2.938%, total −4.465%; repeat generation −11.442%, total −11.267%, but neither generation difference exceeds control spread | Retain the capacity/accounting prototype without a speedup or default-promotion claim. Compare prompt grouping separately; preserve the measured source and binaries |
+| Group 1 on the frozen owner-budget build | 7b failure | Exact Stage 7a source and binaries; group 8 versus 1 | `20261019T200146Z-stage7-grouping-strict-918530` | Group 8 returns three valid responses; group 1 reaches readiness then unloads on the first request because its second owner has no residual output lease. GPU choices unchanged | Preserve the failure; repair reservation and scratch lifetimes before timing |
+| Paired lease repair and prompt-group comparison | 7b | Clean `783f5422`; group 8 versus 1 on the same repaired build | Build `20261019T201621Z-stage7-grouping-reservations-build-871588`; serving `20261019T201819Z-stage7-grouping-reservations-strict-c53c5e`; lifecycle `20261019T202218Z-stage7-grouping-reservations-lifecycle-e0af93`; comparison `20261019T202414Z-stage7-grouping-reservations-comparison-9716a0` | Six exact serving responses, prior group 8 parity and lifecycle pass; all 24 comparison responses exact with identical GPU choices. Group 1 adds 650.227 MiB GPU model storage, but ordinary generation rises 9.084% and total model time 19.233%; repeat generation falls 2.152%, total rises 9.734% | Retain the reservation repair on its experimental branch. Keep group 8; group 1 fails the primary bar and has material prefill/total regressions. No default or cumulative speedup claim |
+| Startup phases, scoped qualification and complete invocation inventory | 7c | Initial `1fa4bd9a`; scoped scratch `a3735d40`; rejected handoff `c253c094`; incomplete inventory `305c23a2`; qualified complete inventory `7a0a1f30` | Build `20261019T214356Z-stage7-startup-attention-inventory-build-45cd2c`; serving/audit `20261019T214830Z-stage7-startup-attention-inventory-strict-a9ddbd`; lifecycle `20261019T215127Z-stage7-startup-attention-inventory-lifecycle-78561e`; comparison `20261019T215322Z-stage7-startup-attention-inventory-comparison-f330d9` | Exact text/tools, native choices, fixed charges and lifecycle pass; 24 comparison responses exact. Slots grow to 223/224; ordinary generation −11.157%, beyond both spreads. Repeat generation +27.734%, including a 1.061 GB physical-read window | Retain the qualified accounting/capacity implementation experimentally. No overall promotion: repeat total latency rises 10.655%. Diagnose source misses and retention before broadening performance claims |
+| Source-page residency and demand retention envelope | 7c diagnostic | Clean `935e3358`, derived from complete candidate `7a0a1f30` | Build `20261019T221010Z-stage7-source-pages-build-96b47b`; replay `20261019T221648Z-stage7-source-pages-trace-65d5f5` | Six exact responses and identical GPU choices. Repeat: 1,511 cold demand ranges, 1.365 GB physical reads, exact worker/process agreement; 1,497 ranges were last read in the prior repeat's generation. Existing quotas yield one 33 GiB cap for follow-up | Establishes loss of useful source pages; no speed claim. Preserve the observer and completed-read history; bounded-retention result follows |
+| Derived-cap host demand retention | 7c profile | Same frozen `7a0a1f30` binaries; cache off versus 35,433,480,192-byte cap | Serving `20261019T223532Z-stage7-host-retention-strict-ae8390`; lifecycle `20261019T223835Z-stage7-host-retention-lifecycle-849d09`; comparison `20261019T224145Z-stage7-host-retention-comparison-b6c6e9` | Serving/lifecycle and all 24 comparison responses exact; GPU choices/inventory identical. Retains 15.190 GiB, displacing file cache; logical reads −99.630%/−98.942%, generation −0.535%/+0.137% for repeat/ordinary | Neither generation bar passes. Keep retention opt-in; this run does not reproduce the costly cache-off miss or prove tail prevention. No larger-cap sweep |
+| Current 32K context retrieval | 8 qualification | Frozen complete candidate `7a0a1f30` | `20261019T230253Z-stage8-context-60e410` | Both 2226+37 and 31661+37 requests retrieve the first-block record exactly, with zero prefix reuse. Slots 221/223; invocation inventories agree on both owners | Affected 32K path passes. No renewed maximum-context or speed claim; qualify the larger declaration next |
+| Smaller dense model on one GPU | 8 qualification | Accepted Stage 2b versus `7a0a1f30`; catalog Qwen3.5 4B Q4, GPU0 | Acquisition `20261019T230015Z-stage8-acquire-small-e20ebb`; serving `20261019T230807Z-stage8-small-strict-104d5b`; lifecycle `20261019T230948Z-stage8-small-lifecycle-2f5e36` | Six exact responses and equal native choices/usage/stops; complete tool passes. Prefix reuse, cancellation, recovery and health pass; exactly one GPU in all censuses | Checked dense single-GPU behavior passes. No speed-regression bound or coverage of other smaller models yet |
+| Current 262K context request | 8 failure | Frozen `7a0a1f30`, group 8 and ordinary reserves | `20261019T231254Z-stage8-context-262144-d839b3` | Readiness and 2226+37 retrieval pass; 260137-input request fails without output, requiring 60,817,408 bytes with 31,689,933 available. Cache fit uses only 100000 tokens, admitting 216/217 slots | Preserve failure; isolated `82763130` accounts for full configured state before selecting cache capacity. Build and qualify before timing |
+| Full configured-context cache admission | 8 repair | Clean `82763130`, derived from failed `7a0a1f30` | Build `20261019T232622Z-stage8-context-capacity-build-8277bc`; replay `20261019T233141Z-stage8-context-capacity-max-qualification-eaa24c` | Source-verified build and independent hashes pass. Exact 2226+37 and 260137+37 retrievals pass at 262144 capacity, with zero reuse; full-depth fit selects 202/204 slots and both owner bounds fit | Maximum-context regression repaired for the checked profile. Qualify short serving/lifecycle and compare this exact build before performance promotion |
+| Repaired-build placed serving and lifecycle | 8 qualification | Accepted Stage 2b versus clean `82763130`, group 8/context 1024 | Serving `20261019T234759Z-stage8-repaired-placed-strict-823649`; lifecycle `20261019T235250Z-stage8-repaired-placed-lifecycle-699eb9` | Six exact valid responses, equal rendered tokens/native choices/usage/stops; complete tool passes. Prefix reuse, cancellation, recovery and health pass; B retains 223/224 slots | Short placed correctness gates pass. Measure the full consolidated source effect against Stage 2b with tracing disabled and alternating launches |
+| Consolidated source versus accepted Stage 2b | 8 timing | Original Stage 2b binaries versus clean `82763130`, same fixed profile | `20261019T235658Z-stage8-consolidated-comparison-29712b` | All 24 outputs exact, native choices equal, thermal gate passes. Ordinary generation −10.891%, gap beyond both spreads, total −6.158%; repeat mean generation +6.218% within B variability, including a 535.818 MB physical-read window | Retain limited ordinary-continuation benefit. No stable repeat win or broad/default promotion; complete smaller-model and initial/reference coverage |
+| Repaired dense 4B on one GPU | 8 coverage/timing | Stage 2b versus `82763130`, catalog Qwen3.5 4B Q4, GPU0/context 1024 | Serving `20261020T000807Z-stage8-repaired-small-strict-74eefb`; lifecycle `20261020T000919Z-stage8-repaired-small-lifecycle-370363`; timing `20261020T001030Z-stage8-consolidated-small-comparison-dcc3b4` | Six serving and 24 timing responses exact, native choices equal, one-GPU census and lifecycle pass. Generation −0.171%/−0.076%; no regression crosses the 3%/spread criterion | Checked smaller-model behavior/performance preserved. No useful new small-model speedup or coverage of every smaller model claimed |
+| Rebuilt initial-source serving control | 8 qualification | Clean rebuilt `5cac0a6f` versus `82763130`; initial prompt/LRU versus explicit decode reuse | `20261020T002633Z-stage8-initial-strict-6ae25c` | All six responses valid and exact across builds; identical rendered tokens, native choices, usage and stops | Control qualifies for cumulative alternating timing. No equivalence to missing archived Stage 0 executable claimed |
+| Installed llama.cpp serving control | 8 qualification | Unsloth build 11541, `ce8c04021`, executable `402c9be2…`; 26 GPU layers, f16 KV, no drafting | `20261020T002221Z-stage8-llama-serving-qualification-f9d33a` | All three fixtures valid, rendered token arrays identical to native rendering, executable/modules unchanged. Repeat text and usage match Magnitude; ordinary prose and output length differ | Repeat permits matched generated work. Preserve ordinary serving difference; no ordinary execution-speed verdict or independent distributional quality claim |
+| Consolidated source versus rebuilt initial control | 8 timing | Clean initial `5cac0a6f` versus repaired `82763130`, explicit initial/reuse policies | `20261020T003132Z-stage8-initial-comparison-9c97fa` | All 24 outputs exact, native choices equal, thermal gate passes. Repeat generation mean −40.170%, ordinary −17.711%; neither gap exceeds A's spread. Native source reads remain partly physical despite about 56.6–56.8 GiB cached | No stable cumulative generation win established by this comparison. Retain all samples, controls and limited Stage 2b result; no multiplication of prior gains |
+| Consolidated source versus installed llama.cpp | 8 timing/report recovery | Stock `ce8c04021`, 26 GPU layers/f16 KV, versus `82763130`, default KV and explicit reuse | `20261020T004046Z-stage8-llama-comparison-46aa04` | All 24 responses valid and exact to their qualified engine; repeat text/usage match. Repeat generation 5.329 s versus 5.316 s (−0.242%), far below bar and B spread; model total +4.553%. B physical repeat reads 2.312/0.560 GB. Job exits 1 in reporting after all measurements; corrected log-name postprocessing recovers the report without remeasurement | No matched-repeat generation win or general llama.cpp claim. Ordinary outputs differ, so retain descriptive serving latency only. Preserve original reporting failure and recovery proof |
 
 
 ### Stage 0 progress — baseline and diagnostic correction
@@ -885,14 +1099,2473 @@ candidate and control worktrees/executables remain frozen for the next stage.
 Stage 2 evaluation is complete: useful prompt seeding and demand replacement are retained
 as explicit options, without a new RAM payload cache or changed CUDA kernels.
 
-## Immediate next action
+### Stage 3 declaration — bounded repeated-miss prefetch
 
-Begin **Stage 3: bounded-confidence expert prefetch** against the frozen Stage 2b
-profile. Use valid activation history for the mixed-residual model; retain the
-existing rejection of its inaccurate future-router predictor. Declare the
-confidence rule, byte/window budget and physical source-lifetime ownership before
-implementation. Keep demand priority and native routing authoritative. Qualify
-the candidate, then compare latency together with useful, late and wasted bytes.
-Advance through Stages 4–8 after that measured or justified disposition. Full CUDA
-graph attribution remains unavailable; do not imply a complete wait/arithmetic
-breakdown.
+Start from retained Stage 2b source `d2b3b935` in an isolated `history-prefetch`
+worktree. Both sides keep the Stage 2 seed/replacement profile and managed host
+cache disabled. The candidate adds `MAGNITUDE_EXPERT_PREFETCH_POLICY=history-repeat`;
+unset or `native` preserves the existing predictor behavior. Mixed-residual
+future-router prediction remains disabled.
+
+Learn each expert's **device miss at step q given its device miss at q−1** from
+actual directory resolutions. A completed small-row step with no demand request
+for a layer supplies negative evidence; only adjacent, valid, completed small-row
+steps train. Scratch steps and failed/abandoned work cannot train this statistic.
+Counters halve every 64 bank sequences. Require at least four decayed trials and
+at least three-quarters successful repeats. This is an empirical admission
+heuristic, not a statistical confidence interval. At most two eligible experts
+per target layer are ranked by repeat fraction and supporting trials.
+
+At step submission, consider the first two local layers; after serving a demand,
+consider the next two local layers while the GPU resumes. Predictions come only
+from the preceding step's actual misses in that target layer. Skip GPU residents,
+intact free staging copies and already-staged records. Limit this history path to
+four outstanding speculative records and 16 MiB of stored payload per owner, within the
+existing hint shelf. It reserves no GPU slots and moves no bytes to device memory
+until the real router demands them. Existing demand priority, source-ticket
+lifetimes, expiry and cancellation remain authoritative.
+
+Record admitted payload/source bytes, ready versus late demand matches, unused
+bytes at expiry/reclamation, cancellation, forced staging reclamation and unresolved
+records. These counters describe requested payload, not physical SSD reads;
+process I/O remains the physical/logical cross-check. A running read retains its
+ticket through completion and may still match later demand. The predictor adds bounded
+per-expert counters and one miss inventory per in-flight step plus its immediate
+predecessor, without a weight cache. Its counters retain physical cache effects
+without changing accepted numerical state.
+
+Build fully before the lifecycle gate. Include a third independent prose request
+to exercise the same two-warmup training boundary as the timed fixture, followed
+by prefix reuse, cancellation and recovery. If it admits useful work, compare
+untraced A/B/B/A against frozen Stage 2b, requiring the usual 3%/noise bar and
+bounded traffic. Zero admission at that boundary rejects this predictor for the
+fixture without spending a full timing comparison on an inactive mechanism.
+A promising result then needs the held-out tool transition gate. Preserve any
+failure and state the measured limitation before moving to Stage 4.
+
+Initial build `20261019T085601Z-stage3-build-4f272a` passed. Review then found
+that counter snapshots also need all-hit completions, so an incremental build
+`20261019T085958Z-stage3-build-a9e8ac` includes that diagnostic correction and
+verified both sides' engine/harness provenance. No model validation ran on the
+earlier build. The final candidate identity is `d2b3b935` plus
+`67eae1200f40849471a7390d5465ad37fe17438d40a2647612029c307c39318e`.
+The complete patch includes the new predictor module. All source remains frozen
+through the six-check lifecycle/admission probe, with streaming diagnostics enabled.
+
+### Stage 3 result — no repeated device-miss opportunity
+
+`20261019T090124Z-stage3-lifecycle-562553` passed all six checks. Cold, warm,
+retain, hit and recovery each produced the exact same 308-character / 64-token
+prefix. Hit and recovery reused 757 prompt tokens. Cancellation closed after
+four content events / 15 exact characters before terminal delivery and recovery
+remained healthy. Both owners reported 147,456 bytes of predictor counters,
+in addition to the unchanged Stage 2 counters.
+
+The 678 cumulative snapshots covered 339 physical bank sequences per owner,
+including all-hit completions. The predictor observed **6,921 adjacent valid
+small-row device-miss trials**: 3,757 on one owner and 3,164 on the other.
+There were **zero repeated device misses**, zero confident candidates and zero
+issued prefetch records/bytes. The third independent request's 63 decode-step
+window alone supplied 1,644 trials, again with zero repeats or admissions.
+The ready, late, unused, cancelled, unresolved and forced-reclamation counters
+were consequently all zero. Recorded payload conservation and budget checks
+passed, but these zero counters do not qualify an active prefetch lifetime path.
+
+The same expert needing a new device load on the immediately following step
+did not occur in this fixture. This finding does not say that expert activations
+never repeat: reuse served by the GPU cache is not a device miss. The chosen
+miss-recurrence event gives this predictor no observed opportunity after Stage 2
+retention. Planning accounted for 1.222190 ms across the complete instrumented
+gate; that excludes learning and other host work and is not an A/B latency result.
+
+**Reject this candidate for the tested profile and preserve Stage 2b.** The
+declared third-request admission gate was inactive, so a full timing comparison
+and held-out tool gate were not run. No speedup, slowdown, useful-prefetch ratio
+or active-prefetch cancellation qualification is claimed. The complete source
+patch, both build records, raw checks, `admission-summary.json`, `decision.json`
+and reproduction scripts remain available locally. Experimental source stays in
+the isolated worktree and is not promoted.
+
+Predicting newly missing experts needs different conditioning: for example,
+validated cross-layer observations or a trained predictor appropriate for the
+mixed residual form. That is deferred, not established by this experiment.
+The existing future-router rejection remains in place. Revisit this path with
+evidence of predictable new misses and exposed source wait; lowering a threshold
+cannot create positive repeats in this dataset. No trained checkpoint or
+additional activation-transfer path is introduced by this stage.
+
+### Stage 4 initial implementation and lifecycle qualification
+
+The isolated candidate now admits the catalog's own-history causal head on the
+first owner. It includes head weights/state/workspace, independent conditioning
+transfer slots derived from sealed head inputs, and raw F32 feature transport
+from the final target owner. Independently retained prompt boundaries live on
+the head owner. Target verification and state maintenance continue to use the
+existing coordinated transaction and every physical owner's completion tickets.
+The accepted main branch still uses its previous implementation while this
+candidate completes qualification.
+
+Build `20261019T093842Z-stage4-build-893593` completed with verified engine and
+harness provenance: candidate base `47f852f5`, dirty digest
+`a3dc95c59a35d94f72848accb88032fa824ff3d2ed1fa2c4bbea2ff2804f1454`.
+Earlier build/readiness attempts are retained: the initial compile found two API
+mismatches, and two startup attempts exposed planning/qualification paths that
+mistook local head ownership for the target's raw-residual export requirement.
+The correction carries that export in the target program plan and uses one
+conditioning-element declaration for kernel formation and its exact-copy
+qualification. No precision tolerance or proposal-acceptance rule was relaxed.
+
+`20261019T093945Z-stage4-lifecycle-1dcc70` passed the canonical 758-input-token,
+64-output-token repeated-prose checks with one generated/verified proposal per
+round, the default KV codec, both reuse policies selected, and managed host
+retention disabled:
+
+- Cold, retaining, cache-hit and post-cancellation recovery responses were the
+  same exact 308-character prefix, each with **31 proposals and 31 accepted**.
+- Cold and retaining requests had no reused prefix; hit and recovery reused
+  757 input tokens.
+- The cancelled stream ended after four content events/15 matching characters,
+  before its terminal response; the following recovery completed correctly.
+
+These four completed requests exercised 124 accepted proposals and **no rejected
+proposals**. They establish actual placed drafting and this full-acceptance
+lifecycle; they do not qualify rejected-suffix repair or ordinary continuation.
+The run was traced and untimed for promotion purposes, so no performance claim
+is made. Qualify an ordinary continuation and canonical tool fixture against
+the frozen accepted plain build, requiring exact greedy parity and observed
+rejections, before a controlled timing comparison. Stale original build output
+was cleaned to recover about 32 GiB; the accepted Stage 2b executable was kept.
+
+### Stage 4 held-out gate — ordinary continuation diverges
+
+`20261019T094358Z-stage4-heldout-a51b91` compared the frozen Stage 2b plain
+profile with the same built MTP candidate, at context 1,024 and one fixed
+proposal. Rendered tokens/templates matched. Both engines passed each fixture's
+sanity gate, repeated the same 64-token passage, and made the same independently
+validated BFCL triangle-area call with identical function/argument text.
+
+The ordinary continuation **failed exact greedy parity**: plain ended naturally
+after 60 output tokens; MTP generated 64 different tokens. MTP recorded 36
+proposals, 26 accepted and 10 rejected on that request. The tool request accepted
+all 26 proposals and completed the same 53 output tokens as plain. Request-local
+tool-call IDs were excluded from comparison; names and argument text were kept.
+
+The copying and tool results do not qualify the failed continuation. Hold timing
+and promotion. First run the same canonical continuation with MTP's generated
+and verified budgets both zero, retaining raw residual export and head priming,
+to distinguish that path from multi-row verification/rejected-suffix repair.
+The divergence's cause is not yet established; do not label it a repair defect
+or ordinary floating variation without discriminating evidence.
+
+`20261019T095010Z-stage4-zero-3f82e1` completed that diagnostic with the same
+built candidate and rendered inputs. With zero generated/verified proposals,
+the repeated passage matched and the ordinary continuation was byte-identical
+to the saved plain reference, including its natural stop at 60 tokens. Both
+responses reported zero proposals. Raw residual export and head priming alone
+therefore reproduce this reference; next inspect the first differing verification
+decision and prior accepted-prefix resolutions. This does not yet distinguish
+verification numerics from a rejected-suffix state defect.
+
+Build `20261019T095412Z-stage4-build-b0cc40` adds an optional host round trace
+(`MAGNITUDE_TRACE_GENERATION_ROUNDS`) without changing proposal construction or
+acceptance. Its candidate digest is
+`ac2db9bba6a9240f1414b48c8e6faa06035aa53d8da42abaf81c4b94044497ea`.
+`20261019T095455Z-stage4-trace-2e7d29` reproduced the same differing continuation
+and the same 36/26/10 proposed/accepted/rejected counts. It is a diagnostic
+completion, not a passed parity gate.
+
+The first differing verification starts at target position 411 with 16 output
+tokens already emitted. Its inputs are token 8026 (the anchor) and token 11
+(the proposed comma); target selections are `[11, 3804]`. The comma is correctly
+accepted, then the target's bonus token 3804 produces ` went`, where plain
+produced ` and`. Seven rejected proposals preceded this round. The differing
+token is therefore a target selection, rather than an unchecked proposal
+published by acceptance. This does not establish whether prior state resolution
+or two-row target numerics caused the changed selection. `analysis.json` retains
+the exact trace line and the compared outputs.
+
+### Stage 4 target-only batching diagnostic
+
+The evaluation harness now accepts explicit decoder ownership for model loads,
+a bound on leading scored positions, and optional exact feature exports. A
+width comparison keeps the model context fixed. Placed timing/attribution paths
+that currently observe only one owner's trace fail before loading instead of
+reporting partial device time. The six harness/design changes are qualified
+independently of promoting the MTP implementation.
+
+The canonical `prose-continue/moby-dick/0` probe retained its original scored
+assistant answer. Its first 396 rendered tokens and template match the failed
+serving request exactly; the full fixture contains 580 tokens. Both widths use
+context 581, the same two ranges, prompt group 8 and accepted reuse policies,
+with no drafter, lookahead or rejected suffix. Each two-row teacher-forced input
+is committed whole. These are bounded diagnostics, not reference-quality or
+speed claims; no thermal timing comparison was attempted.
+
+| Diagnostic | Scored positions | Mean / maximum KL, width 1 to 2 | Argmax agreement |
+| --- | --- | --- | --- |
+| Default affine KV | 395–418 (24 rows) | 0.005291 / 0.042224 nats | 23/24 |
+| Dense KV | 395–398 (4 rows) | 0.009330 / 0.022439 nats | 3/4 |
+
+Both changed the argmax at position 397 from token 3896 to 34565. The single-row
+winning margin was 0.128477 logits with affine KV and 0.192133 with dense KV.
+No measured row exceeded 0.5 nats. The differing row counts prevent comparing
+the two means as a codec-quality verdict. Target batching therefore changes
+outputs without drafting or rejected-suffix repair, and compressed KV storage
+is not required. This does not yet establish the cause of the serving difference
+at position 412 or exclude an additional repair problem.
+
+The corrected affine feature probe retained four exact BF16 rows, width 2,560.
+All four differ across widths, with RMS differences of 0.077298–0.163667 and
+maximum absolute differences of 1.0–1.75. Its logits are bit-identical to the
+same four rows of the earlier logits-only probe on both widths. The difference
+thus extends to the exported feature path. Packed vocabulary projection also
+prepares its own features from final hidden rows, so this export alone does not
+identify its internal operands or the first differing decoder operation.
+
+The first feature observer incorrectly read the first row of a request-wide
+aggregate for every result, duplicating odd rows of two-row forwards. Its
+`observer-issue.json` supersedes those feature measurements. The corrected
+observer checks aggregate row count and slices each row at its actual offset;
+the original logits were unaffected.
+
+Local evidence under `inference/evaluation/results/`:
+
+- `20261019T100507Z-stage4-build-2a65d7`: target-only probe build, base
+  `47f852f5`, dirty digest
+  `08bcf307134fb2f0c9bdafd1845390a7eb38afd7737939d48862c280bf24d0fc`.
+- `20261019T100640Z-stage4-logits-f180a4`: 24-row affine diagnostic.
+- `20261019T101057Z-stage4-dense-2b839c`: four-row dense diagnostic.
+- `20261019T101612Z-stage4-features-27eccd`: superseded feature observer.
+- `20261019T101823Z-stage4-build-bb2707`: corrected feature build, base
+  `47f852f5`, dirty digest
+  `059ae8ba8afc817b4511db837b8b884509eea0cda84742fbf3513ded98e5784e`.
+- `20261019T101854Z-stage4-features-49cb0b`: corrected feature diagnostic.
+
+Build results retain complete candidate patches. Successful probes retain exact
+commands, rendered inputs, logits, analyses, driver and launcher; launchers pin
+their own build proof rather than choosing the latest build. These ignored local
+artifacts are not bundled with a clone. The initial launcher syntax failure
+`20261019T100618Z-stage4-logits-bcc69b` happened before any model work.
+
+The main branch, without the candidate's MTP core, compiled and passed provenance
+in `20261019T103223Z-placed-harness-build-ae00bb`: base `6d395edc`, dirty digest
+`1f2b4eb3849930817b54e7cd72e126683b1a77aa04bc4473b3f99e99946f0a92`.
+`20261019T103247Z-stage4-main-features-3ebbf3` then reproduced all four logits
+and exported features byte-for-byte against the corrected candidate probe at
+both widths (`main-vs-candidate.json`). This batching difference therefore also
+exists without the candidate's MTP implementation. It remains necessary to
+localize it and qualify the actual failing serving continuation after correction.
+
+Two earlier main builds compiled successfully but failed provenance because
+registry dependencies' generated files under the repository target directory
+were classified as synchronized sources without workspace compilation records.
+Cleaning release output did not resolve that classification. Moving release
+output into the external evaluation cache, retaining its original path through
+a symlink, allowed the same unmodified audit to verify it. Both failed records
+and controller logs are retained. No provenance or numerical gate was relaxed.
+
+### Stage 4 raw block localization
+
+An isolated diagnostic now captures completed raw block rows at a bounded logical
+position range. It flushes and observes producer completions while retaining the
+ordinary graph, state and stored-table leases. Reading allocates no device
+storage. An optional mixer-boundary export belongs to both checked and prepared
+graph layouts, admission charges and graph-sharing identity. These diagnostic
+changes remain in the candidate, with full patches in their build results.
+
+Build `20261019T104107Z-stage4-build-dc5106` (base `47f852f5`, dirty digest
+`fba25c0a3c72e3c8a35423555ec942aeb2123919697986bbf9a54b73fdc3b6f6`)
+and probe `20261019T104221Z-stage4-blocks-818d25` captured position 395 at
+every block's input and output. The same four scored positions, context 581,
+fixture and two owners were preserved. Both widths' logits match the earlier
+probe exactly. All raw rows were finite.
+
+- Block 0's input and the outputs of blocks 0–2 match byte-for-byte across widths.
+- Block 3 has identical input but differing output: RMS difference
+  **7.140004e-6**, maximum absolute difference **6.954372e-5**.
+- Within each width, block 23's output equals block 24's input exactly. The
+  initial difference precedes this GPU handoff; `handoff-check.json` retains
+  the boundary comparison.
+- By block 47's output, the RMS difference is **0.06008935**, with maximum
+  absolute difference **0.7457142**. This is a diagnostic row, not a model-quality
+  or timing result.
+
+Build `20261019T104639Z-stage4-build-5377c3` (same base, dirty digest
+`67faba0d007a6dfd528ae5e452de9e77237fb5fe3cfe13a24bed8e292b3c38ef`)
+adds the admitted mixer-boundary export for block 3. Probe
+`20261019T104747Z-stage4-middle-66c44f` confirms that this intermediate already
+differs: RMS **6.751721e-7**, maximum absolute difference **3.686594e-5**.
+Its execution trace identifies blocks 0–2 as recurrent and block 3 as attention.
+The first observed difference is therefore inside block 3's attention mixer,
+before its feed-forward, rather than first appearing in vocabulary projection.
+That mixer includes stream mixing, attention projections, history/attention and
+the residual join; the specific operation is not yet identified.
+
+The added export reproduced all 96 earlier raw rows, logits and exported features
+byte-for-byte at both widths (`observer-check.json`). The recorded attention
+configuration is the same for both row regimes and both widths: MATRIX=1,
+PARTS=12, WARPS=4, COLUMNS=1, QREG=1, SLICES=1, STAGES=2. Different selected
+parameters are therefore not supported as the explanation for this probe.
+This does not establish arithmetic parity inside that configuration. Both runs
+are untimed diagnostics with pinned launchers and archived input/output data;
+the MTP serving parity gate remains failed.
+
+### Stage 4 attention arithmetic and canonical history joins
+
+The admitted diagnostics now retain mixer input, Q/K/V, indexer projections and
+attention output using their producers' descriptors. Build
+`20261019T105520Z-stage4-build-ce250f` (base `47f852f5`, dirty digest
+`cfe698619ae771e06146062d70d4bab55588a8ff28c81bd9d67616ab869d3ede`)
+and probe `20261019T105647Z-stage4-attention-0e524d` localize the first change
+at position 395 more precisely:
+
+| Block 3 observation | Across widths 1 and 2 |
+| --- | --- |
+| Mixer input, projected Q including gate, K and V | Byte-identical |
+| Projected indexer query and key | Byte-identical |
+| Attention result, 6,144 BF16 values | 16 differ, by 1–2 representable steps |
+
+Attention-result RMS difference is **2.048715e-6**, maximum absolute difference
+**0.0001220703125**. The added exports preserve every earlier raw observation,
+logits and features exactly (`observer-check.json`). All 30 recorded tuning
+unit keys and their chosen configurations also match across widths
+(`20261019T104747Z-stage4-middle-66c44f/configuration-check.json`). This narrows
+the change to history/preparation/attention rather than Q/K/V projection, but
+does not establish an independent model-quality verdict.
+
+**Query-tile experiment, insufficient alone.** Build
+`20261019T110211Z-stage4-build-18af2b`, dirty digest
+`e5814cf1528add8dae38a587548c63bc638149e6646f22fffe3d8b89c104a1e2`,
+assigned one query token per CUDA matrix tile, keeping tokens parallel and
+prefill unchanged. Probe `20261019T110346Z-stage4-query-tile-f8ecc0` made all
+104 raw observations at position 395 equal across widths; single-row logits,
+features and raw observations were unchanged. The four-position mean KL fell
+from 0.003611 to 0.000522 nats and argmax agreement became 4/4. Later features
+still differed; these are batching diagnostics, not speed or quality gains.
+
+`20261019T110723Z-stage4-trace-9ce653` still failed ordinary serving parity:
+35 proposals, 27 accepted, 8 rejected, and 64 output tokens instead of the
+plain reference's natural stop at 60. Its repeat fixture matched with 31/31
+proposals accepted. Probe `20261019T111106Z-stage4-second-row-b98e90` then
+captured position 396. Its blocks 0–2, block 3 input, Q/K/V and indexer
+projections match, but the attention result differs (RMS **9.091388e-6**,
+maximum **0.00048828125**). Isolating query tiles alone is therefore insufficient.
+The original grouped CUDA kernels were restored before the next experiment.
+
+**Canonical history correction, candidate only.** The target builder appended
+tentative cached rows to accepted ranges without coalescing their common
+boundary. This could give verification `[0,395), [395,396)` where straight
+advancement supplied `[0,396)`. The CUDA attention partitioning works over
+spans, so logically identical histories can acquire different physical work.
+
+The candidate now uses one append/coalesce helper for causal, indexer and Shared
+reads. It preserves logical order, joins only adjacent ranges within one slab,
+and leaves the read rows unchanged. Stored-history launch validation uses the
+same canonical preparation. Shared validation preserves the exact accepted
+prefix and permits its last span to grow only into rows reserved by the advance
+in that same slab. No precision tolerance or acceptance rule changed.
+
+The initial producer-only probe `20261019T111704Z-stage4-coalesce-2a72b7`
+preserved single-row output but correctly stopped at launch validation, whose
+expected prepared history still used the old split form. It is a failed probe,
+not a parity result. Build `20261019T112209Z-stage4-build-cea316` includes the
+coordinated producer/validator correction, with dirty digest
+`9d00a1cc0c2ac4e3216b5404aac8a39384754a22751e297249204ece9f41212d`.
+
+`20261019T112330Z-stage4-coalesce-89b10f` passes the bounded comparison:
+all **208 raw observations** at positions 395 and 396 match across widths;
+all four logits and exported feature rows are byte-identical; **KL is zero**.
+Single-row logits and features remain byte-identical to the saved control
+(`byte-parity.json`). This demonstrates the correction on this canonical prefix,
+with the original grouped kernels; it is not whole-continuation qualification.
+
+The actual MTP diagnostic `20261019T112543Z-stage4-trace-9ee35f` remains failed
+for ordinary parity: 35/27/8 proposed/accepted/rejected, 64 output tokens, while
+the repeated passage matches at 31/31. The first differing round is still at
+position 411 after 16 emitted tokens: input `[8026,11]`, target selections
+`[11,3804]`. The comma is accepted, then bonus token ` went` differs from plain
+` and`; **five rejections** precede this round. The canonical book answer used
+for teacher forcing is not the saved generated continuation. Exact parity on its
+first four scored positions therefore does not isolate the remaining serving
+failure from later batching differences or rejection-dependent state handling.
+
+All cited artifacts are under the local results directory. Successful runs have
+pinned launchers and exact input/output evidence; builds retain complete patches.
+The history correction and MTP implementation remain unpromoted, and timing
+remains held until the actual serving gate passes.
+
+### Stage 4 failed text replay and combined serving gate
+
+The saved plain output was rendered as an explicitly identified diagnostic chat
+fixture in `20261019T113504Z-stage4-greedy-prefix-7ac07e`. Build
+`20261019T113339Z-stage4-build-8b1643` adds an explicit logits-harness model
+context reservation, allowing the serving capacity of 1,024 without changing
+the input. Its dirty digest is
+`559cb4a268429619934feaa2675d4cf6910ef10d55e1ee90e7a33db6c8d83abd`.
+
+The rendered prompt's first 396 tokens match serving, and positions 411–413
+contain `[8026,11,321]`. However, **the single-row replay fails its own saved
+greedy control at position 397**: the rendered answer expects token 34565 and
+the target selects 3896. The run terminated with code 1 and records
+`control-issue.json`. Re-rendered text does not establish the actual sampled
+token path. The source of this mismatch needs sampled-token evidence; this
+probe cannot isolate rejection-dependent repair. Its comparison at position
+412 must not be described as proof of a repair defect or an exact serving-prefix
+execution comparison.
+
+The later generated-prefix observation below confirms that all sixteen rendered
+input IDs at positions 396–411 match native generation. Retokenization is
+therefore not the explanation for this bounded prefix. The old logits walk
+prefilled 395 rows and then decoded its first scored row; native generation
+prefills all 396 prompt rows and selects at the prompt boundary. Its output
+demand also differs. Matching token IDs alone does not establish matching
+numerical state or execution boundaries.
+
+Both candidate corrections were then combined: canonical history joins and
+one query per CUDA matrix tile, with queries still parallel. Build
+`20261019T114027Z-stage4-build-2b0009`, dirty digest
+`24f3085f7159b3706b43425a1daec01e044e3d8a6fc9742644a4ddc3113bde94`,
+completed. The full original serving gate
+`20261019T114235Z-stage4-combined-heldout-a58779` **failed**:
+
+| Fixture | Frozen plain control | Combined MTP candidate | Exact parity |
+| --- | --- | --- | --- |
+| Repeated passage | 64 output tokens, length limit | 64; 31/31 proposals accepted | Pass |
+| Ordinary continuation | 60 output tokens, natural stop | 64, length limit; 35 proposed, 27 accepted, 8 rejected | Fail |
+| Tool call | 53 output tokens, tool stop | 53; 26/26 proposals accepted | Pass |
+
+Both tool outputs passed BFCL validation and called `calculate_triangle_area`
+with exactly `{"base":10,"height":5,"unit":"units"}`. Generated call IDs
+are excluded from parity. The candidate's ordinary text again selects ` went`
+where plain selects ` and`. Its round trace reproduces position 411 inputs
+`[8026,11]`, target selections `[11,3804]`, after five prior rejection rounds
+(`round-analysis.json`). Combining the corrections does not qualify MTP.
+
+The run retains all controls, stop reasons, outputs and checks, plus a launcher
+pinned to its candidate build proof. It is instrumented qualification with no
+thermal timing gate and supports no speed claim. Both corrections and the MTP
+implementation remain candidate-only.
+
+### Stage 4 generated-prefix control isolates attention configuration
+
+The harness now has an opt-in `target-compare` command. It renders one chat
+fixture, generates a prefix through actual greedy selections, then compares two
+sequential rows with one paired target forward on a freshly regenerated prefix.
+It requires the complete sampled prefixes to match before comparing selections.
+Both walks use the same context capacity, selection-only output demand and
+admitted decode capacity. The paired continuation comes from the first walk's
+sampled token; no persisted token list is supplied as model input. This is a
+bounded batching diagnostic, not independent model-quality evaluation.
+
+With both experimental corrections still applied, build
+`20261019T115715Z-stage4-build-552f7b` (dirty digest
+`4d2c02ffad4d6a4d5855f911a69772ae73d4c9cb7be646cb941b4ad6ac587eb7`)
+and run `20261019T115825Z-stage4-generated-prefix-291e13` reproduced the
+sixteen serving-prefix tokens, and sequential/paired selections matched.
+However, **both selected `went`**, so this did not preserve the frozen plain
+serving control. Run `20261019T120113Z-stage4-current-plain-control-a5d910`
+then confirmed that the same candidate server diverged with drafting completely
+disabled: the repeated passage matched, but ordinary continuation reached its
+64-token limit instead of the frozen control's natural stop at 60.
+
+The query-tile experiment changed the kernel implementation identity and its
+stored tuning choices. The candidate's single-row attention used the canonical
+fallback where the frozen control used a qualified configuration. A successful
+bounded batching comparison under that changed plain path does not establish a
+serving fix. **The query-tile patch has been removed**, including its design
+requirement. Canonical history joins remain in the candidate.
+
+Build `20261019T120404Z-stage4-build-2c75d0`, dirty digest
+`4fe9e83d36eaebdac666b79500ce409c04db323ef1beb49712b26ca6fb142165`,
+restores the original CUDA kernels. Run
+`20261019T120525Z-stage4-original-generated-prefix-8902cd` now establishes
+the relevant failure without MTP or rejected suffixes:
+
+| At the generated serving prefix | Sequential target | Paired target |
+| --- | --- | --- |
+| Position 411, input 8026 | Selects comma, token 11 | Selects comma, token 11 |
+| Position 412, input 11 | Selects ` and`, token 321 | Selects ` went`, token 3804 |
+
+Both fresh walks generated the same sixteen tokens at positions 396–411,
+matching the actual earlier serving trace. Context capacity is 1,024 and the
+native serving prompt is exactly 396 tokens. The run correctly terminated
+with a failed parity result. This shows that the differing selection does not
+require rejected-prefix repair; it does not rule out other lifecycle defects.
+
+The earlier observation that both loads had the same 30 tuning records was
+insufficient: it compared available units, while the two row widths invoke
+**different units within that same set**. Their actual affine decode choices are:
+
+| Parameter | Single-row unit `M=1..2` | Multi-row unit `M=2..9` |
+| --- | ---: | ---: |
+| MATRIX | 1 | 1 |
+| PARTS | 48 | 12 |
+| WARPS | 1 | 4 |
+| COLUMNS | 4 | 1 |
+| QREG / SLICES / STAGES | 1 / 1 / 2 | 1 / 1 / 2 |
+
+To isolate this difference, build
+`20261019T120658Z-stage4-pinned-build-cee893` enables the existing harness-only
+`pinned-tuning` feature. Run `20261019T120820Z-stage4-pinned-prefix-7a48cb`
+replays all 30 observed units and changes **only the multi-row affine attention
+unit** to the single-row parameters. All 59 replay events name recorded choices;
+no unit falls back to an unrecorded default. The generated prefix and sequential
+selections remain unchanged. **Both paired selections now match**, including
+token 321 at position 412. `pin-change.json`, `replay-events.json` and
+`qualification.json` retain the complete control and change.
+
+This isolates an attention-configuration cause at the failing generated round.
+The development replay does not run normal tuning qualification and cannot
+serve as a production fix or a speed claim. The production change must preserve
+the target's arithmetic across these row widths, with ordinary resource and
+numerical admission, then pass actual serving and lifecycle gates before timing.
+
+The reusable harness command, explicit logits context capacity, and the missing
+optional precision-probe constructor fields are now retained on the working
+branch. Release build
+`20261019T121135Z-generated-prefix-harness-build-8b4e53` compiled the harness
+with `precision-probe` enabled and passed the unchanged provenance audit (base
+`044de819`, dirty digest
+`50d8446b9f101168d4913bb3b24cbf30faa8246e7bbdb2d7c4ceab780f77828e`).
+The MTP implementation and history correction remain candidate-only. All run
+artifacts above are local under `inference/evaluation/results/`; model jobs were
+untimed diagnostics under the machine lock. No speed improvement is claimed.
+
+### Stage 4 shared decode unit passes strict serving qualification
+
+The candidate now prepares one CUDA affine decode tuning unit for query groups
+of 9–16 heads per K/V head and widths at most 256. Both single-row decoding and
+verification bind that choice. The unit's normal numerical contract includes
+all served row and history shapes; other backends keep their row bands. Its
+initial search hint comes from head geometry, and all declared configurations,
+native-default numerical admission and the fixed tuning budget remain intact.
+The original CUDA kernel sources are unchanged. This uses the normal tuner,
+without a development pin or an independent startup qualification allowance.
+
+Build `20261019T122031Z-stage4-build-87d1df` completed (base `47f852f5`,
+dirty digest `da537eff49fa7ed66bd13fb41191db2a728fbc3c143534ecb9816771c02d37b5`).
+The new `M=1..9` unit measured 84 configurations and passed its numerical
+coverage, including untimed witnesses. Its 30 points cover row classes 1, 2, 4
+and 8, single and multiple sequences, and histories 0, 256 and 1,024. The
+target-only diagnostic's performance demand was single-row; zero-demand
+verification points still supplied required numerical coverage. The chosen
+parameters are MATRIX=1, PARTS=48, WARPS=2, COLUMNS=4, QREG=0, SLICES=1,
+STAGES=2. This is a newly qualified shared choice, not reuse of the old
+single-row qualification as evidence for wider rows.
+
+`20261019T122157Z-stage4-shared-prefix-f881f0` passes without a pin. Its sampled
+prefix and sequential selections remain identical to the saved original-kernel
+control. Both sequential and paired execution select comma at 411 and token
+321 (` and`) at 412. The run also requires the shared unit's qualified status
+and passing coverage; a matching point under an unqualified fallback cannot pass.
+
+The full serving comparison
+`20261019T122452Z-stage4-shared-strict-heldout-c073bf` passes exact text/tool
+parity **and** prompt/output/total token counts and stop reasons:
+
+| Fixture | Output tokens and stop | MTP proposed / accepted / rejected |
+| --- | --- | --- |
+| Repeated passage | 64, length limit | 31 / 31 / 0 |
+| Ordinary continuation | 60, natural stop | 34 / 24 / 10 |
+| Tool call | 53, tool call | 26 / 26 / 0 |
+
+Both tool outputs passed BFCL validation with exactly
+`calculate_triangle_area({"base":10,"height":5,"unit":"units"})`.
+Ordinary continuation now matches the frozen Stage 2b plain control despite ten
+rejected proposals. This qualifies these requests, not arbitrary prompts or
+independent distributional quality. The run is instrumented and untimed.
+
+The declared comparison uses untraced A/B/B/A rounds in one thermal-gated lease,
+with repeated passage and ordinary continuation, two warmups per fixture per
+launch and two measured passes per side and fixture. Ordinary generation time
+per output token is primary; require at least 3% and a difference beyond both
+observed spreads. Prefill, complete model time, acceptance and memory costs
+remain separate results. Results and the resulting disposition follow.
+
+### Stage 4 lifecycle and controlled performance decision
+
+`20261019T123227Z-stage4-shared-lifecycle-8d6b29` passes on the same candidate:
+cold, retention, reuse and recovery outputs are identical 64-token expected
+prefixes, with 31/31 proposals accepted each. Usage and stop reasons are checked.
+Reuse and recovery each reuse 757 prompt tokens. The client closes cancellation
+after four content events, before terminal delivery; recovery remains exact and
+the health check passes. This covers retained-prefix recovery on the full-accept
+fixture. Rejected rows are exercised by ordinary continuation in the separate
+strict serving gate; these runs do not establish retained-prefix behavior for
+every rejection history.
+
+`20261019T123708Z-stage4-comparison-626259` completes the declared thermal-gated,
+untraced A/B/B/A comparison. **All 24 responses match the qualification controls**
+in text, usage and stop reason. Both conditions use decode-reuse seeding and
+replacement, no retained prefixes, managed host cache off and context 1,024.
+The OS file cache is not dropped. Loading and warmups are excluded from the
+following model times, which include the candidate's head, verification and
+repair work. These compare the complete Stage 4 variant with the frozen Stage
+2b plain build, not just a method flag on one binary.
+
+| Fixture / condition | Mean prefill | Mean generation | Generation ms/output token | Mean total model time |
+| --- | ---: | ---: | ---: | ---: |
+| Repeat, plain | 3.700 s | 3.367 s | 52.610 | 7.067 s |
+| Repeat, MTP | 4.419 s | 2.629 s | 41.083 | 7.048 s |
+| Ordinary, plain | 3.084 s | 2.260 s | 37.663 | 5.344 s |
+| Ordinary, MTP | 3.746 s | 2.193 s | 36.555 | 5.939 s |
+
+Repeated-passage generation improves **21.911%**, exceeding both observed
+generation spreads (129.721 ms plain, 63.277 ms MTP). Its 718.769 ms prefill
+increase absorbs almost all the 737.741 ms generation saving: total model time
+changes by only **−0.268%**, within the observed total-time spreads.
+
+Ordinary generation improves **2.940%**, a 66.438 ms difference exceeding the
+observed spreads (34.057 ms plain, 2.134 ms MTP), but **below the declared 3% bar**.
+It must not be rounded up to a pass. Prefill increases 661.188 ms (**21.437%**),
+and total model time regresses **11.129%**, or 594.750 ms. Its accepted/proposed
+ratio is 24/34, versus 31/31 on the repeated passage. Two measured passes per
+side and fixture support this scoped decision, not a broad workload claim.
+
+Measured ordinary-generation delivery windows show **zero process-attributed
+physical read bytes on both sides**. Logical reads average 3.878 GB plain and
+4.685 GB MTP: roughly **20.8% more logical traffic** for the candidate. Those
+windows include lookahead and are not exact device-step boundaries. They give
+no evidence that additional host RAM would remove this warm-generation cost.
+They do not separately attribute RAM copies, uploads, conversion or head compute.
+
+The sampled allocation census also warrants later placement investigation.
+Plain uses 200/203 cache records per layer on owners 0/1; MTP uses 135/175.
+MTP carries 2,668,104,704 auxiliary bytes on GPU 0. Its minimum sampled device
+headroom is about 3.62/3.83 GiB, versus 2.63/2.14 GiB plain. Headroom is not an
+authorization to allocate all remaining bytes: startup/import peaks, graph and
+state reserves still apply. The range cache budget is inherited from full-model
+assessment, so Stage 7 should examine exact per-owner peaks before changing it.
+No safe additional cache capacity or speedup has been established here.
+
+Source inspection rules out one proposed shortcut: causal-only MTP priming
+already stops after K/V publication and binds no post-attention/FFN/readout
+weights (`native_head`'s zero-step graph). The added prefill time cannot simply
+be blamed on an unnecessary full-head FFN pass. Further attribution is required.
+
+**Decision:** preserve the qualified implementation as an experimental capability
+on [the MTP experiment branch](https://github.com/thebadking/magnitude/tree/two-gpu-mtp-experimental).
+Do not promote this fixed-budget configuration as a general serving optimization;
+keep the accepted plain profile as the control for Stage 5. Repeated generation
+has a real scoped benefit, while ordinary short-request total time regresses.
+Longer-output amortization is a possible future experiment, not a measured gain.
+Maximum context, smaller-model single-GPU regression and cumulative comparison
+remain Stage 8 obligations before broader configuration claims.
+
+The measured source identity remains `47f852f5` plus the full `da537eff…` digest
+above; publication does not relabel the experiment as a measurement of a later
+commit. Complete patches, input/output controls, thermal gate, per-pass timing,
+I/O windows and memory census are retained under the comparison directory.
+An earlier launch, `20261019T123507Z-stage4-comparison-cc4bb0`, stopped during
+setup because the driver lacked an import; it performed no model measurements.
+That failed setup and its exact script are retained separately.
+
+### Stage 5 packed conversion experiments and controlled decision
+
+The actual Qwen SM86 bank formats include q4k/q5k gate/up planes and q5g32/q8g32s
+down planes in `mma16` layouts. Gate/up projections are already paired, repeated
+rows already share expert work, bank fill already converts gate/up/down in one
+kernel, and staging-to-shared copies already use aligned volatile vector loads
+with fallbacks. These are existing capabilities, not new optimization claims.
+
+The first candidate increased CUDA bank-fill threads from 32 to 128, using the
+existing loop over independent conversion tiles. Build `20261019T131221Z-stage5-build-b663af`
+passed build/provenance. Serving gate `20261019T131615Z-stage5-strict-d25818`
+passed repeat and tool semantics, but ordinary continuation changed from 60
+outputs with `stop` to 64 with `length`, so it was not timed.
+
+This gate also exposed a confound: native tuning identity hashes all checked
+source text. Changing the launch declaration invalidated records for unrelated
+entries. Under the same 30-second budget the candidate retained canonical
+attention settings: decode PARTS=12/WARPS=4/COLUMNS=1, compared with the control's
+qualified PARTS=48/WARPS=1/COLUMNS=4; both prefill units also changed COLUMNS=2
+to 1. `configuration-confound.json` records these three differences. The failed
+gate does **not** isolate a conversion defect. The launch declaration was
+restored without widening the budget, copying evidence to another identity,
+pinning attention, or weakening the gate. The four-warp experiment is deferred.
+
+The second candidate changes only CUDA's shared conversion helper. For split
+code planes it extracts each source code once, assembles low and high words,
+then publishes both. The previous source performed separate low/high traversals
+with a destination store between them. This halves explicit source-code
+extractions for five/six-bit fragments; it does not establish a halving of
+executed instructions or kernel time. Integer packing algebra, coefficient
+bytes, layout size, staging protocol, launch geometry and persistent allocations
+are preserved. Four-bit fragments still extract the same codes. No tuning
+declaration or floating-point recipe changes.
+
+Measured source: **`356ab093` + dirty digest
+`f906f66cfc5aecbc740d7c922943296afb10dbda79439dd8e69cd1ffa0c83e34`**.
+Build/provenance: `20261019T132409Z-stage5-build-c23e98`. Compared with the frozen
+Stage 2b control, the only production-source difference is this conversion helper;
+seven additional differences are evaluation-harness improvements already on main.
+The build retains the complete patch and reproduction script.
+
+Strict serving gate **`20261019T132526Z-stage5-strict-3a0610`** passes repeated
+prose (758 + 64), ordinary continuation (396 + 60, natural stop) and the BFCL
+triangle-area tool call (366 + 53). Text, tool arguments, usage and stop reasons
+match the control exactly. All **28 distinct selected kernel/binding configuration
+sets match** in `selected-configurations.json`, including the qualified attention
+choices. Both use plain decoding, decode-reuse seeding/replacement, lookahead,
+group 8, context 1,024 and no managed host cache.
+
+Lifecycle **`20261019T132942Z-stage5-lifecycle-6aed11`** also passes cold/retain/hit
+and recovery equality, with 757 prompt tokens reused on hit and recovery. Closing
+the response after four content events precedes the terminal response; the next
+request and health check pass. These are qualification observations, not speed
+measurements.
+
+**`20261019T133130Z-stage5-comparison-2f88c4`** completes the thermal-gated,
+untraced A/B/B/A comparison under one lease. Each launch has two warmups per
+fixture and one measured request per fixture, producing two measured passes per
+side and fixture. **All 24 responses match the strict controls**. Retained-prefix
+reuse and managed host caching are disabled; OS cache is not dropped. Loading
+and warmups are excluded.
+
+| Fixture / condition | Mean prefill | Mean generation | Mean total model time |
+| --- | ---: | ---: | ---: |
+| Repeat, plain control | 3.625759 s | 3.341379 s | 6.967138 s |
+| Repeat, shared extraction | 3.630232 s | 3.190518 s | 6.820750 s |
+| Ordinary, plain control | 3.085767 s | 2.277215 s | 5.362982 s |
+| Ordinary, shared extraction | 3.067480 s | 2.212310 s | 5.279790 s |
+
+Repeat generation improves **4.515%** (150.861 ms), exceeding the observed
+54.173/10.257 ms control/candidate spreads. Total model time improves **2.101%**.
+Ordinary generation improves **2.850%** (64.905 ms), exceeding its 4.083/0.177 ms
+spreads, and total time improves **1.551%**. The ordinary primary metric remains
+**below the declared 3% bar**; do not round it up to pass or describe it as within
+the observed noise. This is a scoped repeat-generation benefit, not promotion
+of a general profile. Neither prefill difference establishes a separate win.
+
+Logical generation-delivery reads stay near 7.23 GB for repeat and 3.95 GB for
+ordinary on both sides. The first control windows have 50.381/6.652 MB physical
+reads for repeat/ordinary; the first candidate repeat has 1.835 MB and all other
+measured windows have zero. This small physical-read imbalance limits assigning
+the complete mean difference to packing alone. The final control and second
+candidate have zero physical reads for both fixtures and still show lower
+candidate generation times. The windows include lookahead and are not exact
+device-step boundaries; they do not isolate conversion time or other remaining
+costs. Most warm source bytes were already served from RAM.
+
+The cache capacities remain 200/203 records per layer. Sampled maximum device
+charges are identical on both sides (21.458/21.578 GB), and sampled RSS stays
+approximately 7.35–7.37 GB, excluding additional filesystem cache. No new memory
+capacity is demonstrated. Raw observations, source identities, configuration
+inventory, I/O, memory/census, thermal trace, launcher and summarizer are retained
+in the comparison directory.
+
+Keep the candidate on the experimental source branch
+[`two-gpu-packed-conversion-experimental`](https://github.com/thebadking/magnitude/tree/two-gpu-packed-conversion-experimental).
+Published commit: [`7ea8cc6d`](https://github.com/thebadking/magnitude/commit/7ea8cc6df55ba8be00de9938dd79516e0c986148).
+This source has not been combined or benchmarked with experimental MTP. Preserve
+the frozen candidate's measured identity; publication of byte-identical inference
+sources is not a new build or measurement. `published-source-equivalence.json`
+verifies all 2,916 inference source files against the measured candidate. The
+accepted plain profile remains Stage 2b, and the four-warp declaration is absent
+from the retained candidate.
+
+### Stage 6 source service and blocking uploads
+
+New opt-in counters separate the host's blocking device-upload calls from
+source-worker service, ticket queue-to-completion spans and watcher polling
+sleep. They use the existing `MAGNITUDE_TRACE_EXPERT_STREAMING` switch. A shared
+bulk ticket is counted once, at its first completed consumer; a prefetch may
+have started before that consumer's step. Already-staged synthetic tickets
+report no new source service. Uploads distinguish scratch and bank paths and
+retain the existing synchronous transfer/publication protocol. These diagnostics
+do not change kernels, expert placement, cache policies or tuning declarations.
+
+Measured source is **`6572bbd2` + dirty digest
+`e84abda805fff2ce1fe9ccf4ca1967e944be1bcac3f9e5758eb021a2759674e0`**.
+Build/provenance **`20261019T135156Z-stage6-build-63ee63`** passes. The stale debug
+target was cleaned during this locked build; recorded release controls and the
+main release symlink were preserved.
+
+Diagnostic **`20261019T135740Z-stage6-source-service-5f527a`** uses a thermal gate
+and one lease, plain decoding, lookahead, group 8, context 1,024, decode-reuse
+seeding/replacement and no managed host cache. It follows the same interleaved
+repeat/ordinary order as Stage 5, with two warmups per fixture before one
+diagnostic request each. All **six responses match the frozen control** in
+text, usage and stop reason, with identical rendered tokens and selected
+kernel configurations. This is an instrumented diagnostic, not a speed comparison.
+
+The summarizer counts only complete streaming/bank/scratch record groups between
+first-content delivery and terminal delivery. Both owners are represented;
+no partial groups were excluded. These are delivery windows, not exact device-step
+boundaries, and they can include lookahead.
+
+| Fixture | Completed owner steps | Expert installs | Upload bytes | Blocking upload host time | Mean upload host time / expert | Watcher service | Polling sleep |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Repeat | 126 | 2,298 | 7.174 GB | 780.780 ms | 339.765 µs | 1,501.712 ms | 603.181 ms |
+| Ordinary | 118 | 1,186 | 3.706 GB | 387.965 ms | 327.121 µs | 764.775 ms | 309.591 ms |
+
+Every installed expert has three uploads. Average source size is approximately
+3.122/3.125 MB for repeat/ordinary. Blocking upload host time accounts for
+**51.993%/50.729% of observed bank watcher service**, respectively. Polling sleep
+and the remaining 117.751/67.219 ms cover other watcher work; they are not a
+GPU-execution breakdown. A CPU path would compete with upload, conversion and
+GPU expert work while also paying for CPU representation, computation and
+activation/result transport. The upload average alone is not a complete crossover.
+
+Source-worker service sums are 2,692.590/1,214.830 ms, with ticket-span sums
+1,180.263/515.732 ms. Parallel range reads and prefetched/adopted tickets overlap,
+so these sums cannot be added to watcher time or divided by generation time
+to assign latency percentages. Repeat records 2,298 source tickets / 6,894 ranges;
+ordinary records 1,179 / 3,537. Ordinary's seven revived experts need uploads
+without new file service, explaining its smaller source-ticket count.
+
+Logical generation-delivery reads are 7.227/3.952 GB, while process-attributed
+physical reads are only 26.255/4.014 MB. This separates buffered RAM/file service
+and upload work from physical disk bytes. The run also has cold/loading work,
+which must not be conflated with these warm delivery windows.
+
+Miss-bearing bank requests average **1.588/1.414 installed experts** for
+repeat/ordinary. A CPU study should start with small missed subsets rather than
+assume all ten selected experts miss. These averages do not provide the full
+per-layer miss-count or latency distribution. The CPU has existing rows8
+packed paths and GGUF import code; compare compatible representations and
+include import cost instead of silently treating CUDA's `mma16` records as
+CPU-ready. Rotate enough real expert weights to distinguish cache-resident CPU
+results from a working set exceeding the CPU's last-level cache.
+
+An **idle** PCIe query after qualification reports x8 negotiated width for both
+cards, x16 device maxima, current generation 1 and maximum generation 4.
+`pcie-idle.json` retains that query. This is not an active-load link-generation
+measurement; collect that during the matched operator study before attributing
+bandwidth to the idle reading.
+
+Trace-disabled lifecycle **`20261019T140411Z-stage6-lifecycle-7f6abd`** also passes:
+cold/retain/hit/recovery responses all match with 64 outputs and `length`, hit
+and recovery reuse 757 prompt tokens, cancellation closes after four content
+events before terminal delivery, and recovery/health pass. The log confirms
+the new trace is disabled. No unit or integration tests were added or run.
+
+Retain the opt-in diagnostics and their existing design contract. The accepted
+performance control remains frozen Stage 2b. There is **no CPU execution path,
+compute crossover, full GPU breakdown or speedup claim from this run**.
+Artifacts include complete patches, source identities, native renders, raw
+observations, log/IO window offsets, thermal records, selected configurations,
+`source-service-analysis.json`, and the launcher/driver/summarizer.
+
+### Stage 6 canonical CPU/GPU expert crossover
+
+The harness now has an `expert-crossover` diagnostic and an untimed
+`--qualify-only` mode. It checks fixture/render/artifact identity before using
+retained native feature rows. Fresh capture
+**`20261019T144558Z-stage6-feature-capture-a916e2`** exports four finite BF16
+readout vectors at positions 395–398, width 2,560, from the canonical
+zero-history continuation conversation. Its native rendered digest is
+`cceb7907050d430f7aa56b3bca4808362d4aa871a900fa38e1e1a14ea62ef870`.
+These are readout vectors used as projection operands, **not captured routed
+activations**. This is an operator study, not a model-quality qualification.
+
+Final measured source is **`513376a8` + dirty digest
+`3ccacadbc6affa1690dc38ea90eb7238f24aedff4db6d9025d94ec14c813117e`**;
+build/provenance **`20261019T150219Z-stage6-crossover-build-7d6fd6`** passes.
+The native CPU defaults use rows8, `INT8=0`, AVX2 and the ordinary physical-core
+worker pool; zero worker parameters mean the pool's participants, not serial
+execution. CUDA uses canonical TPW=1 / KSPLIT=1. Neither backend is tuned in
+this study, and no alternatives are ruled out.
+
+The study rotates the first 32 real experts of block 1: Q4_K gate/up and Q5_1
+down, hidden width 2,560 and intermediate width 640. Raw records total
+**98,304,000 bytes**; each backend's packed set totals **98,959,360 bytes**.
+Both exceed this host's combined 64 MiB L3. CPU uses rows8 records and CUDA
+uses mma16 records. Each invocation selects one expert. Gate/up publishes BF16;
+down preserves the BF16 per-expert publication before returning its F32
+contribution with a unit coefficient. No router-selection or serving claim is
+made from these control coefficients.
+
+Both backends' native imports match their registered host packing reference.
+Across all 32 groups, CPU resident/import and GPU resident/miss paths produce
+byte-identical products and contributions, with finite outputs. Untimed
+qualification **`20261019T150147Z-stage6-crossover-qualification-4107ed`** passes;
+the final timed source repeats these checks before measuring. Cross-backend
+products are exact in 20/32 groups and contributions in 10/32. Maximum absolute
+differences are 0.001953125 / 0.015625, with maximum relative RMS
+0.000015803 / 0.000216196. These are retained diagnostics, not numerical
+admission thresholds or a greedy-parity result.
+
+Comparison **`20261019T150238Z-stage6-crossover-bd17b2`** passes the thermal gate
+under one exclusive lease. Three GPU/CPU/CPU/GPU comparisons cover resident
+operators, CPU resident versus GPU miss, and CPU import versus GPU miss. Each
+pass warms and rotates the full set. All **384 samples** have complete native
+submission traces, with exactly the expected imports/converter and expert
+launches. Each sample completes one graph submission. Conditioning, trace
+collection, setup and correctness checks are outside its pipeline interval.
+
+| Comparison | Path | Mean completed pipeline, µs | Range of two pass means, µs |
+| --- | --- | ---: | ---: |
+| Resident operators | GPU resident | 40.760 | 39.448–42.073 |
+| Resident operators | CPU resident, including transport | 184.372 | 183.795–184.948 |
+| CPU-ready crossover | GPU miss | 810.903 | 796.390–825.415 |
+| CPU-ready crossover | CPU resident, including transport | 181.967 | 181.776–182.158 |
+| Import crossover | GPU miss | 799.117 | 796.539–801.695 |
+| Import crossover | CPU import, execution and transport | 781.042 | 762.580–799.504 |
+
+The CPU-ready path is approximately **4.46× faster than a GPU miss** for this
+isolated one-expert work, beyond both sides' observed spread. CPU import has
+overlapping pass means with GPU miss; its nominal 2.26% reduction is **not a
+reliable win**. GPU-resident work remains substantially faster than CPU work.
+
+In the CPU-ready comparison, GPU uploads average **245.564 µs** for 3.072 MB
+over three synchronous pinned-source copies. Its graph averages **555.711 µs
+of device interval**, including bank conversion and both expert projections.
+CPU's graph averages **155.444 µs of device interval**, with approximately
+8.678 µs activation transport and 8.342 µs result transport. CPU return includes
+canonical host readback/staging and H2D. These are traced operator intervals;
+they do not attribute total generation latency or isolate individual GPU
+launch times. File service starts outside the interval with raw records in RAM.
+
+Read-only PCIe sampling during the operator job observes **16.0 GT/s, x8** on
+GPU 0, resolving the earlier idle Gen1 ambiguity. Both cards also report that
+link state during the job, but only GPU 0 runs measured expert work. CPU/GPU
+contention from a live model, other quantizations/layers, two simultaneous
+misses, actual routed activations and serving integration remain unmeasured.
+Per-device allocations are capped at 1 GiB; sampled peak process footprint is
+917,204,992 bytes. This does not establish headroom during full-model serving.
+
+Setup failures remain explicit: two oversized fixture attempts
+(`142725Z…f13ddd`, `143243Z…8e2313`), a driver syntax failure (`145422Z…85899c`),
+incorrect CPU transfer/host-window use (`145548Z…ea920f`, `145846Z…67c720`), and
+output-lease reuse (`150008Z…e2eca0`). All use the `20261019T` prefix in local
+results. The final harness uses supported CPU copies and recycles family output
+leases only after exported handles are released. No timing from a failed run
+is admitted. No unit or integration tests were added or run.
+
+Retain the diagnostic harness and the frozen measured source. Artifacts retain
+the exact patches, feature producer/bytes/digests, tensor names/record hashes,
+canonical configurations, per-group differences, all sample intervals, PCIe
+observations, thermal evidence and `analysis.json` / `summarize.py`. There is
+still **no serving CPU dispatcher, CPU payload cache or generation speedup**.
+
+### Stage 6 request identities and retention policy
+
+The optional **`MAGNITUDE_TRACE_EXPERT_REQUESTS`** trace records each physical
+owner's source inventory, local-layer to global-scope mapping, record geometry,
+route choices, initial GPU hit flags, resolved conversions and GPU victims.
+Owner-local ordinals detect missing records. Completion records distinguish
+fenced success from dropped work. Rows8 footprints come from the registered
+physical representations; they do not establish CPU execution support or
+numerical admission. Ordinary serving leaves this trace disabled.
+
+Source is **`2f7fbcc1` + dirty digest
+`6186426f628d78e9382637d3fe7ffb6047e19d12af29dc1110190298f413eb61`**;
+build/provenance **`20261019T152721Z-stage6-request-build-553dbd`** passes.
+The runtime's checked kernels, placement and cache policies are unchanged.
+
+Capture **`20261019T152836Z-stage6-request-trace-26f7b0`** runs the accepted plain
+profile with group 8, context 1,024, lookahead, decode-reuse seeding/replacement,
+no MTP, no managed raw cache and no retained prompt prefixes. It uses the prior
+two fixed warmups per repeat/ordinary fixture, then one diagnostic request each.
+All **six responses match the frozen control**, including usage and stop reason;
+all selected kernel configurations are identical. This untimed identity study
+does not use its recorded HTTP latencies as performance evidence.
+
+There are **7,526 miss-bearing bank frames**, covering both active owners and
+all 48 disjoint global routed layers. Each owner's ordinals are contiguous.
+Of these, **7,501 have successful completion fences**. The remaining 25 frames
+are final lookahead suffixes (5/20 by owner); neither owner has a later fenced
+frame. Completed-frame scores exclude that suffix. All-hit and scratch frames
+are absent, so this is not a full route trace.
+
+`retention-reproduce.py` models a **4 GiB native-payload ceiling** with
+proportional layer shares. Exact rows8 footprints allow 28 records per layer;
+rounding leaves **4,242,309,120 bytes (3.951 GiB)** of usable native capacity.
+This replay allocates no expert payloads. Metadata, packing transients, live
+leases, file-cache displacement, physical source I/O and actual host admission
+are outside its capacity model.
+
+Both policies use per-layer LRU and consider only frames with one activation
+row and exactly one distinct GPU conversion. The demand policy retains that
+missed expert; the victim policy retains its GPU victims instead. Lookup precedes
+insertion, so a frame cannot hit on its own fill. The model starts empty at
+engine startup and retains its state through the complete captured history.
+
+| Policy | Repeat: ready hits / eligible completed frames | Ordinary: ready hits / eligible completed frames |
+| --- | ---: | ---: |
+| Eligible demand | 269 / 916 = **29.367%** | 121 / 599 = **20.200%** |
+| Eligible GPU victims | 92 / 916 = **10.044%** | 116 / 599 = **19.366%** |
+
+These delivery windows contain 1,462 / 839 completed miss-bearing frames.
+Membership follows the request-record offset between first-content and terminal
+delivery snapshots, not exact device boundaries. Across all completed eligible
+frames, demand retention hits **657/4,554 (14.427%)**, versus **471/4,554
+(10.343%)** for victims. Peak modeled native holdings are 4,211,281,920 /
+4,202,106,880 bytes, below the requested payload ceiling.
+
+Demand retention models **3,905 fills** against those 657 completed hits;
+victim retention models 4,182 fills. Demand fills prepare 12.164 GB of raw
+records and 12.250 GB of native records over the whole trace. These are byte
+volumes, not additional disk reads or measured CPU packing time. Packing on the
+critical path could erase the CPU-ready advantage; this result does not justify
+synchronous packing of every miss.
+
+Prefer eligible demand retention for the first physical cache prototype. This
+choice applies to these two policies, this capacity and this fixed GPU
+trajectory. A CPU dispatcher would avoid some GPU installations and change
+future victims and misses. The replay cannot establish its eventual hit rate,
+contention, generation gain, or the benefit of another capacity/policy.
+
+Trace-disabled lifecycle **`20261019T153420Z-stage6-request-lifecycle-fe37ac`**
+passes: four complete 64-output responses match, hit/recovery reuse 757 prompt
+tokens, cancellation closes after four content events, and recovery/health pass.
+The adapter explicitly removes both trace switches and verifies no request or
+service trace appears. No unit or integration tests were added or run.
+
+Retain the opt-in diagnostic. Evidence includes the inventory and raw JSON
+events, ordinal/completion checks, exact-response/configuration checks, both
+per-event retention replays, `retention-analysis.json`, and the reproduction
+script. No native CPU cache has yet been allocated by serving and no CPU
+dispatcher is enabled.
+
+### Stage 6 physical CPU-ready cache
+
+The experimental branch **`two-gpu-native-cpu-cache-experimental`** now contains
+the physical cache component and the harness's
+`expert-crossover --qualify-only --misses 1 --cpu-cache-prototype` path.
+Serving does not construct this cache or dispatch CPU experts.
+Published as **`29c77cf2b7f3c0df320eb6c0b1fbfdaf6b8e2700`**; all 2,919
+inference source files and the native dependency pointer match the qualified
+build. Publication does not change the measured source identity below.
+
+The cache shares one native-payload limit and host surplus-claim authority among
+its clients. A source inventory fixes identity, representations, geometry and
+proportional layer quotas before use. Existing leases pin their records;
+surviving tensor aliases keep their allocation charges after an entry is removed.
+Read leases also retain the cache owner. Each fill reserves before allocating,
+then reconciles backing before another fresh host claim so allocated bytes are
+not also charged as an unbacked reservation. Packing runs outside the cache
+mutex. Only complete triples become visible, and clearing the cache withdraws
+any pending publication. A capacity refusal does not invoke the builder.
+
+Measured source is **`e2d68773` + dirty digest
+`cf63e7ff60a260448e26385bf8792cecf9a42e4be8da55d407eaa2f1270b024f`**;
+build/provenance **`20261019T160306Z-stage6-native-cache-build-d8953f`** passes.
+Qualification **`20261019T160525Z-stage6-native-cache-qualification-10411b`**
+uses the previously retained native fixture vectors and real block 1 gate/up/down
+records. All 32 experts' cached bytes equal the native CPU import. CPU products
+and F32 contributions are byte-identical to the existing CPU operator control.
+The original CPU/GPU resident/import path checks also pass.
+
+One complete native triple occupies **3,092,480 bytes**. The rotation cache has
+a **6,184,960-byte** payload ceiling, retains exactly two records after rotating
+all 32 experts, and has no pending reservation at the checkpoint. Two independent
+host clients acquire those records; a third fill is refused while their leases
+remain live, without running its builder. These are shared-client checks on one
+source inventory, not a dual-GPU serving qualification.
+
+The one-record lifecycle records the following actual storage accounting:
+
+| Checkpoint | Live native bytes | Retained records | Retired records |
+| --- | ---: | ---: | ---: |
+| Cache cleared while its read lease remains | 3,092,480 | 0 | 1 |
+| Lease dropped, gate tensor alias retained | 931,840 | 0 | 1 |
+| Final alias released | 0 | 0 | 0 |
+| Recovered complete fill | 3,092,480 | 1 | 0 |
+
+An interrupted triple remains unpublished and releases its reservation. A fill
+that clears the cache before returning also remains unpublished; the following
+fill recovers. Duplicate in-progress requests do not invoke another builder.
+Foreign cache keys, source-identity rebinding and late inventory growth are
+refused. Dropping the caller's cache owner while a read lease remains retains
+the owner, and dropping that final lease introduces no ownership cycle.
+
+Reported cache-owned controls are 3,417 bytes for the two-record checkpoint and
+3,305 bytes for the one-record checkpoints. They exclude Seismic's own
+tensor/program metadata and caller-owned staging. The process peak is
+948,617,216 bytes including the independent controls and diagnostic backend
+storage. No 4 GiB cache is allocated in this run, and this does not establish
+full-model host admission or file-cache effects.
+
+This qualification is untimed and makes no cache-latency, CPU dispatch,
+model-quality or serving-speed claim. It covers Q4_K gate/up and Q5_1 down on
+the existing AVX2 CPU, with readout features used as operator operands rather
+than actual routed activations. Multi-layer inventories, other formats and
+physical GPU-owner integration remain follow-ups. No unit or integration tests
+were added or run. The experimental branch keeps its updated memory and
+evaluation contracts beside the implementation; the accepted plain serving
+control remains frozen Stage 2b.
+
+Evidence includes the exact source patches/build identities, fixture and feature
+provenance, all per-expert differences, cache lifecycle snapshots and
+`cpu-cache-qualification.json` / `checks.json` in the qualification directory.
+
+### Stage 6 CUDA/CPU activation and contribution exchange
+
+The experimental branch **`two-gpu-selective-cpu-experimental`** adds the
+single-row BF16 activation exchange and its CUDA checked entry. The GPU copies
+the activation into mapped host storage, every producer thread fences its own
+writes, and one thread publishes the positive sequence. A CPU consumer acquires
+that publication, copies the activation without synchronized GPU readback,
+computes the real cached expert contribution, and releases the complete F32
+response. The parked GPU reads the response before completing its invocation.
+The response is the expert's activation-rounded contribution before router
+weighting; the exchange chooses no expert and performs no accumulation.
+
+Only one host consumer can claim a sequence. Sequences strictly increase on
+one ordered device queue. A bad response, withdrawal, repeated sequence or
+stalled host permanently poisons the channel. Failed GPU work publishes defined
+zero output storage, which the host must reject as a failed computation. Later
+queued invocations return without overwriting the channel's activation or
+reading a stale response. An unanswered request retains its owner and fails
+the channel on drop. This avoids a late host consumer racing reused storage;
+there is no reset that reauthorizes a failed channel.
+
+Measured source is **`29c77cf2` + dirty digest
+`bc9e305831d0fac56ce6e536f063529b83735912c3c867b5ae396d072b351a81`**.
+Build/provenance **`20261019T163127Z-stage6-cpu-exchange-build-f2b8fc`** and
+qualification **`20261019T163154Z-stage6-cpu-exchange-qualification-b4ed4a`**
+pass. The harness command adds `--cpu-exchange-prototype` and an explicit
+second stable CUDA selector to the existing untimed cache qualification.
+Published as **`d92f10c01eaaa37cac06063304364554a8e6ce78`**; all 2,923
+inference source files and the native dependency pointer match this qualified
+build. The measured identity above remains unchanged.
+Both UUIDs match the system's two 3090 Ti owners. The original four-path
+operator checks and physical-cache lifecycle qualification also pass again.
+
+The rotation visits **32 real block 1 experts**, alternating GPUs, **16 per
+owner**. Every published BF16 activation exactly matches its retained fixture
+operand, and every returned F32 contribution is byte-identical to the resident
+CPU control. The same two-record CPU cache serves both owners. A separate
+concurrent pair holds the final two retained expert leases: both GPUs must
+publish their requests before either host consumer computes its response.
+Both results match. The shared CPU native worker pool serializes its submitted
+work; this is concurrent ownership coverage, not parallel CPU throughput.
+
+Each GPU also passes invalid-response rejection, poisoned-successor rejection,
+preservation of the earlier activation payload, withdrawal after publication,
+withdrawal before publication, repeated-sequence rejection and dead-host
+watchdog termination. These are actual device executions with the normal
+publication fences and watchdog, not a simulation of the control words.
+
+The final cache snapshot holds exactly **6,184,960 native bytes**, two records,
+zero pending reservations and 3,417 reported cache-control bytes. The process
+peak is **994,553,856 bytes**, including the independent operator controls,
+CPU allocations and backend storage. It is not full-model host admission or
+a peak for serving. No 4 GiB cache is allocated.
+
+This qualification is **untimed** and uses the same four retained readout
+vectors as operator operands, not captured routed-layer activations. It covers
+one quantization triple and no complete routed graph. The serving path does
+not construct the channel, choose CPU experts or prepare their programs. There
+is no generation-speed, model-quality, full-load budget or production admission
+claim. No unit or integration tests were added or run. The source patches,
+build identities, command, per-expert publications, both device identities and
+failure checks are retained in the local build and qualification directories.
+
+### Stage 6 shared CPU dispatch: qualified components and warmed failure
+
+The opt-in serving prototype now joins the planned CPU inventory, one shared
+native cache and serial CPU lane, per-owner mapped channels, and the routed GPU
+graph. **`MAGNITUDE_CPU_EXPERT_CACHE_BYTES=4294967296`** requests a 4 GiB native
+payload ceiling; unset/zero keeps ordinary GPU execution. Supported one-row,
+one-expert conversion misses can use a retained CPU record before GPU reservation.
+Original expert IDs, scores, BF16 publications and slot-order accumulation remain
+the contracts. GPU fallback remains available. Eligible cold retention imports
+the source triple after the ordinary upload; it does not issue another file read,
+but its synchronous CPU packing remains work on the watcher.
+
+The target shares one cache, program group and source/input/output workspace
+across both GPU owners. The lane reports **4,008,967 standing bytes** and a
+checked **79,616-byte invocation scratch bound**, separately from payload and
+cache controls. Header fit includes auxiliary host workspace and temporary
+program groups; optional payloads still need fresh surplus claims. Device
+consumption acknowledgement precedes publishing a CPU-only physical bank slot.
+The new programs form within the existing first-load allowance: the recorded
+preparation used **21.35 of 30 seconds**, with no overrun or second CPU budget.
+These runs exercised canonical parent arithmetic, not promoted nondefault
+companion configurations.
+
+The locked release build and 32-expert operator/cache/exchange qualification
+pass. The new single-submission CPU contribution equals its ordinary CPU control
+for all 32 groups. This does not make CPU and GPU contributions byte-identical;
+the earlier cross-backend rounding differences still apply. Initial CUDA helper
+formation failed because generated buffer arguments were outside helper scope;
+shared entry-body fragments fix that without changing the generated ABI.
+
+The first full comparison with frozen Stage 2b,
+**`20261019T174711Z-stage6-cpu-dispatch-strict-fdd8f9`**, fails ordinary exact
+parity and changes three unrelated attention configurations. It is confounded
+and remains failed. A separate same-source CPU-off/CPU-on comparison uses the
+candidate's stored choices, preserves the 30-second policy, and passes six exact
+responses: prose, ordinary continuation and BFCL tool calls on both sides.
+Selected GPU configurations, usage and stopping boundaries match. Its one shared
+service completes **49 CPU dispatches**, reports **2,123 fills**, and holds up to
+**4,217,569,280 native bytes**. These are cumulative service counters; snapshots
+from both owners must not be summed. Prefix retention/hits, cancellation after
+four content events, recovery and health also pass with tracing disabled.
+
+The subsequent thermal-gated **A/B/B/A** comparison plans two warmups per
+fixture and launch, then one measured repeat and ordinary request. Both sides
+use this same source and GPU choices; A disables CPU dispatch and B uses the
+4 GiB ceiling. It stops after **12 responses**, with 11 exact matches. The last
+request, B's warmed ordinary measurement, differs at character **68** and stops
+after **60 tokens** instead of the control's 64-token length boundary. GPU
+configuration parity still holds. Thus the cold qualification did not establish
+warmed serving fidelity. The cause remains unresolved: actual routed arithmetic,
+CPU record retention and source handoff need examination. Do not attribute it to
+rounding alone without that evidence. The remaining B/A launches were not run;
+there is **no accepted performance comparison or serving speedup**.
+
+The incomplete run nevertheless records a useful RAM observation:
+
+| Completed repeat measurement, identical 64-token output | CPU off | 4 GiB CPU cache |
+| --- | ---: | ---: |
+| Logical reads after first content delivery | 6.625 GB | 5.815 GB |
+| Process-attributed physical reads in that window | 50.618 MB | 1,400.558 MB |
+| Linux `Cached` after delivery | 55.908 GiB | 51.821 GiB |
+| Actually free after delivery | 0.396 GiB | 0.514 GiB |
+
+One completed pair is not an alternating comparison or causal attribution. It
+shows that the extra native cache reallocates already-used host RAM and can
+coincide with much more physical source traffic despite fewer logical reads.
+The ordinary candidate window also has different generated work, so it is not
+a matched latency or I/O comparison. Available memory does not establish that
+another cache creates additional useful capacity.
+
+At **18:00:04 UTC**, a separate active qualification sample found **53.150 GiB
+`Cached`, 0.379 GiB actually free and 51.029 GiB `MemAvailable`**, out of
+62.696 GiB. Engine RSS was approximately **9.40 GiB**, with **zero `VmSwap`**;
+the native CPU cache then held approximately 2.49 GiB. This is one sample,
+not peak occupancy. Shared/file pages overlap RSS and kernel cache accounting;
+do not add those totals. The read counter includes loading and earlier work.
+
+All evidence remains under the run IDs in the ledger, including raw outputs,
+`diagnosis.json`, selected configurations, delivery-window I/O and memory,
+`ram-active.json` / `ram-observer.py`, and reproduction scripts. The measured
+source is `d92f10c0` plus dirty digest
+`dd6fb7aa02255e13c493a420e5307ad107afe837a6a9ecd1aed5adb70084670a`.
+Published **`d7958b29ad9d07827d26efbd60daae168efee450`** preserves all 2,942
+inference source files and the gitlink byte-for-byte; the build directory retains
+the source manifest and equivalence record. The original measured identity is
+not relabelled. This branch is experimental and its warmed failure prevents
+promotion. No unit or integration tests were added or run.
+
+### Stage 6 actual routed operands: retained bytes and arithmetic
+
+The diagnostic branch adds **`MAGNITUDE_CAPTURE_CPU_EXPERTS`**, a bounded JSON
+configuration naming an output directory, positive sequence range and at most
+128 records. It retains actual BF16 routed activations, unweighted F32 CPU
+contributions and SHA-256 fingerprints of the leased native weight triple.
+An independent marker records GPU consumption. Weight readback and bounded
+metadata require a fresh transient host claim; there is no additional retained
+weight cache. **`expert-replay`** renders the bound fixture and checks producer,
+model, source ranges, representations and payload digests before replaying fresh
+CPU and CUDA imports.
+
+Build **`20261019T182107Z-stage6-cpu-capture-build-8581d3`** passes. The capture
+run returns all six exact responses with unchanged GPU configurations, so it
+**does not reproduce the earlier warmed failure**. Its original range check fails:
+the requested 327..350 range also includes the preceding repeat. That failed
+run is retained unchanged. The recorded ordinary-request boundary is 328;
+the preceding request's one queued orphan completes at 329 and the new prompt
+at 330, fenced successfully by both owners. A derived subset selects only
+**331..350**. Each of its 53 consumed records uniquely matches a CPU-served
+expert and slot in the corresponding owner's request/source inventory.
+
+Replay **`20261019T183204Z-stage6-cpu-routed-replay-c98a62`** covers 18 blocks
+on both owners and finds:
+
+| Comparison on the actual captured operand | Byte-exact records / 53 | Maximum absolute difference | Maximum per-record relative RMS |
+| --- | ---: | ---: | ---: |
+| Retained native triple versus fresh source import | 53 | 0 | — |
+| Captured CPU contribution versus fresh CPU control | 53 | 0 | 0 |
+| CPU versus GPU gate/up product | 31 | 0.001953125 | 0.000411388 |
+| CPU versus GPU contribution | 25 | 0.00048828125 | 0.001023381 |
+| CPU versus GPU down, both given the GPU product | 32 | 0.0001220703125 | 0.000102047 |
+
+No retained-weight or CPU execution discrepancy is observed in this subset.
+This does not exclude a defect outside the captured records, verify the whole
+final routed fold, or establish the cause of the earlier unreproduced failure.
+Differences with the same down input show that the discrepancy is not confined
+to SiLU. Source inspection identifies a concrete recipe difference: CUDA sums
+integer-code products by coefficient group and folds the scale and bias into
+the F32 accumulator; the CPU decodes each weight and uses lane-wise F32 dots.
+Matching BF16 publication points alone does not make these recipes identical.
+
+The measured diagnostic source is `d7958b29` plus
+`861acb7765188adc1dd1d800f25bde81a4dc7e5062f6dcabc0ab3e5c7c0cba40`.
+Published **`59b27255f9fa59160e83c9712e5c2d03b835dca0`** preserves all 2,944
+inference files and the gitlink byte-for-byte. Build/source manifests, original
+and derived captures, route matches, per-record comparisons and reproduction
+scripts remain with the run directories. No unit or integration tests were run.
+
+The subsequent scalar proof of concept exposes each native format's authoritative
+32-value integer codes, scale and bias. It accumulates each code dot and input
+sum in F64, rounds each partial once to F32, then folds scale and bias using
+separate F32 FMAs in group order. Its one-part replay matches the captured GPU
+parent's partition count and preserves all original BF16 publication points.
+This studies the grouped recipe; it does not establish exact MMA accumulation
+agreement or replace the serving CPU implementation.
+
+Build **`20261019T184915Z-stage6-cpu-grouped-build-cbaf1b`** and replay
+**`20261019T185406Z-stage6-cpu-grouped-replay-54fe61`** complete on the same
+53 verified records. Fresh-import and original CPU replay checks remain exact:
+
+| Grouped CPU comparison | Byte-exact records / 53 | Maximum absolute difference | Maximum per-record relative RMS |
+| --- | ---: | ---: | ---: |
+| Gate/up product | 50 | 0.000000476837158203125 | 0.000000404398 |
+| Contribution | 43 | 0.0001220703125 | 0.000066641 |
+| Down, both given the GPU product | 44 | 0.0001220703125 | 0.000066641 |
+
+An independent pointwise diagnostic evaluates CUDA BF16 SiLU publication over
+all 65,536 BF16 input codes, using the existing `draft_gated_rows` entry with
+unit up values. Every finite input matches CPU BF16 SiLU publication on this
+SM86/NVRTC 12.9/driver 13030 configuration. The GPU table SHA-256 is
+`5f48cf06e46dc6cfd0977367a6a09d01eb4794c3b6c1fcd9338f52a8859ab5e2`.
+Using that table in the grouped replay makes no further difference. This
+rules out a pointwise SiLU-publication discrepancy for these finite inputs
+on this configuration; it does not establish projection equivalence.
+
+Remaining differences need projection-accumulator inspection before BF16
+publication, using a CUDA path verified against the actual routed operations
+and parent partition policy. The earlier warmed serving failure is still
+unreproduced, and the scalar recipe has no timing or serving qualification.
+No tolerance widening, copied qualification evidence or additional tuning
+budget can replace that work. Payload capacity and file-cache displacement
+remain separate performance problems.
+
+The grouped measured source is `59b27255` plus
+`9b0ba2cf801722a00efc3b21e766737b2838047b08284c6e2a3f9395cd6044b4`.
+Published **`67a7a69aef67cdf6ff39e39678134d5980658bb1`** preserves all 2,945
+inference files and the gitlink byte-for-byte. Its independent retained harness
+binary, original build identity, source manifests and comparisons remain with
+the build/replay records. No unit or integration tests were added or run.
+
+The next diagnostic exports raw F32 accumulators through a CUDA-only
+`routed_projection` entry using the same `GemvShape<4, TPW, KSPLIT, 1>` and
+projection helper as the ordinary routed operations. It pins the captured
+one-part, one-tile policy and independently reconstructs the original BF16
+gate/up product and down publication before accepting an observation. This is
+necessary because the standalone dense projection does not admit that one-part
+reduction. The entry is not connected to serving.
+
+Replay **`20261019T191741Z-stage6-cpu-raw-projection-replay-164fd7`** verifies
+both reconstructions in **all 53 records**, with unchanged original CPU/import
+checks. The whole-group F64/F32 recipe has:
+
+| Raw CPU versus CUDA phase | Equal F32 coordinates | Different BF16 coordinates | Maximum absolute F32 difference |
+| --- | ---: | ---: | ---: |
+| Gate | 28,702 / 33,920 | 3 | 0.000000298023223876953125 |
+| Up | 28,337 / 33,920 | 1 | 0.000000476837158203125 |
+| Down on the same GPU product | 106,150 / 135,680 | 11 | 0.000000059604644775390625 |
+
+The retained arrays show actual publication crossings. One down result differs
+by one F32 ULP with the GPU exactly on a BF16 midpoint. Cancellation also makes
+some small absolute differences span many F32 ULPs near zero; the largest
+observed distance is 131,072 ULPs. Thus these differences cannot all be described
+as one-ULP accumulator changes. They are arithmetic observations on this subset,
+not an established explanation of the earlier warmed output failure.
+
+CUDA issues two 16-element MMA operations per 32-value group. A second scalar
+recipe accumulates each half in F64, combines it with the preceding F32 partial,
+and rounds back to F32 after each half, for both code dots and input sums.
+Replay **`20261019T192208Z-stage6-cpu-half-rounding-replay-25e54b`** verifies
+that **every GPU raw payload remains byte-identical** to the preceding study.
+Products remain **50/53** exact, contributions improve only to **44/53**, and
+down on the same GPU product remains **44/53**. The remaining BF16 crossings are
+2 gate, 1 up and 11 down coordinates. The largest product difference decreases
+to 0.00000011920928955078125; the contribution maximum stays 0.0001220703125.
+Intermediate publication alone therefore does not reproduce the GPU recipe.
+
+[NVIDIA's PTX contract](https://docs.nvidia.com/cuda/parallel-thread-execution/#warp-level-matrix-instructions-mma)
+does not fix BF16 MMA accumulation order or rounding. Neither F64 scalar recipe
+can infer exact MMA behavior from its group geometry. Any further CPU integration
+still needs verified arithmetic compatibility and the existing serving gates;
+these observations grant no qualification, extra tuning allowance or speed claim.
+
+The initial raw diagnostic build
+**`20261019T191548Z-stage6-cpu-raw-projection-build-dcbd4c`** fails because its
+native constraint reads nonstatic `M`; the retained retry makes `M` static.
+The successful raw build measures `67a7a69a` plus
+`786553b441452d9d661fd7d4351e4765438674cb6a5b9d104fbfa78ea42f9f2a`,
+published as **`efd9957413626f65814507467b3dfab7d796be5d`**. The half-group
+build measures `efd99574` plus
+`6e1a45562ae5097cdafadbad9fd15cb7014a80295b8eff00a088436044eda980`,
+published as **`394d3764dababff9b64c92c6f2367fbb0752df14`** on
+`two-gpu-cpu-grouped-experimental`. Both retain source-equivalence manifests
+covering all 2,948 inference files and the gitlink, original build identities,
+independent harness binaries, raw arrays with digests and reproduction scripts.
+No unit or integration tests were added or run.
+
+### Stage 7a — Complete owner allocation rather than an inherited weight allowance
+
+The candidate starts from published Stage 2b **`d2b3b935`**, whose inference
+bytes match the frozen accepted control. It selects the largest exact local
+expert inventory whose complete allocation bound fits the owner's stable
+capacity after its ordinary reserve. The bound includes owner-partitioned
+history and recurrent slabs at the standard fit depth, checked range graphs,
+invocation storage, incoming transfer buffers and the physical import/startup
+peak. Shared host staging and graph uploads retain their host-domain charge;
+explicit weight caps still constrain the inventory. Final admission remains
+independent and checks the sealed resources before allocation.
+
+Checked graph drafts now expose their already constructed tensor descriptors.
+Range certification derives incoming hidden-buffer bytes from the actual first
+block port and combines them with the existing kept-row recipes. It does not
+invent a second boundary shape. The ordinary state-fit and owner-fit projections
+share their history/slab recipes and common recurrent bank indexing. No native
+kernel assets, numerical recipes, CPU dispatch or MTP implementation changes
+are included in this candidate.
+
+The release engine and harness build passes. The **1024-token context** serving
+qualification returns all six exact responses across repeated prose, ordinary
+continuation and the held-out BFCL tool fixture, with identical selected kernels,
+usage and stop boundaries. Prefix retention/reuse, cancellation after four
+content events, recovery and health also pass; hit/recovery report 757 cached
+prompt tokens. These checks do not qualify other contexts or models.
+
+Both comparison passes select **201 records per layer on blocks 0–23 and
+206 on blocks 24–47**, versus the control's **200/203**. The ready census shows
+**303,144,960 additional GPU model bytes (289.102 MiB)** across the owners,
+with **768 additional host model bytes** and unchanged reported compute charges.
+Observed headroom is not a peak measurement or a substitute for the allocation
+bound. The qualification's startup additional bounds are approximately
+2.167/1.957 GB; they limit capacity more than its approximately 0.793/0.788 GB
+fit-depth state charges.
+
+The thermal-gated **A/B/B/A** comparison uses two warmups per fixture and launch,
+then one measured request, for 24 total exact responses. Repeat renders 758
+tokens and generates 64; ordinary renders 396 and generates 60. Prefix reuse,
+managed host expert retention and drafting are disabled. Both sides use prompt
+group 8, lookahead and the accepted decode-reuse seed/replacement policies.
+Every launch selects identical kernels. The primary metric is ordinary
+generation milliseconds per output token; the declared bar remains at least
+3% and a difference exceeding both sides' observed spreads.
+
+| Fixture | Control mean generation | Candidate mean generation | Generation change | Mean total model-time change | Generation bar |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Repeat | 3709.941 ms | 3285.464 ms | −11.442% | −11.267% | Fails spread check |
+| Ordinary | 2319.754 ms | 2251.592 ms | −2.938% | −4.465% | Fails 3% and spread checks |
+
+Repeat's mean generation gap is **424.478 ms**, below the control's
+**799.654 ms** spread. Ordinary's gap is **68.162 ms**, below the control's
+**99.563 ms** spread; the candidate spreads are 4.412 and 5.500 ms respectively.
+The result is not an accepted generation speedup, and rounding 2.938% to 3%
+does not change the declared decision. Prefill means decrease by 11.106% and
+5.582%, but these two-pass observations do not establish a general prefill win.
+
+Mean logical generation-delivery reads decrease from **7.227 to 7.188 GB** for
+repeat and **3.965 to 3.878 GB** for ordinary. Every candidate window has zero
+physical reads. Control repeat windows have 13.312 and 356.983 MB, while control
+ordinary has 3.056 and 0.729 MB. The final control repeat also has the slowest
+generation. Retain this I/O imbalance explicitly; the run does not establish its
+cause or isolate a disk contribution to the timing gap. The thermal gate passes
+and recorded GPU temperature reaches at most 48 °C.
+
+RAM is already serving the warm source reads. Across the four candidate
+generation-delivery windows, Linux reports **56.432–56.569 GiB cached**, only
+**0.445–0.519 GiB free**, and **53.711–53.775 GiB available**, on a host with
+62.696 GiB usable RAM. Available includes reclaimable file cache; it is not
+additional unused capacity. Managed host expert retention is explicitly zero,
+but buffered source reads still use Linux's file cache. These are system-wide
+point samples, not a model-only residency census or a memory-pressure trace.
+The zero physical reads in every candidate window show that more RAM retention
+has no demonstrated disk-saving benefit for these warm requests. They do not
+qualify cold starts, longer contexts or wider routing coverage. A managed cache
+can avoid other source/import work, but its copies compete with the existing
+file cache; count the overlap and measure it rather than treating available RAM
+as an unoccupied extra tier. Remaining generation time is not attributed among
+host copies, transfer, launches and device work by these I/O samples.
+
+**Retain this as a qualified capacity/accounting prototype, without default
+promotion or a serving speedup claim.** The next experiment compares prompt
+grouping on this frozen source (Stage 7b below). Separately audit startup phase
+overlap and the largest
+import contributors: source inspection places qualification fixtures before
+model import, but the current range bound retains the combined conservative
+startup/import allowance. Do not reduce it without verifying all retained
+resources and the real import path.
+
+Measured source is `d2b3b935` plus
+`98a3364654dff06ffbbd133e608c89a7d8d0ef30e43fcfb2ea0b1f4b2d88d3ad`.
+Published **`5e42c2a2f865274c87b63fb6b09b2072dec865a8`** on
+**`two-gpu-owner-budget-published`** preserves all **2,915 inference files and
+the gitlinks**. Publication uses a separate index; the original measured
+worktree remains unchanged for the next profile comparison. The build directory
+retains its source manifest, equivalence proof and exact engine/harness paths
+and hashes. Preserve those binaries before reusing their target. The comparison
+retains `analysis.json`, `analyze.py`, raw observations, I/O, RAM and temperature
+samples, cache assessments and selected configurations. No unit or integration
+tests were added or run.
+
+### Stage 7b — Paired reservation repair and prompt-group comparison
+
+Qualification run **`20261019T200146Z-stage7-grouping-strict-918530`** compares
+group 8 with group 1 on the exact frozen Stage 7a engine and harness, at context
+1024 and with the same fixtures and policies. Group 8 returns all three valid
+responses. Group 1 reaches readiness, then unloads on its first actual prose
+request with **`distributed target reservation: Output requires 1 units; 0
+available`**. The continuation and tool requests subsequently report the unloaded
+worker. No timing comparison or lifecycle qualification follows this failure.
+Selected GPU configurations are unchanged.
+
+Group 1's planner selects **205/211 records per layer**, versus group 8's
+201/206, and its ready census reports lower compute charges. These are planning
+and readiness observations only; they establish no serving benefit. The failed
+request is an output-lease reservation error, not evidence of RAM exhaustion or
+a device out-of-memory failure. Source inspection finds that the first owner's
+ordinary and speculative paths check their own launch leases, while the native
+family acquires the second owner's leases later during submission. Trace the
+fixed scratch and retained-output lifetimes and make admission cover both owners
+before either submits; do not hide the mismatch by disabling lookahead or
+weakening memory claims.
+
+The final memory query receives HTTP 503 after the worker unloads, so the outer
+failure report records that secondary error. The raw engine log and request
+observations retain the original output shortage; the checks file remains
+`running` because that query prevents normal finalization. Preserve these raw
+artifacts. Diagnostic assessment parsing must also distinguish prepare-only
+and actual-load records: group 1 logs both consistent owner pairs, whereas the
+initial script expects exactly one pair. That parser assumption did not cause
+the serving failure.
+
+The root cause is a scratch-lifetime mismatch. The first owner's launch returns
+its residual output pair once every reader has been queued, allowing reuse by
+later ordered submissions. The second owner instead retains that pair in its
+completion workspace. Group 1 has one pair, so its queued successor encounters
+an empty pool. Group 8's larger pool masks the mismatch.
+
+Repair **`783f5422eee185c7154d3e2f50d7b4e5f32f4ab8`** makes each owner return
+residual scratch after queuing its readers, while retaining uploads, readout
+workspaces and transfer storage through completion. Read-only admission and
+reservation cover both owners' graph leases and transfer slots. Every group
+member acquires its complete leases as it is built; speculative successors
+check both pools. The native family consumes the admitted leases without
+acquiring peer capacity during submission. Partial reservations roll back by
+ownership. No graph slots, numerical recipes, native choices, tuning time or
+memory-reserve exceptions are added; lookahead stays enabled.
+
+The release build passes. The repaired **1024-token context** serving gate
+returns six exact responses across repeat, ordinary continuation and BFCL tools,
+with identical token counts, stop boundaries and selected GPU configurations.
+Repaired group 8 also matches all three frozen Stage 7a outputs. Group 1's cold,
+retaining, cached-hit, cancellation, recovery and health checks pass: hit and
+recovery reuse 757 prompt tokens, and cancellation closes after four content
+events and 15 characters. The diagnostic parser retains preparation and load
+assessments separately and checks their physical inventories.
+
+The comparison uses the same repaired binary for both profiles, with A = group
+8 and B = group 1, context 1024, lookahead enabled, drafting and prefix reuse
+disabled, managed host cache zero, and unchanged decode-reuse seed/replacement
+policies and 30-second preparation. The thermal-gated A/B/B/A run uses two
+warmups per fixture and launch, then one measurement, returning **24 exact
+responses** with unchanged GPU choices. Repeat consumes 758 prompt tokens and
+generates 64; ordinary consumes 396 and generates 60.
+
+Group 1 selects **205/211 records per layer**, versus group 8's **201/206**.
+Its ready census adds **681,811,968 GPU model bytes (650.227 MiB)**, reduces GPU
+compute by 744,516,608 bytes, and reduces GPU context by 2,117,280 bytes. Host
+model storage grows by 1,728 bytes and compute falls by 191,088,768 bytes. Both
+profiles fit their independent owner bounds. These are ready samples, not peak
+measurements or a new memory grant.
+
+| Fixture | Group 8 mean generation | Group 1 mean generation | Generation-time change | Prefill-time change | Total model-time change |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Repeat | 3337.452 ms | 3265.632 ms | −2.152% | +20.202% | +9.734% |
+| Ordinary | 2257.792 ms | 2462.889 ms | +9.084% | +26.849% | +19.233% |
+
+Neither fixture passes the generation bar. Repeat's 71.820 ms mean gap is below
+both observed spreads, **99.957 ms for group 8 and 140.112 ms for group 1**, and
+below the 3% threshold. Ordinary regresses on average; its spreads are
+**11.159/681.354 ms**. Retain both group 1 ordinary measurements,
+2803.566 and 2122.212 ms; excluding the slower one would change the experiment.
+
+Mean observed first-token latency rises from **3837.363 to 4607.425 ms** for
+repeat and **3038.644 to 3846.389 ms** for ordinary. Mean completed-request
+latency rises from **7175.071 to 7864.608 ms** and **5313.723 to 6322.418 ms**,
+respectively. These HTTP observations are separate from the model timing table.
+
+Logical generation-delivery reads fall from **7.188 to 6.854 GB** for repeat
+and **3.878 to 3.443 GB** for ordinary. Physical reads in the two group 8
+repeat windows are **92.434/0 MB**, versus group 1's **100.770/0 MB**. Ordinary
+windows read **0/3.981 MB** for group 8 and **385.081/0 MB** for group 1.
+The slower group 1 ordinary response coincides with the larger physical-read
+window; this does not isolate a disk contribution or justify dropping that
+response. Delivery windows include possible lookahead and are not exact device
+decode boundaries. Group 1 reports **56.583–56.706 GiB cached**, only
+**0.378–0.486 GiB free**, and **54.004–54.034 GiB available** at those endpoints.
+Thus this profile can encounter physical misses while RAM is already occupied
+by reclaimable cache. The thermal gate passes; maximum recorded GPU temperature
+is 48 °C.
+
+**Retain the paired reservation repair and keep group 8 for subsequent work.**
+Group 1 is qualified only at this scope and is not a useful replacement for the
+measured short requests: lower logical reads and greater GPU residency do not
+establish lower latency, and its prefill/total regressions exceed the declared
+5% tradeoff threshold. No default, cumulative, long-context or single-GPU
+performance promotion follows this result.
+
+Source is clean on **`two-gpu-grouping-reservations-experimental`**. The build
+records exact engine/harness hashes and reproduction scripts. Stage 7a's
+original binaries were copied independently to `owner-budget-control` and
+hash-checked before reusing their target; its original build directory retains
+`preserved-binaries.json`. Repaired engine/harness controls are independently
+preserved under
+`/home/dre/.cache/magnitude-evaluation/grouping-reservations-control/`, with
+their paths and hashes in this build's `preserved-binaries.json`. The locked
+cleanup job `20261019T203712Z-stage7-reclaim-build-cache-90b27f` then removes
+4,298 regenerable Cargo files from `cpu-grouped-target`; its binaries must now
+be taken from the preserved control directory, not the cleaned target.
+The comparison retains individual observations,
+delivery latencies, ready census, owner assessments, logical/physical reads,
+RAM, temperatures, `analysis.json` and `analyze.py`. No unit or integration tests
+were added or run.
+
+### Stage 7c — Separate startup phases and audit retained qualification storage
+
+Initial candidate **`1fa4bd9aec5d5dec58b4cebf9b9b9ba973c74ee8`** starts from
+the repaired group 8 control. Source inspection confirms that preparation
+consumes the tuner and its weight/input caches before graph allocation and
+physical model import. CUDA replay records retain formed kernels/plans and
+timelines, not those bound weight tensors. Bulk import completes before initial
+state allocation. The candidate therefore bounds preparation separately and
+combines persistent holdings with the maximum of import, initial state and the
+fit workload, preserving every fresh heap claim and ordinary reserve.
+
+The release build passes in **4m42s**. Qualification
+**`20261019T205119Z-stage7-startup-phases-strict-41746a`** returns all six exact
+prose/ordinary/tool responses, with equal usage, stop boundaries and selected
+GPU choices. Both sides use group 8 and context 1024. The candidate selects
+**223/224 records per layer**, versus 201/206. Its largest physical import
+source on both owners is `output.weight`, **675,430,400 bytes** at shape
+`[248320, 2560]`; the existing two-page allowance makes its source-window bound
+**675,438,592 bytes**. Qualification of the actual graph inventory remains
+**2,166,655,616 bytes** on each owner, separate from physical model weights.
+The initial-state charge samples are **260,585,040/260,104,592 bytes**, below
+the fit-state bounds of **792,502,032/788,332,880 bytes**.
+
+**The initial candidate fails its complete memory audit and is not timed or
+promoted.** Post-preparation samples show **42,439,840/42,439,827 charged
+bytes**, while the factory's fixed planned invocation charge is only **78
+bytes**. Source inspection finds that qualification calls grow each prepared
+kernel's cached standalone scratch after the factory compares its invocation
+charge with the plan. Those arenas remain retained across readiness, and the
+cached attested charge is not rechecked. Separating the weight-fixture phase
+does not dispose this additional persistent storage.
+
+The scoped follow-up **`a3735d40`** gives one-shot qualification calls scratch
+owned through completion, preserving scalar-result serialization and returned
+tensor ownership. Ordinary standalone calls keep cached scratch. Its release
+build and all six live control/candidate responses pass in
+`20261019T210652Z-stage7-startup-scratch-strict-d98c84`. Post-preparation charges
+fall to **118/105 bytes**, releasing **42,439,722 bytes per GPU**, but the
+original planned invocation count remains 78 bytes. The additional fixed
+storage therefore still needs an inventory repair.
+
+The next prototype **`c253c094`** tries clearing unused formation handoffs.
+`20261019T212020Z-stage7-startup-handoff-strict-abd8ee` returns three exact live
+candidate responses against three explicitly archived, validated control
+references. It releases **zero handoffs on both devices** and leaves 118/105
+bytes charged. This hypothesis is disproved; its cleanup API and design claims
+are removed in the following revision. No timing is taken from these references.
+
+Inventory revision **`305c23a2`** adds the omitted streamed-routing, fill,
+scratch-bank, copy, conversion and commit entries to planning and storage
+accounting, and stream/ngram helpers to the retained census. Its new ownership
+check correctly refuses readiness in
+`20261019T214007Z-stage7-startup-inventory-strict-98e2ea`: retained owners charge
+118 bytes while the plan charges 117. Attention history accounting takes a
+maximum across independently prepared decode and verification kernels; both
+allocations remain live. No serving response or timing is collected from this
+failed prototype.
+
+Complete revision **`7a0a1f301d5acdaec5d73abce8910a7169e89392`** shares attention
+class selection between planning and preparation, using the resolved row bound
+and device capability. Retained decode, verification and listed-prefill kernels
+are summed. The release build passes. In
+`20261019T214830Z-stage7-startup-attention-inventory-strict-a9ddbd`, all three
+fresh candidate responses exactly match the explicitly archived validated
+control, with equal usage, stops, tools and GPU choices. Planned invocation
+bytes, retained owners and the observed post-preparation ledger now agree at
+**118/118/118 and 105/105/105 bytes**.
+
+The phase derivation in `phase-audit.json` passes: preparation, source import,
+initial state and the fit workload stay within the complete independent owner
+bounds of **23,712,915,074/23,681,273,741 bytes**, below capacities
+**23,730,031,821/23,752,382,874 bytes**. Every observed demand refusal is null;
+prepared charge high-water and completed-load held samples fit their bounds.
+These are Seismic ledger observations and point samples, not a continuous
+measurement of global VRAM peak. No fresh tuning, extra numerical witness or
+reserve exception is introduced.
+
+The lifecycle gate passes cold/retaining/cached-hit, cancellation, recovery and
+health checks. Hit and recovery reuse 757 prompt tokens; cancellation closes
+after four content events and 15 characters. Exact binaries are independently
+preserved in `startup-attention-inventory-control`, with hashes and build
+identity in the build's `preserved-binaries.json`. Earlier prototypes also have
+independent copies. Locked cleanup
+`20261019T215119Z-stage7-qualified-reclaim-build-cache-504ffe` removes the shared
+Cargo output; subsequent jobs use the preserved copies.
+
+The thermal-gated **A/B/B/A** comparison uses fresh alternating launches of
+repaired group 8 control `783f5422` and complete candidate `7a0a1f30`, context
+1024, two warmups per fixture per launch, fixed rendered inputs, no prefix
+reuse, no managed host cache, no drafting, and unchanged decode-reuse seed and
+replacement policies. All **24 responses are exact**, with identical GPU
+choices. The candidate selects **223/224 records per layer**, versus 201/206;
+its ready census adds **2,889.609 MiB GPU model storage**, releases
+84,879,444 GPU compute bytes and adds 7,680 host model bytes. Context and host
+graph upload charges are unchanged. These are ready census samples.
+
+| Fixture | Control mean generation | Candidate mean generation | Generation-time change | Prefill-time change | Total model-time change |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Repeat | 3295.440 ms | 4209.403 ms | +27.734% | −4.946% | +10.655% |
+| Ordinary | 2250.227 ms | 1999.160 ms | −11.157% | +2.068% | −3.597% |
+
+Ordinary passes the declared generation bar: its 251.067 ms gap exceeds both
+observed spreads, **10.034/4.953 ms**, and the 3% threshold. Repeat fails;
+retain both candidate observations, **3135.169 and 5283.637 ms**. Its candidate
+spread is **2148.468 ms**, versus 18.076 ms for control. Mean HTTP completion
+latency is 5303.269→5115.439 ms for ordinary and 6951.892→7663.575 ms for
+repeat; first-token means are 3032.744→3096.621 and 3656.233→3486.568 ms.
+These delivery observations are separate from model timing.
+
+Logical generation-delivery reads fall **7.188→6.531 GB** for repeat and
+**3.878→3.005 GB** for ordinary. Control physical repeat reads are 3.072/0 MB;
+candidate repeat reads are **5.263/1061.032 MB**. Ordinary reads are 0/0 MB for
+control and 0/0.004 MB for candidate. The slower candidate repeat coincides
+with the larger physical-read window; this does not isolate all latency to
+disk. Candidate endpoints show **56.645–56.799 GiB cached, 0.403–0.527 GiB
+actually free and 53.854–53.978 GiB available**. Delivery windows include
+possible lookahead, rather than exact device decode boundaries. Maximum
+recorded GPU temperature is 48 °C.
+
+**Retain the qualified accounting implementation experimentally; do not promote
+an overall serving speedup.** Ordinary has a scoped generation gain, while
+repeat's total regression exceeds the 5% tradeoff threshold. Diagnose useful
+source-page residency and stalls before another speed comparison. Broad
+context, single-GPU, cumulative Stage 2b and llama.cpp comparisons remain
+outstanding. Raw observations, source identities, retained hashes, audit and
+analysis scripts are preserved. No unit or integration tests were added or run.
+
+
+#### Source-page diagnostic and bounded retention envelope
+
+Diagnostic **`935e33583708d483a84be709814147201fdfbe0a`** starts from the frozen
+complete candidate. It reuses the previously qualified source-versus-upload
+observations and adds the opt-in Linux
+`MAGNITUDE_TRACE_EXPERT_SOURCE_PAGES` observer. Each completed range records
+its pre-read `mincore` residency, worker physical-read delta, queue/service
+span and file/tensor identity. The probe maps with `PROT_NONE`, without
+population, and never reads payloads. Errors remain unknown residency; it
+changes no read policy, routing, retention or GPU arithmetic. Ticket completion
+is published before metadata logging.
+
+The release build passes in
+`20261019T221010Z-stage7-source-pages-build-96b47b`. Replay
+`20261019T221648Z-stage7-source-pages-trace-65d5f5` uses the same six-request
+pattern as the comparison: repeat/ordinary warmup 1, repeat/ordinary warmup 2,
+then repeat/ordinary observations, group 8, context 1024, host cache zero,
+lookahead on and drafting off. **All six responses exactly match the qualified
+complete candidate**, with equal usage, stops and selected GPU configurations.
+
+The trace contains **188,755 complete reads**, keyed to all **144 routed
+tensors**, with no residency-probe error or failed read. Each range is exactly
+one expert's tensor record. One partially written final log record is produced
+during engine shutdown; both its start and end are after the final captured
+request. The analysis records and excludes only this out-of-window EOF record.
+Raw logs, request boundary snapshots, file identities, analysis and reproduction
+scripts remain with the run.
+
+| Generation-delivery observation | Repeat | Ordinary |
+| --- | ---: | ---: |
+| Source ranges | 6,285 | 2,868 |
+| Requested source payload | 6.530 GB | 2.992 GB |
+| Reads with nonresident pages | 1,511 | 6 |
+| Physical reads, worker sum and process delta | 1,365.402 MB | 7.578 MB |
+| Instrumented physical-read worker service sum | 7759.434 ms | 31.574 ms |
+| Union of instrumented physical-read intervals | 2434.164 ms | 13.304 ms |
+
+Every physical read in these two windows is **demand**, with no speculative or
+bulk source ranges completing in them. The worker physical-byte sums exactly
+match their process deltas. Repeat's cold records cover **573 expert identities**
+and both owners: 675.205/690.196 MB physically. All **1,511 record ranges are
+distinct**. Of them, **1,497 were last read during repeat warmup 2 generation**;
+13 were last read during its prefill and one during repeat warmup 1 prefill.
+This establishes loss of previously accessed useful records across later
+requests, without identifying the exact kernel eviction time or proving which
+intervening access caused eviction.
+
+Repeat's endpoint has **56.482 GiB cached, 0.566 GiB free and 53.798 GiB
+available**; ordinary has 56.537/0.445/53.732 GiB. Both windows have zero global
+swap-outs; repeat observes only 14 swap-in pages. These are system-wide paging
+counters, not engine-specific swap attribution. The large physical payload is
+accounted for by GGUF source reads. This instrumented replay does not supply a
+speed comparison: probes, logging and altered scheduling have costs; worker
+sums overlap and interval unions are not critical-path delay.
+
+An offline envelope counts all distinct demand record ranges across this
+six-request trace. Their modeled record charge is **16,305,742,720 bytes**
+(15.187 GiB), including 64 bytes per record for the measured x86-64 structure
+and Arc counters. Existing proportional layer quotas need a global cap of at
+least **34,900,920,372 bytes** to cover every observed layer, with block 0 the
+limiting share. Rounding to the next whole GiB selects **33 GiB
+(35,433,480,192 bytes)** for one bounded cache-profile experiment. A configured
+cap is not preallocation or a memory grant; actual retention remains subject to
+fresh ordinary host claims and may be much smaller. This is a quota envelope,
+not an eviction simulation, file-cache-displacement result or speed prediction.
+It is retained as `demand-capacity-envelope.json` with its derivation script.
+
+The host runs **Linux 6.8.0-142-generic**. A flag-only `FADV_NOREUSE` change is
+not selected: the reviewed upstream 6.8
+[buffered read path](https://raw.githubusercontent.com/torvalds/linux/v6.8/mm/filemap.c)
+marks accessed folios without consulting `FMODE_NOREUSE`, while the
+[mapping recency helper](https://raw.githubusercontent.com/torvalds/linux/v6.8/include/linux/mm_inline.h)
+checks that flag for VMAs. The
+[manual](https://www.man7.org/linux/man-pages/man2/fadvise64.2.html) documents
+mapped-page recency effects from Linux 6.3. This is a pinned upstream review,
+not a complete vendor-kernel audit. Changing the read mechanism would need its
+own memory and failure-lifetime qualification.
+
+The existing compressed-record cache already distinguishes demand retention
+from bulk scans. The derived cap is compared against zero below on the **same
+frozen `7a0a1f30` binary**, with all source instrumentation disabled. Preserve
+the historical automatic-cache regression; this short-request envelope does
+not replace that result or justify a default. The diagnostic binaries are copied
+independently to `source-pages-control` with recorded hashes. Locked cleanup
+`20261019T223217Z-stage7-source-pages-reclaim-build-cache-14a2c5` removes the
+regenerable Cargo target. No unit or integration tests were added or run.
+
+#### Derived-cap host retention — qualified, without a useful warm speed gain
+
+Both profiles use the independent complete-candidate engine/harness copies,
+with exactly the same source, native choices, group 8, context 1024,
+decode-reuse policies, lookahead enabled and drafting disabled. The only intended
+difference is `MAGNITUDE_HOST_EXPERT_CACHE_BYTES=0` versus `35433480192`.
+Streaming, source-page and other inference tracing are disabled. The cap is a
+ceiling under ordinary host admission, not an up-front allocation.
+
+Serving qualification
+**`20261019T223532Z-stage7-host-retention-strict-ae8390`** compares three fresh
+retention-enabled responses with explicitly archived, previously validated
+cache-off references from `20261019T214830Z-stage7-startup-attention-inventory-strict-a9ddbd`.
+Repeat prose, ordinary continuation and the complete tool call match exactly,
+including usage/stops and selected GPU configurations. The log confirms the
+33 GiB setting and 48 layer shares. After these three requests, additional
+classified host model storage is **21.982 GiB**, with **31.802 GiB** observed
+host headroom remaining. This larger footprint includes the held-out tool
+transition; it is not the shorter timing sequence's footprint or a peak.
+
+Lifecycle **`20261019T223835Z-stage7-host-retention-lifecycle-849d09`** passes
+cold, retain, prefix hit, cancellation, recovery and health. Hit/recovery reuse
+757 prompt tokens. Cancellation closes after four content events / 15 exact
+characters before terminal delivery. The actual engine log and qualification
+record both confirm the cap. No reserve, precision gate or 30-second tuning
+allowance is relaxed.
+
+Comparison **`20261019T224145Z-stage7-host-retention-comparison-b6c6e9`** runs
+four fresh launches in A/B/B/A order under one lease and a passing thermal gate
+(maximum observed GPU temperature **47°C**). Each launch has two warmups per
+fixture before fixed measured work. All **24 responses are exact** and both
+profiles have identical kernel selections and physical GPU inventory, including
+223/224 expert slots per layer. Independent preserved binaries avoid rebuilding
+or changing the measured source.
+
+| Fixture | Cache-off generation | Retained generation | Generation change | Off / retained spread | Prefill change | Model-total change |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Repeat, 64 outputs | 3094.390 ms | 3077.846 ms | −0.535% | 4.833 / 7.175 ms | −1.318% | −0.932% |
+| Ordinary, 60 outputs | 1982.308 ms | 1985.031 ms | +0.137% | 17.510 / 0.551 ms | −1.149% | −0.643% |
+
+**Neither fixture clears the declared 3% generation bar.** Repeat's 16.544 ms
+mean gap exceeds both observed spreads but remains below that bar. Ordinary
+generation is effectively unchanged, with a small mean regression. HTTP mean
+TTFT changes 3253.829→3200.376 ms for repeat and 3088.602→3053.492 ms for
+ordinary; these remain separate from model time and do not qualify a generation
+win.
+
+| Generation-delivery evidence | Cache off, two passes | Retention, two passes |
+| --- | ---: | ---: |
+| Repeat logical read bytes | 6.531 / 6.587 GB | 24.271 / 24.271 MB |
+| Repeat physical read bytes | 1.442 / 0 MB | 0 / 0 MB |
+| Ordinary logical read bytes | 2.998 / 3.005 GB | 31.747 / 31.747 MB |
+| Ordinary physical read bytes | 0 / 0 MB | 0 / 0 MB |
+| Linux file cache at measured endpoints | 56.490–56.833 GiB | 41.355–41.524 GiB |
+| Actually free RAM at measured endpoints | 0.434–0.457 GiB | 0.406–0.480 GiB |
+| Classified host model storage after six requests | 2,471,018,496 bytes | 18,781,619,912 bytes |
+
+The retained model-storage increase is **16,310,601,416 bytes / 15.190 GiB**
+in both B launches, close to the trace's 15.187 GiB distinct-demand envelope.
+Host compute and GPU physical inventories are unchanged. File cache falls as
+anonymous retention grows: this rearranges occupied RAM. Mean logical file-read
+traffic falls **99.630% / 98.942%** for repeat/ordinary, without a useful warm
+generation change. Retention still copies retained payloads and does not remove
+GPU uploads, conversion or routed computation; `read_chars` is not a counter
+for those operations.
+
+Both cache-off measured repeat windows already have few or no physical reads.
+This run therefore **does not prove prevention of the earlier 1.061/1.365 GB
+physical-miss stalls**. First warmups after fresh launches are expensive on
+both sides and remain in the raw findings: final A's first repeat has
+17.846 s prefill / 10.993 s generation. Do not infer a unique cause from restart
+order or substitute these warmups for a controlled cold-start comparison.
+Two measured passes per side, short contexts and one sequence limit the result.
+
+**Keep host retention opt-in and do not increase its cap again for warm speed.**
+The source-page diagnostic establishes a real disk-miss case; the untraced
+comparison shows that eliminating almost all file-read traffic is insufficient when
+source pages are already hot. A future tail-protection claim needs a declared
+churn workload and matched timing. Keep the original slow capacity pass and
+historical managed-cache regression; no overall capacity/default promotion is
+established by this follow-up. Raw memory censuses, request I/O, thermal records,
+source/binary proofs, `analysis.json` and reproduction scripts are preserved.
+
+#### Existing service trace — use it before another device run
+
+The source-page replay already includes completed source-versus-upload groups.
+Offline reuse of the Stage 6 summarizer adds `source-service-analysis.json`
+without running another model. Repeat has 126 complete owner steps and ordinary
+117, with zero partial groups excluded and both owners represented. Delivery
+boundaries can cut through a step; these counts need not equal a token-count
+multiple or the independent per-read completion inventory.
+
+| Instrumented delivery window | Expert installs | Requested upload bytes | Blocking upload host time | Watcher polling sleep | Other watcher service |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Repeat with physical misses | 2,082 | 6.492 GB | 688.034 ms | 2805.882 ms | 145.034 ms |
+| Ordinary, mostly hot pages | 889 | 2.785 GB | 286.175 ms | 320.792 ms | 61.678 ms |
+
+There are three uploads per installed expert. Ordinary's blocking upload host
+mean is **321.907 µs per expert**, versus Stage 6's 327.121 µs observation;
+these separate instrumented sessions do not establish a timing improvement.
+Upload host time includes CUDA submission and synchronization, and is not
+transfer-engine time. Polling sleep and source worker/ticket sums overlap
+between owners and with GPU execution; they do not partition generation time.
+The repeat polling observation is consistent with exposed service wait, while
+the ordinary window retains appreciable upload/control work despite few disk
+bytes. A full CUDA critical-path attribution is still unavailable.
+
+Use these observations to guide further transfer/control investigation. Stage
+1's asynchronous-batching attempt already failed its promotion bar; lower file
+traffic or fewer synchronization calls alone are insufficient reasons to repeat it.
+Save completed-read history with `cold-record-history.py`: it reproduces all
+1,511 cold ranges and the 1,497/13/1 prior-read categories, with prior ages
+26.032–81.409 s. No unit or integration tests were added or run.
+
+### Stage 8 declaration — affected context and smaller single-GPU paths
+
+Start with frozen complete candidate `7a0a1f30`, plain decoding, lookahead on,
+group 8, decode-reuse policies and managed host retention zero. Its retained
+phase accounting changes shared preparation and memory admission, so the
+1024-context two-owner checks are insufficient coverage by themselves.
+
+First qualify exact canonical record retrieval at **32768 configured context**,
+using a whole-conversation fixture sized by the native renderer to leave 128
+output tokens. Capture readiness, actual rendered/evaluated lengths, host/device
+censuses and physical owner allocation bounds. Include a short retrieval in the
+same capacity before the long request. This is a correctness/capacity check,
+not a speed comparison or a renewed maximum-context claim. The earlier 260137
+input maximum run predates these changes and took 971 s of prefill with group
+32; decide whether another such run is necessary after the smaller affected
+path supplies its result.
+
+Only the large model is currently installed in Magnitude's catalog store.
+Acquire **`qwen3.5-4b:gguf:q4`** from the catalog's locked target/drafter
+revisions, including its declared projector; do not substitute the unrelated
+27B files available elsewhere. Compare accepted Stage 2b and the complete
+candidate on one explicit 3090 Ti with repeat prose, ordinary continuation and
+a canonical complete tool call. Keep the 30-second preparation allowance and
+ordinary numerical admission. Record exact outputs, usage, stops and native
+choices; any failure remains a result and blocks consolidation. Qualify prefix
+reuse/cancellation on the affected smaller path if the initial serving gate
+passes. No smaller-model speed claim is planned from these qualification jobs.
+
+### Stage 8 affected-context result — 32K exact retrieval passes
+
+**`20261019T230253Z-stage8-context-60e410`** runs the frozen complete candidate
+on both explicit 3090 Ti owners with the declared profile. Readiness reports
+32768 context tokens. The native renderer sizes the canonical first-record
+retrieval fixture to **31661 input tokens**, leaving the declared 128-token
+output allowance. A short **2226-input + 37-output** request and the long
+**31661-input + 37-output** request both return the exact first-block mapping,
+with no retained-prefix reuse. Terminal evaluated counts match rendered counts.
+
+The load selects **221/223 slots per routed layer**, versus 223/224 at 1024
+context. Both owners' complete physical allocation assessments remain within
+their declared capacity. Planned/retained/live invocation bytes are exactly
+**118/118/118 and 105/105/105**. Recorded memory snapshots show no refused device
+demand; endpoint device headroom is approximately **1.314/1.778 GiB**. These
+snapshots and counters are not proof of every unobserved instantaneous peak.
+Raw observations, phase assessments, invocation inventories and `analysis.json`
+with its reproduction script are preserved.
+
+The observed long request reports 111.211 s prefill and 3.172 s generation.
+These qualification observations have no thermal gate or matched control,
+so no improvement is inferred from them. This check does not renew the earlier
+262144-capacity / 260137-input maximum-context qualification.
+
+### Stage 8 smaller single-GPU result — exact serving and lifecycle pass
+
+Catalog acquisition **`20261019T230015Z-stage8-acquire-small-e20ebb`** succeeds
+using the preserved, source-verified catalog tool. It acquires
+`qwen3.5-4b:gguf:q4` target/projector revision
+**`86835bf9949e4d14d6860f7910b1340ad4f271a9`** and catalog DFlash revision
+**`0094e74a88676605d53b79c7c3d26096335c9746`**. The target is **2,990,664,000
+bytes**, SHA-256
+`d2bfbee4de17c74e6308a4dc750be4c2271f92ae2df1e28f5c5afa0dcdb6fccc`.
+The catalog projector/drafter remain recorded even though these text-only,
+plain-decoding jobs use neither. No artifact or model registry is overridden.
+
+The initial small-model preflight
+`20261019T230734Z-stage8-small-strict-1d1f45` stops **before model execution**:
+the executable-copy checker references a build provenance file that lists only
+the harness. Its `StopIteration` is a launcher bookkeeping failure, not a model
+failure. The original serving qualification's provenance verifies both exact
+candidate executables. Correct that link, retain the failed preflight, and
+restart with unchanged binaries. The independent-copy hashes are checked
+against these original source-verified records before model execution.
+
+Serving **`20261019T230807Z-stage8-small-strict-104d5b`** then compares fresh
+accepted Stage 2b and complete-candidate launches on **only GPU0**, context
+1024, group 8, lookahead on, drafting off and host retention zero. Both use
+ordinary precision/admission and the unchanged 30-second tuning allowance.
+Native rendering is identical across builds for every fixture; all **six
+responses are valid and exactly equal**, with equal usage and stops and
+identical native configurations.
+
+| Canonical 4B fixture | Prompt tokens | Output tokens | Stop / intrinsic check |
+| --- | ---: | ---: | --- |
+| Repeat prose | 758 | 64 | `length`; exact expected prefix |
+| Ordinary continuation | 396 | 64 | `length`; nonempty, exact build parity |
+| BFCL tool | 366 | 41 | `tool_calls`; complete function/arguments pass canonical validation |
+
+The 4B tool emits `calculate_triangle_area(base=10, height=5)`, which the
+canonical validator accepts. It is not required to serialize the larger
+model's optional `unit` argument or produce its token count. Cross-build parity
+uses the actual 4B outputs, not another model as a reference.
+
+All four ready/after censuses contain **exactly the intended one CUDA device**.
+Both builds classify **2,967,280,308 model bytes** and **121,514,432 context
+bytes** on it. Classified compute changes **337,278,312→331,368,757 bytes**
+(5,909,555 fewer bytes); this is a census finding, not a peak-RSS or speed
+measurement. The candidate's invocation inventory agrees at **53/53/53 bytes**.
+
+Lifecycle **`20261019T230948Z-stage8-small-lifecycle-2f5e36`** passes cold,
+retain, hit, cancellation, recovery and health on the same candidate/model/GPU.
+All four completed responses are the exact 308-character expected prefix;
+hit/recovery reuse **757 prompt tokens**. Cancellation closes after four
+content events / 15 exact characters before terminal delivery and recovery
+remains healthy. `analysis.json` and its reproduction script join these serving
+and lifecycle records. This establishes the checked dense 4B single-GPU behavior,
+not every smaller model, distributed quality or a speed regression bound.
+No unit or integration tests were added or run.
+
+### Stage 8 current maximum-context result — readiness passes, request fails
+
+**`20261019T231254Z-stage8-context-262144-d839b3`** completes with a recorded
+failure on frozen candidate `7a0a1f30`. Both source-verified executable-copy
+hashes match. Readiness reports **262144 context tokens** and the short
+**2226-input + 37-output** retrieval is exact. The native-rendered long request
+has **260137 input tokens**, but returns no answer and fails with
+`insufficient_memory`: **60,817,408 bytes required versus 31,689,933 bytes
+available above the planning reserve**. This is a terminal request failure,
+not a 1500-second watchdog expiration or permission to reduce the reserve.
+The full current context qualification therefore **fails**; readiness alone
+does not preserve the earlier maximum-context result.
+
+Both cache assessments use **100000 fit tokens** and admit **216/217 expert
+slots per layer**. Inspection finds that placed-cache sizing reused the
+metadata assessment's deliberately capped workload. An expert inventory fixed
+at load time can consequently consume space needed by later state growth.
+The endpoint memory census follows failure cleanup and cannot reconstruct the
+instantaneous refusing owner's footprint; do not label it a peak or infer the
+exact failure position from elapsed time.
+
+Isolated repair **`82763130`** on `two-gpu-context-capacity-experimental` budgets
+each placed owner's slab-rounded state at the **full configured context**,
+with the ordinary in-flight recurrent bank count. It keeps the metadata-only
+assessment capped, preserves startup-phase accounting and leaves actual slab
+growth under fresh heap claims. It changes no GPU arithmetic, token limit,
+tuning allowance or reserve. Its maximum-context and short placed-serving/lifecycle
+qualification now pass, as recorded below.
+Preserve the failed candidate and its independent binaries;
+do not mutate them or run its pending speed comparison as if maximum context
+had passed. [Local bug report and reproduction](bugs/26-10-19/context-capacity.md).
+
+Before rebuilding, locked cleanup
+**`20261019T232457Z-stage8-reclaim-stale-targets-6739e5`** preserves both exact
+Stage 6 source-service executables in `stage6-source-service-control` and both
+request-identity executables in `cpu-expert-request-control`. Every original
+and copied hash matches its previously verified build record. The run and each
+control directory retain manifests with build identities and source-proof
+links. It then cleans only their stale `stage6-target` and `cpu-experts-target`
+Cargo output, increasing free disk from **5.619 to 18.877 GiB**. Source
+worktrees and the accepted/Stage 7 controls are untouched. Use these independent
+copies when revisiting the corresponding Stage 6 diagnostics.
+
+Full rebuild **`20261019T232622Z-stage8-context-capacity-build-8277bc`** passes
+in **4m35s** from clean source
+`8276313087da8e1960342a03a93c44633c355612`. The release engine and harness both
+pass source provenance, then independent copies in `context-capacity-control`
+are checked against their exact verified hashes. The run preserves this mapping
+in `preserved-binaries.json`. This build evidence is separate from the completed
+maximum-context replay below.
+
+### Stage 8 full-context repair result — maximum-context retrieval passes
+
+**`20261019T233141Z-stage8-context-capacity-max-qualification-eaa24c`** passes
+on clean repaired source **`82763130`**, using the independently preserved,
+source-verified engine and harness. The configuration remains two explicit
+3090 Ti owners, group 8, plain decoding, lookahead, decode-reuse policies,
+host retention zero and ordinary reserves. The standard 30-second preparation
+allowance is unchanged.
+
+Readiness reports **262144 context tokens**. Both canonical first-record
+retrievals finish exactly: **2226 inputs + 37 outputs** and **260137 inputs +
+37 outputs**. Evaluated counts match native rendering, both requests have zero
+prefix reuse, and the long response is the exact first-block mapping. This
+requalifies the original maximum-context case for this repaired placed profile.
+It does not establish quality for other long-context tasks or concurrent lanes.
+
+| Repaired owner | State-fit depth | Expert slots / layer | Slab-rounded state bound | Allocation bound / stable capacity |
+| --- | ---: | ---: | ---: | ---: |
+| Blocks 0..24 | 262144 | 202 | 2,363,813,328 bytes | 23,694,650,690 / 23,730,031,821 bytes |
+| Blocks 24..48 | 262144 | 204 | 2,359,644,176 bytes | 23,736,245,837 / 23,752,382,874 bytes |
+
+The failed candidate sized these caches with 100000 state tokens and 216/217
+slots. The repair admits fewer expert records at the larger context, leaving
+the derived allowance for future state growth. It does not eagerly allocate
+all those state slabs. Planned/retained/live invocation storage still agrees
+at **118/118/118 and 105/105/105 bytes**. Startup and endpoint memory records,
+physical-owner bounds, exact executable hashes and `analysis.json` with its
+reproduction script are preserved; endpoint headroom is not a peak estimate.
+
+The long request reports **714.813 s prefill and 6.066 s generation**. These
+are qualification observations with no matched thermal-gated control; do not
+compare them with the older 971 s run to claim a speedup. The complete job
+finishes under the declared hold and request limits. The maximum-context memory
+regression is repaired for the tested profile. The fresh short-context serving
+and lifecycle checks below also pass; matched timing remains necessary.
+
+### Stage 8 repaired-build placed serving and lifecycle — pass
+
+**`20261019T234759Z-stage8-repaired-placed-strict-823649`** compares fresh
+accepted Stage 2b and repaired `82763130` launches on both GPUs, context 1024,
+group 8, plain decoding, lookahead and decode-reuse seed/replacement, with host
+retention zero and the standard preparation allowance. All **six responses
+are valid and exactly equal** across builds, including complete tool arguments,
+usage and stop reason. Repeat is 758+64, ordinary continuation 396+60 with
+`stop`, and the tool 366+53 with `tool_calls`. Native rendered tokens and selected
+kernel configurations are identical.
+
+The repaired 1024-context cache plan remains **223/224 slots per layer**, with
+state fit depth 1024 and both physical allocation bounds within stable capacity.
+The full-context repair changes the larger declaration's fit, not this shorter
+case's capacity. Compared with Stage 2b, the two device model censuses increase
+by a combined **3,333,120,000 bytes**, while each classified compute charge falls
+**42,439,722 bytes** and context charges agree. These are memory-census findings,
+not a generation-speed or instantaneous peak-memory claim.
+
+**`20261019T235250Z-stage8-repaired-placed-lifecycle-699eb9`** passes cold,
+retain, prefix hit, cancellation, recovery and health on the exact repaired
+build. All four completed responses are the exact 308-character prefix;
+hit/recovery reuse **757 prompt tokens**. Cancellation closes after four
+content events / 15 exact characters before terminal delivery and recovery
+remains healthy. Both runs preserve source-proof links and independent binary
+hash verification. No precision gate, reserve or tuning allowance changes.
+
+The control's actual inference files match the published `d2b3b935` snapshot.
+The consolidated patch from that snapshot to `82763130` changes 37 source/design
+paths and no kernel declarations or `seismic-std` bodies. Preserve that complete
+inventory and patch with the next comparison. This is a consolidated source
+comparison, not an isolated test of the final state-depth repair.
+
+### Stage 8 direct Stage 2b comparison — ordinary generation improves
+
+**`20261019T235658Z-stage8-consolidated-comparison-29712b`** finishes on
+2026-10-20. It holds one exclusive lease and passes the thermal gate, with
+maximum observed GPU temperature **48°C**. Four fresh launches run **A/B/B/A**:
+A is the source-verified accepted Stage 2b executable, B the repaired complete
+candidate `82763130`. Both keep context 1024, group 8, plain decoding, lookahead,
+decode-reuse policies and host retention zero. Tracing is disabled. Each launch
+has two fixed warmups per fixture before measured work. All **24 responses are
+exact**, with equal rendered input, output counts and native configurations.
+
+| Fixture | Stage 2b generation | Repaired generation | Generation change | A / B generation spread | Prefill change | Mean model-total change |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Repeat, 64 outputs | 3329.664 ms | 3536.715 ms | +6.218% | 67.705 / 833.687 ms | −13.682% | −4.136% |
+| Ordinary, 60 outputs | 2249.629 ms | 2004.620 ms | **−10.891%** | 33.833 / 9.097 ms | −2.717% | −6.158% |
+
+**The ordinary primary metric clears the declared 3% bar and both observed
+spreads.** Its 245.008 ms mean generation gap exceeds 33.833/9.097 ms spreads;
+mean model total is 5343.229→5014.168 ms, without a material prefill/total
+regression. This directly measures the consolidated source against Stage 2b;
+do not multiply earlier-stage or separate-session percentages into it.
+
+Repeat has **no stable generation win**. Its worse mean does not exceed the
+candidate's generation spread, and its lower mean model total
+(6941.729→6654.591 ms) is smaller than B's **876.012 ms total spread**. Candidate
+passes are 3953.558 and 3119.872 ms generation; preserve both. The slower pass
+records **535.818 MB physical reads**, versus 2.859 MB in B's second pass.
+Control repeat windows read 45.322/1.962 MB physically. This is consistent with
+the earlier costly-source-miss observations, without measuring their precise
+critical-path contribution. Do not discard the slow pass or subtract an
+estimated disk delay to manufacture a repeat speedup.
+
+| Generation-delivery I/O | Stage 2b, two passes | Repaired, two passes |
+| --- | ---: | ---: |
+| Repeat logical reads | 7.219 / 7.227 GB | 6.527 / 6.531 GB |
+| Ordinary logical reads | 3.793 / 3.944 GB | 3.005 / 2.993 GB |
+| Ordinary physical reads | 0 / 0 MB | 0.004 / 0 MB |
+
+Mean logical reads fall **9.612% for repeat and 22.482% for ordinary**.
+Ordinary's negligible physical reads show that its generation gain is not
+explained by avoiding SSD bytes. Avoiding expert movement is consistent with
+the observations; untraced I/O alone does not partition RAM copying, upload,
+conversion, GPU math or coordination. Delivery windows include possible
+lookahead and are not exact device-step intervals. Linux still reports
+**56.561–56.832 GiB cached and 0.411–0.540 GiB free** at measured endpoints;
+the result does not uncover a large unoccupied RAM pool.
+
+The full source inventory/patch, individual timings, physical-owner assessments,
+ready/after memory censuses, raw I/O, thermal records, `analysis.json`,
+`decision.json` and reproduction scripts remain with the run. **Retain the
+ordinary-continuation benefit as a limited profile**, with repeat variability
+explicit. No general repeat-generation, cold-start, long-context speed or
+llama.cpp win is established. Two measured passes per side/fixture limit the
+result. Complete repaired-build smaller-model and initial/reference comparisons
+before final configuration/default decisions. No unit or integration tests
+were added or run.
+
+### Stage 8 repaired smaller model — serving, lifecycle and timing pass
+
+Serving **`20261020T000807Z-stage8-repaired-small-strict-74eefb`** compares
+fresh Stage 2b and repaired `82763130` on catalog Qwen3.5 4B Q4, only GPU0,
+context 1024, group 8, plain decoding and lookahead. All **six responses** match
+exactly in text/tool arguments, usage and stop, with identical rendered tokens
+and selected native configurations. Repeat/ordinary each generate 64 tokens;
+the complete canonical tool call generates 41. The candidate's invocation
+inventory agrees at **53/53/53 bytes**. Both builds' model/context charges
+agree, and the candidate classifies **5,909,555 fewer compute bytes**.
+
+Lifecycle **`20261020T000919Z-stage8-repaired-small-lifecycle-370363`** passes
+cold, retain, hit, cancellation, recovery and health on that repaired build.
+All four completed responses are the exact 308-character prefix; hit/recovery
+reuse 757 tokens. Cancellation closes after four events / 15 exact characters
+before terminal delivery. Ready/after censuses identify exactly the intended
+one GPU. Source proofs, hashes, observations and combined analysis are retained.
+
+Timing **`20261020T001030Z-stage8-consolidated-small-comparison-dcc3b4`** then
+runs A/B/B/A under one lease and a passing thermal gate. Both profiles keep the
+same options, ordinary admission and 30-second preparation allowance; inference
+tracing is disabled. Two fixed warmups per fixture precede each measured pass.
+All **24 responses are exact**, native choices match across launches and every
+ready/after census contains exactly GPU0.
+
+| 4B fixture, 64 outputs | Stage 2b generation | Repaired generation | Generation change | A / B spread | Model-total change |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Repeat | 398.766 ms | 398.085 ms | −0.171% | 0.084 / 0.250 ms | −0.127% |
+| Ordinary | 396.639 ms | 396.339 ms | −0.076% | 0.073 / 0.043 ms | −0.064% |
+
+Neither fixture clears a 3% generation improvement bar; **no generation
+regression crosses the declared 3%/spread criterion** either. Prefill changes
+are +0.025%/+0.009%, without a material total-time tradeoff. This preserves the
+checked smaller-model performance within that criterion, rather than claiming
+another useful speedup. It covers this dense 4B model on one SM86 GPU at short
+context, not all smaller models, hardware, cold starts or concurrent workloads.
+Raw timing, memory and I/O records, `analysis.json`, `decision.json` and
+reproduction scripts remain with the run. No unit or integration tests were
+added or run.
+
+### Stage 8 initial and independent serving gates — pass
+
+**`20261020T002633Z-stage8-initial-strict-6ae25c`** qualifies rebuilt clean
+initial source `5cac0a6f` against repaired `82763130`. Both retain group 8,
+lookahead, plain decoding, context 1024, host-cache zero and the 30-second tuning
+allowance. A uses its original prompt-frequency/LRU policies; B explicitly uses
+decode-reuse seeds/victims. All six repeat/ordinary/tool responses pass exact
+text, usage, stopping and selected native-configuration parity. The cumulative
+source inventory contains 40 inference/design paths and no kernel-declaration
+or seismic-std changes. This remains a new committed-source control, without
+equivalence to the missing archived dirty executable.
+
+**`20261020T002221Z-stage8-llama-serving-qualification-f9d33a`** qualifies the
+installed Unsloth llama.cpp build **11541 / `ce8c04021`**, executable SHA-256
+**`402c9be2de05d4cc427eebf7fece6c962eff17119a7202dc137213f953fe9cd3`**.
+The executable and local shared-library inventories are unchanged through the
+job. It uses the same catalog GGUF, 26 GPU layers, f16 K/V, context 1024, one
+slot, Flash Attention, plain generation and no retained prompt cache. For each
+fixture, its own `/apply-template` and `/tokenize` results exactly match the
+native renderer's input tokens; inference still receives the original chat
+fixture. Repeat, ordinary and complete tool responses all pass their intrinsic
+serving checks. This is not independent distributional/F32 quality evidence.
+
+Repeat produces identical text and 758-input / 64-output usage in both engines.
+Ordinary uses the same 396 input tokens but different generated prose: Magnitude
+stops at 60 output tokens, while llama.cpp reaches its 64-token limit. The direct
+comparison therefore declares **repeat as the matched-work speed cell** and
+retains ordinary as descriptive serving latency, without an execution-speed
+verdict. Different operators, KV representations and reported rate conventions
+remain explicit; engine counters are never rewritten to force agreement.
+
+**Completed timing declarations:** compare rebuilt initial A / repaired B in A/B/B/A
+order with both short fixtures, and stock llama.cpp A / repaired B in a separate
+A/B/B/A lease. Each launch runs two warmups per fixture, then one measured pass;
+there are two measured passes per side. Keep the thermal gate, frozen binaries,
+exact qualification outputs and no retained prefixes. The native comparison's
+primary remains ordinary generation; the cross-engine comparison's primary is
+the matched repeat's reported generation duration. Both use the existing 3%
+and both-spreads bar and preserve prefill/total tradeoffs and every failed cell.
+
+### Stage 8 initial-source cumulative timing — below the spread bar
+
+**`20261020T003132Z-stage8-initial-comparison-9c97fa`** completes the declared
+A/B/B/A comparison against the rebuilt clean initial source. All 24 responses
+are exact to the qualified control, rendered inputs and selected native choices
+match, the thermal gate passes, and maximum observed GPU temperature is 47°C.
+
+| Fixture | Initial generation, ms | Repaired generation, ms | Mean change | Initial / repaired spread, ms | Generation bar |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Repeat, 64 output | 5515.704 | 3300.053 | −40.170% | 2642.217 / 224.783 | Fails spread criterion |
+| Ordinary, 60 output | 2436.445 | 2004.932 | −17.711% | 573.190 / 2.732 | Fails spread criterion |
+
+Mean prefill changes are −13.036% / −6.744%, and mean model-total changes are
+−27.815% / −11.409% for repeat/ordinary. Neither generation gap exceeds the
+initial control's spread. These averages therefore do not establish a stable
+cumulative generation win under the declared criterion. Keep the separate,
+controlled Stage 2b ordinary benefit; do not multiply earlier percentages.
+
+The initial repeat delivery windows read 2053.935 / 3.740 MB physically, versus
+48.275 / 193.405 MB for the repaired candidate. Initial ordinary reads are
+399.835 / 0 MB, versus 0 / 2.777 MB. File cache remains approximately
+56.6–56.8 GiB. Fixed warmups do not guarantee complete source-page residency.
+The delivery windows can include lookahead and do not isolate executor phases.
+`analysis.json`, `decision.json`, raw observations and both reproduction scripts
+remain with the run. Its clean committed-source control is not asserted to be
+byte-equivalent to the missing archived dirty Stage 0 executable.
+
+### Stage 8 installed llama.cpp comparison — no matched-repeat win
+
+**`20261020T004046Z-stage8-llama-comparison-46aa04`** completes all 24 declared
+requests in A/B/B/A order with the thermal gate passing and a maximum observed
+GPU temperature of 49°C. Every response is valid and matches its own engine's
+qualification. Repeat has identical text, input tokens and 64-output usage
+across engines. Both native launches select the qualified native configurations;
+the installed llama.cpp executable/shared-library inventory remains unchanged.
+
+| Matched repeat | llama.cpp | Magnitude |
+| --- | ---: | ---: |
+| Mean reported prefill | 4238.444 ms | 4686.980 ms |
+| Mean reported generation | 5329.299 ms | 5316.386 ms |
+| Generation spread | 0.658 ms | 2667.360 ms |
+| Mean reported model total | 9567.743 ms | 10003.366 ms |
+| Physical delivery-window reads, two passes | 0.188 / 0.184 MB | 2311.643 / 560.124 MB |
+
+The generation mean changes **−0.242%**, and mean model total changes **+4.553%**.
+Neither supports a speed verdict beyond the declared bar and variability.
+Client completion means are 9572.523 / 9900.790 ms for llama.cpp / Magnitude;
+client times remain serving observations, not substitutes for engine counters.
+There is **no matched-repeat generation win over this llama.cpp configuration**.
+
+Ordinary uses the same 396 input tokens but different prose and stopping work:
+llama.cpp emits 64 tokens and Magnitude stops at 60. Mean reported model totals
+are 7603.603 / 6892.020 ms, and client completion means 7607.498 / 6913.250 ms.
+These are descriptive serving latencies, not ordinary execution-speed evidence.
+Different operators, KV codecs and reported token-rate conventions remain
+explicit. No output-token path or independent distributional quality is inferred
+from matching text/usage.
+
+Native endpoints have 56.619–56.750 GiB cached and 0.402–0.513 GiB free. The
+native processes report zero swapped pages at these endpoints. System-wide
+swap counters nevertheless record small transfers, including 9.679 MB swapped
+out in the slower native repeat window; the counters do not attribute that
+traffic to the engine. The llama.cpp processes also have swapped private pages.
+Retain both physical source reads and swap observations. Neither high available
+memory nor process RSS alone describes source residency or the critical path.
+Logical read counters are not comparable measures of memory traffic between
+llama.cpp's mapped CPU weights and native buffered source reads.
+
+**Reporting failure and recovery:** The original job exits **1** after all 24
+measurements because postprocessing looks for `magnitude-A-0.log` instead of the
+llama.cpp adapter's log. Original `failure.json`, logs and `reproduce.py` remain
+unchanged. `postprocess.py` uses saved observations and correct adapter log
+names, verifies all responses, native choices and module hashes, and writes the
+recovered summary. `postprocess-recovery.json` retains the original exit code.
+No measurement was repeated or omitted. `analysis.json`, `decision.json` and
+`analyze.py` report the recovered data and its limits.
+
+## Final configuration and dispositions
+
+The declared Stage 0–8 research sequence now has recorded outcomes. This closes
+the staged comparison with the limits above; it does not establish a general
+speedup, repaired CPU-expert serving, or complete CUDA critical-path attribution.
+
+| Setting / component | Final disposition |
+| --- | --- |
+| Qualified consolidated source | `82763130`, branch `two-gpu-context-capacity-experimental`; later documentation-only commits preserve its inference bytes |
+| Accepted earlier plain control | Frozen Stage 2b binaries, inference-source-equivalent to published `d2b3b935` |
+| Generation | Plain; lookahead on; group 8; same 30-second tuning allowance |
+| Placement | GPU `7b902106-9df7-52c2-1ffa-10dc7bcf25b2`, blocks 0–23; GPU `d400d4e4-2709-0deb-ec52-5847a21b5ad6`, blocks 24–47 |
+| Context | 1024 in short timings; repaired 262144 declaration passes actual 260137-input + 37-output retrieval; no long-context speed claim |
+| Reuse seeds / victims | Explicit optional profile: both `MAGNITUDE_EXPERT_SEED_POLICY` and `MAGNITUDE_EXPERT_REPLACEMENT_POLICY` set to `decode-reuse`; prompt-frequency/LRU defaults preserved |
+| Managed host expert cache | Off in final comparisons (`MAGNITUDE_HOST_EXPERT_CACHE_BYTES=0`); retain opt-in support, no larger-cap sweep or default promotion |
+| MTP / packing / CPU dispatch | Separate experimental branches; excluded from the consolidated plain candidate |
+| Smaller-model preservation | Qwen3.5 4B Q4 on GPU0 passes serving/lifecycle and the paired 3%/spread preservation criterion; no useful new speedup or all-model coverage claimed |
+| Default promotion | No broad performance/default promotion. Retain the qualified source and limited ordinary-profile benefit, with source-page variability explicit |
+
+The source/provenance-verified candidate copies are in
+`~/.cache/magnitude-evaluation/context-capacity-control/`. Engine SHA-256 is
+`a0663f6931b21626f3d849d112b125f559d2edad05e1a62446a21ba96737187d`;
+harness SHA-256 is
+`cbc8d5a4dffcf4bf5244f99685b57d0b61d5794e65347c4c93156f678884af9d`.
+Do not substitute the shared Cargo target, which was reused for the initial
+control. The main research branch also retains experimental diagnostics; the
+qualified consolidated engine source is the separate branch named above.
+
+### Reproduction and evidence
+
+Each serving/timing result directory under `inference/evaluation/results/` retains its fixture
+requests, catalog artifacts, exact rendered inputs, options, build identities,
+source/binary proofs, commands, raw stream observations, thermal data and copied
+scripts. These are ignored local artifacts, not bundled results in every clone.
+A different machine must rebuild source and acquire the pinned catalog artifacts;
+it cannot reuse this host's executable identity as its own proof.
+
+For the final timing records, inspect `comparison.json`, `timing-summary.json`,
+`analysis.json` and `decision.json` in:
+
+- `20261019T235658Z-stage8-consolidated-comparison-29712b` — Stage 2b control.
+- `20261020T001030Z-stage8-consolidated-small-comparison-dcc3b4` — one-GPU preservation.
+- `20261020T003132Z-stage8-initial-comparison-9c97fa` — rebuilt initial control.
+- `20261020T004046Z-stage8-llama-comparison-46aa04` — installed llama.cpp;
+  also inspect the original failure and reporting recovery described above.
+
+The copied `launch.py` records the evaluation-flow job, lock, thermal gate,
+source trees, exact binary paths, environment and maximum hold. `reproduce.py`
+records the fixture-level requests and comparisons. The launcher retains its
+original local helper paths; restore those from the copied scripts before
+rerunning. The llama.cpp report can be regenerated without another model run:
+
+```bash
+python3 postprocess.py /absolute/path/to/the/llama-comparison-result
+python3 analyze.py /absolute/path/to/the/llama-comparison-result
+```
+
+No unit or integration tests were added or run for this research sequence;
+reported model checks and benchmarks use the evaluation fixture flow.
+
+### Deferred work, with the gate needed before resuming
+
+- **Useful source-page retention:** physical misses still accompany slow native
+  requests while RAM already holds file pages. Investigate selection, storage
+  overlap, copies, uploads and conversion using the retained traces. A future
+  retention change needs a bounded shared host budget and demonstrated reduction
+  of source stalls without greater file-cache displacement. The 33 GiB trial did
+  not establish slow-request prevention; do not select another cap by sweeping.
+- **Selective CPU experts:** repair arithmetic compatibility and the warmed
+  serving failure before timing. Preserve original routing, per-expert rounding,
+  slot-order folding and shared/residual joins. Retained handles and submitted
+  consumers keep their host-budget charges; publish only complete packed triples
+  and use a bounded import handoff. Count CPU programs, mapped exchange buffers,
+  activation/result publication and staging in the host census. Keep one shared
+  budget across both owners and the original tuning allowance.
+- **MTP and packing:** preserve their qualified experimental controls and failed
+  ordinary primary bars. A combined candidate needs its own qualification and
+  matched comparison; separate-session gains cannot establish that result.
+- **Other prediction / four-warp conversion:** repeated-miss prefetch is rejected;
+  other conditioning is deferred. Isolate unrelated execution choices before
+  reconsidering the confounded conversion declaration.
+- **Broader coverage:** full CUDA graph attribution, independent distributional
+  quality, more model/hardware families, concurrency, long-context speed and
+  stronger repeatability bounds remain unmeasured. Existing checked retrieval,
+  semantic and lifecycle behavior must keep passing when their paths change.
