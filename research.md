@@ -3370,6 +3370,20 @@ without claiming byte equivalence to the missing archived dirty build. Before
 reusing the shared Cargo target, verify the independent repaired copies and
 remove only stale workspace outputs, retaining pinned registry dependencies.
 
+Rebuild **`20261020T001706Z-stage8-initial-source-build-efdaf2`** now passes in
+**1m41s** from clean initial commit
+`5cac0a6f1c0ba213a482fc27c18cb9f3d5f2a9ab`. The repaired independent controls
+are hash-verified before the target is reused. Cleaning 53 stale workspace
+packages increases free disk from 8.921 to 12.242 GiB while retaining registry
+dependencies. The newly built initial engine/harness both pass source provenance
+and are copied independently to **`stage0-rebuilt-control`** with checked hashes.
+The run's `control-scope.json` explicitly declines byte-equivalence to the
+missing archived dirty executable. This is a traceable initial committed-source
+control, requiring its own serving gate before a new alternating comparison.
+The initial source recognizes host-cache zero and has no decode-reuse policy
+switches; its baseline keeps the initial prompt-frequency/LRU behavior, while
+the candidate's reuse profile remains explicit.
+
 ## Immediate next action
 
 Continue with **Stage 8**, using frozen Stage 2b as the accepted plain serving
