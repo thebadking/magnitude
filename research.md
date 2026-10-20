@@ -19,6 +19,13 @@ architecture authority and must be consulted before implementation changes.
 
 ## Current outcome
 
+- Unified candidate `b94e1f36` now combines placed MTP with the repaired owner
+  capacity planner on `two-gpu-context-capacity-experimental`. Its plain/MTP
+  serving outputs, usage and stops agree on repeat, ordinary and tool fixtures.
+  **Integration qualification remains incomplete:** ordinary prefix retention
+  changes output in both plain and MTP. No new speed claim or default promotion.
+  See **Unified integration: MTP and owner capacity, 2026-10-20** below.
+
 - Repaired source `82763130` passes the actual 260137-input retrieval at 262144
   capacity, placed serving/lifecycle checks, and Qwen3.5 4B single-GPU preservation.
 - Ordinary generation improves 10.891% against Stage 2b beyond the declared bar
@@ -29,7 +36,8 @@ architecture authority and must be consulted before implementation changes.
   not establish a speed gain; keep it optional. No general default promotion.
 - The final configuration, evidence identities and deferred gates are recorded
   at the end of this document. Experimental MTP, packing and CPU dispatch remain
-  separate from the qualified consolidated plain source.
+  outside the previously qualified plain configuration. MTP is now integrated
+  into the candidate below; packing and CPU dispatch remain deferred.
 
 The next implementation sequence is the **Unified integration roadmap** at the
 end of this document. Its stages supersede treating deferred technologies as
@@ -3640,3 +3648,133 @@ workloads without losing the preserved single-GPU path. Existing single-GPU
 advantages motivate this work but do not prove that a 103.7 GiB model spanning
 two GPUs and host storage can achieve the same advantage. No particular speedup
 is promised before measurement.
+
+
+## Unified integration: MTP and owner capacity, 2026-10-20
+
+### Implementation and source identity
+
+All changes continue on `two-gpu-context-capacity-experimental`; no new feature
+branch was created. Built engine source is
+`b94e1f3631292f563a914c306340eef9dcf4ca28`. The sequence is `d46ebe1b`
+(integration), `93c1f607` (range boundary admission), `c22eb49d` (head import
+ordering), and `b94e1f36` (error conversion required by the build).
+
+- Integrated the MTP implementation from `ee5243ef` while preserving the later
+  owner-specific budgets, phase accounting, pooled leases and invocation inventory.
+- Shared the CUDA affine wide-query decode/verification arithmetic choice between
+  planning and preparation, so planned retained kernels match actual preparation.
+- Charge optional head weights and full-depth head state to their actual owner;
+  account for head conditioning transfers using the checked graph's port sizes.
+- Admit MTP range boundaries: internal decoder transport and final head return
+  transport are separately accounted, rather than rejecting every drafted load.
+- Import the placed head before allocating the target expert banks. Reuse those
+  resident weights when binding the head, and claim only outstanding component
+  weight growth. This fixes the observed startup allocation refusal without
+  changing reserves or reducing the selected expert cache.
+
+Build proof: `20261020T110406Z-unified-mtp-build-121cdc`. Independent engine and
+harness copies, hashes and source identities are retained under
+`~/.cache/magnitude-evaluation/unified-mtp-controls/<full-source-commit>/` and
+in the run's `preserved-binaries.json`. All runs below used the evaluation flow
+and one exclusive whole-job machine lock. They were correctness/diagnostic runs,
+without a timing thermal gate; their elapsed times are not benchmark results.
+
+### Serving parity and increased device residency
+
+`20261020T110524Z-unified-mtp-strict-219713` passed, with the same source and
+binary for plain and MTP, context 1024, prompt group 8, lookahead enabled, the
+unchanged 30-second tuning allowance, and managed host cache disabled.
+
+| Fixture | Input / output tokens | Plain versus MTP | MTP accepted / proposed |
+| --- | ---: | --- | ---: |
+| Repeat | 758 / 64 | Exact text, usage, length stop | 31 / 31 |
+| Ordinary continuation | 396 / 60 | Exact text, usage, terminal stop | 24 / 34 |
+| Tool call | 366 / 53 | Exact canonical call, usage, tool stop | 26 / 26 |
+
+Ordinary continuation exercised ten rejected proposals. The tool call was
+`calculate_triangle_area` with base 10, height 5 and unit `units`.
+
+| Configuration at context 1024 | GPU 0 slots per layer | GPU 1 slots per layer |
+| --- | ---: | ---: |
+| Integrated plain | 223 | 224 |
+| Integrated MTP | 173 | 218 |
+| Historical experimental MTP | 135 | 175 |
+
+The integrated MTP cache therefore has about 28% and 25% more slots than the
+historical MTP experiment. This is a capacity improvement, **not a measured
+throughput improvement**. Optional MTP still displaces target experts relative
+to plain decoding, especially on GPU 0.
+
+### Lifecycle finding: plain and MTP share a retention discrepancy
+
+`20261020T111001Z-unified-mtp-lifecycle-d1dacf` passed repeat-text cold/retain/hit,
+cancellation after four content events, and exact recovery. Hits reused 757
+prompt tokens. Ordinary cold MTP reproduced the strict 60-token result with
+24/34 acceptance, but enabling retention produced a different 64-token result
+with zero cached tokens. The gate failed; it was not waived or relabeled.
+
+Isolation run `20261020T111540Z-unified-plain-prefix-diagnostic-7d06f7` used MTP
+**off** and the same ordinary fixture. Two transient requests reproduced the
+60-token reference. Retaining the prompt produced the same different 64-token
+continuation observed with MTP; the subsequent 395-token cache hit reproduced
+that retained result exactly. Request bodies differed only in `cache_prompt`;
+both used temperature zero and seed 42. Thus this is shared plain/MTP behavior,
+not evidence of an MTP rejection or restoration defect. It remains a failed
+cold-versus-retained equality requirement.
+
+Bounded block-row evidence is in
+`20261020T111932Z-unified-prefix-row-diagnostic-3b216e/row-comparison.json`:
+
+- Compared 768 input/output tensor pairs for logical prompt positions 388–395.
+- Positions 388–394 matched byte-for-byte through all 48 blocks.
+- Position 395 entered block 0 identically, then first differed at its output.
+  Relative L2 difference there was 0.0033413; maximum absolute difference was
+  0.00060533. These tensor distances are not quality scores or measured KL.
+- Transient prefill used 396 actual rows in class 448. Retention used 395 rows
+  in that same class, followed by the final token in class 1. The row-class
+  change localizes the next numerical investigation; the exact operator is
+  **not yet isolated**. Do not call this evidence of corrupted cached state.
+- The transient traced response was valid. The retained traced request later
+  unloaded under memory pressure, after all the compared prompt tensors had
+  been written. That run is a partial diagnostic, not serving qualification.
+
+### Failed attempts and limits retained in the record
+
+- The first integration build reused incompatible stale Seismic build artifacts;
+  a clean rebuild resolved the missing-method errors. The subsequent build error
+  was an explicit Rust error-type conversion, fixed in `b94e1f36`.
+- `20261020T105003Z-unified-mtp-strict-bd1498`: obsolete plain-only boundary
+  admission rejected MTP startup. Fixed by the range certificate change.
+- `20261020T105526Z-unified-mtp-strict-9b4b8e`: late head import requested
+  891289600 bytes with 190352589 available. Early import fixed the reproduced
+  startup failure; physical fragmentation was not independently quantified.
+- `20261020T111820Z-unified-prefix-row-diagnostic-781467`: extra block-middle
+  exports caused startup scratch allocation refusal (901775360 requested,
+  632851661 available). The next diagnostic used only existing block inputs and
+  outputs. Observer memory pressure is a separate limitation to resolve before
+  relying on richer traces.
+- No same-source ABBA timing was launched after the lifecycle failure. No new
+  llama.cpp comparison, MTP maximum-context qualification, or small-model
+  preservation result is claimed. The old 262144-context evidence remains for
+  plain source `82763130`, not this integrated MTP candidate.
+- Disk space fell below 3 GiB. The now-unused shared Stage 8 Cargo target was
+  cleaned through evaluation job `20261020T112219Z-unified-stale-build-cleanup-37fad2`;
+  independent qualified binaries and all evidence were preserved.
+
+### Next work on this same integration line
+
+1. Isolate the block-0 final-row discrepancy between class 448 and class 1 with
+   bounded intermediate observations whose memory is admitted correctly. Repair
+   the responsible arithmetic or dispatch behavior; do not hide it by changing
+   the fixture, forcing a convenient answer, or removing prefix reuse.
+2. Repeat the failed ordinary lifecycle gate, including rejection, cache hit,
+   cancellation and recovery, and retain the existing repeat/tool coverage.
+3. Once that gate passes, run the prepared same-source ABBA plain/MTP comparison:
+   separate prefill, generation and total time; record physical reads, cache
+   capacities and selected kernels. Keep the 3% generation and spread bars.
+4. Qualify integrated MTP context capacity and single-GPU preservation before
+   claiming the combined configuration replaces the prior qualified plain one.
+5. Continue MTP overhead and prefill work from the unified roadmap using these
+   measurements. MTP remains opt-in; CPU dispatch stays out until its separate
+   correctness failure is resolved. No main merge or default promotion yet.
