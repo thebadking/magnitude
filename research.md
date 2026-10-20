@@ -17,6 +17,20 @@ This is a research and execution plan. Proposed techniques and acceptance bars
 are not measured speedups. The applicable documents under `design/` remain the
 architecture authority and must be consulted before implementation changes.
 
+## Current outcome
+
+- Repaired source `82763130` passes the actual 260137-input retrieval at 262144
+  capacity, placed serving/lifecycle checks, and Qwen3.5 4B single-GPU preservation.
+- Ordinary generation improves 10.891% against Stage 2b beyond the declared bar
+  and both spreads. Rebuilt-initial means are lower but fail the spread bar.
+- The direct matched-repeat comparison establishes no generation win over the
+  installed llama.cpp configuration. Native source-page misses remain variable.
+- Most spare RAM already holds file cache. The larger managed-cache trial does
+  not establish a speed gain; keep it optional. No general default promotion.
+- The final configuration, evidence identities and deferred gates are recorded
+  at the end of this document. Experimental MTP, packing and CPU dispatch remain
+  separate from the qualified consolidated plain source.
+
 ## Current system and evidence
 
 ### Target environment
@@ -86,12 +100,13 @@ do not repeat a full maximum-context run for every unrelated change.
 
 ### RAM occupancy and actual disk traffic
 
-**Current answer:** Most spare RAM is already occupied by file cache. The repaired
-Stage 8 profile measures 56.561–56.832 GiB cached and only 0.411–0.540 GiB free
-during the controlled comparison. Its repeat case still includes a 535.818 MB
-physical-read window, so useful page retention can matter. Allocating another
-cache competes for occupied RAM; the derived-cap experiment below did not
-establish a warm-generation benefit or prevention of those slow requests.
+**Current answer:** Most spare RAM is already occupied by file cache. Across
+the repaired Stage 8 comparisons, native endpoints have roughly 56.6–56.8 GiB
+cached and 0.4–0.5 GiB free. The final cross-engine comparison records a
+2.312 GB physical-read repeat window despite that occupancy. Useful page
+retention can matter, but allocating another cache competes for occupied RAM.
+The derived-cap experiment below did not establish a warm-generation benefit
+or prevention of these slow requests. `MemAvailable` includes reclaimable cache.
 
 The machine already uses most spare RAM for cached model pages. During the
 Stage 2a tool qualification, `free` showed approximately 3.2 GiB actually free
@@ -408,7 +423,7 @@ against a reference require that reference to pass its sanity gate.
 | 5 | SM86 packed-kernel and representation improvements | Packing experiment qualified; repeat improves, ordinary gain below bar; four-warp declaration deferred after a confounded gate | 4 decision |
 | 6 | Selective CPU expert execution | Isolated crossover established; serving fails warmed parity; grouped arithmetic follow-up remains experimental | Transfer profiling, then compute crossover |
 | 7 | Adaptive placement and prompt grouping | Accounting, paired reservations and startup phases qualified experimentally; keep group 8. Capacity helps ordinary generation but exposes repeat source-page misses. Derived-cap RAM retention fails warm speed bars; no overall promotion | Recorded earlier-stage decisions |
-| 8 | Consolidated qualification and reference comparison | In progress: repaired 262K, single-GPU preservation and initial/llama.cpp serving gates pass. Ordinary generation −10.891% versus Stage 2b with repeat variability; initial/llama.cpp alternating timings remain | Selected candidates disposed |
+| 8 | Consolidated qualification and reference comparison | Declared coverage complete: repaired 262K, serving/lifecycle and single-GPU preservation pass. Ordinary generation −10.891% versus Stage 2b; rebuilt-initial gains fail the spread bar. No matched-repeat win over llama.cpp; retain source-page variability and optional profiles | Selected candidates disposed |
 
 A dependency on a decision permits a recorded revert or deferral. It does not
 require forcing an unsuccessful optimization into the code. Reorder remaining
@@ -641,6 +656,8 @@ before running it; fill measured fields only from saved artifacts.
 | Repaired dense 4B on one GPU | 8 coverage/timing | Stage 2b versus `82763130`, catalog Qwen3.5 4B Q4, GPU0/context 1024 | Serving `20261020T000807Z-stage8-repaired-small-strict-74eefb`; lifecycle `20261020T000919Z-stage8-repaired-small-lifecycle-370363`; timing `20261020T001030Z-stage8-consolidated-small-comparison-dcc3b4` | Six serving and 24 timing responses exact, native choices equal, one-GPU census and lifecycle pass. Generation −0.171%/−0.076%; no regression crosses the 3%/spread criterion | Checked smaller-model behavior/performance preserved. No useful new small-model speedup or coverage of every smaller model claimed |
 | Rebuilt initial-source serving control | 8 qualification | Clean rebuilt `5cac0a6f` versus `82763130`; initial prompt/LRU versus explicit decode reuse | `20261020T002633Z-stage8-initial-strict-6ae25c` | All six responses valid and exact across builds; identical rendered tokens, native choices, usage and stops | Control qualifies for cumulative alternating timing. No equivalence to missing archived Stage 0 executable claimed |
 | Installed llama.cpp serving control | 8 qualification | Unsloth build 11541, `ce8c04021`, executable `402c9be2…`; 26 GPU layers, f16 KV, no drafting | `20261020T002221Z-stage8-llama-serving-qualification-f9d33a` | All three fixtures valid, rendered token arrays identical to native rendering, executable/modules unchanged. Repeat text and usage match Magnitude; ordinary prose and output length differ | Repeat permits matched generated work. Preserve ordinary serving difference; no ordinary execution-speed verdict or independent distributional quality claim |
+| Consolidated source versus rebuilt initial control | 8 timing | Clean initial `5cac0a6f` versus repaired `82763130`, explicit initial/reuse policies | `20261020T003132Z-stage8-initial-comparison-9c97fa` | All 24 outputs exact, native choices equal, thermal gate passes. Repeat generation mean −40.170%, ordinary −17.711%; neither gap exceeds A's spread. Native source reads remain partly physical despite about 56.6–56.8 GiB cached | No stable cumulative generation win established by this comparison. Retain all samples, controls and limited Stage 2b result; no multiplication of prior gains |
+| Consolidated source versus installed llama.cpp | 8 timing/report recovery | Stock `ce8c04021`, 26 GPU layers/f16 KV, versus `82763130`, default KV and explicit reuse | `20261020T004046Z-stage8-llama-comparison-46aa04` | All 24 responses valid and exact to their qualified engine; repeat text/usage match. Repeat generation 5.329 s versus 5.316 s (−0.242%), far below bar and B spread; model total +4.553%. B physical repeat reads 2.312/0.560 GB. Job exits 1 in reporting after all measurements; corrected log-name postprocessing recovers the report without remeasurement | No matched-repeat generation win or general llama.cpp claim. Ordinary outputs differ, so retain descriptive serving latency only. Preserve original reporting failure and recovery proof |
 
 
 ### Stage 0 progress — baseline and diagnostic correction
@@ -3381,7 +3398,7 @@ retains ordinary as descriptive serving latency, without an execution-speed
 verdict. Different operators, KV representations and reported rate conventions
 remain explicit; engine counters are never rewritten to force agreement.
 
-**Next timing declarations:** compare rebuilt initial A / repaired B in A/B/B/A
+**Completed timing declarations:** compare rebuilt initial A / repaired B in A/B/B/A
 order with both short fixtures, and stock llama.cpp A / repaired B in a separate
 A/B/B/A lease. Each launch runs two warmups per fixture, then one measured pass;
 there are two measured passes per side. Keep the thermal gate, frozen binaries,
@@ -3390,123 +3407,165 @@ primary remains ordinary generation; the cross-engine comparison's primary is
 the matched repeat's reported generation duration. Both use the existing 3%
 and both-spreads bar and preserve prefill/total tradeoffs and every failed cell.
 
-### Stage 8 control recovery and remaining timing
+### Stage 8 initial-source cumulative timing — below the spread bar
 
-The 32K and smaller dense-model checks pass. Inspection shows that the placed
-fit assessment caps its state-depth estimate at **100000**, so 32K coverage
-does not exercise a larger declaration. The changed capacity/accounting path
-therefore required the current maximum-context qualification above. The full
-repaired request and fresh placed serving/lifecycle gates now pass. Keep their
-source and binaries frozen for timing. This repair changes placed-cache sizing; the separate
-100000-token metadata assessment workload remains documented and unchanged.
+**`20261020T003132Z-stage8-initial-comparison-9c97fa`** completes the declared
+A/B/B/A comparison against the rebuilt clean initial source. All 24 responses
+are exact to the qualified control, rendered inputs and selected native choices
+match, the thermal gate passes, and maximum observed GPU temperature is 47°C.
 
-The direct consolidated Stage 2b comparison now clears the ordinary generation
-bar while retaining repeat variability. The repaired 4B serving/lifecycle and
-paired timing checks now pass their preservation criterion. Compare the retained configuration with Stage 0 and
-the independent llama.cpp setup. Keep RAM retention, MTP, packing and CPU
-dispatch outside this candidate; their previous dispositions remain in force.
-The original Stage 0 `bench-target` executables are no longer present in the
-current cache inventory. Historical timings cannot replace a new alternating
-comparison. Recover or rebuild a traceable initial-source control before
-claiming a cumulative Stage 0 result, and distinguish a rebuilt control from
-the exact archived executable. The installed llama.cpp reference remains
-available; verify its binary/version and actual serving conditions in its job.
-A clean detached checkout of initial commit `5cac0a6f` is now prepared as
-`stage0-rebuilt`. Its Cargo manifest/lock and CLI source match the later tree;
-the actual initial inference implementation remains unchanged. Rebuild this
-source with recorded provenance and label it a clean committed-source control,
-without claiming byte equivalence to the missing archived dirty build. Before
-reusing the shared Cargo target, verify the independent repaired copies and
-remove only stale workspace outputs, retaining pinned registry dependencies.
+| Fixture | Initial generation, ms | Repaired generation, ms | Mean change | Initial / repaired spread, ms | Generation bar |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Repeat, 64 output | 5515.704 | 3300.053 | −40.170% | 2642.217 / 224.783 | Fails spread criterion |
+| Ordinary, 60 output | 2436.445 | 2004.932 | −17.711% | 573.190 / 2.732 | Fails spread criterion |
 
-Rebuild **`20261020T001706Z-stage8-initial-source-build-efdaf2`** now passes in
-**1m41s** from clean initial commit
-`5cac0a6f1c0ba213a482fc27c18cb9f3d5f2a9ab`. The repaired independent controls
-are hash-verified before the target is reused. Cleaning 53 stale workspace
-packages increases free disk from 8.921 to 12.242 GiB while retaining registry
-dependencies. The newly built initial engine/harness both pass source provenance
-and are copied independently to **`stage0-rebuilt-control`** with checked hashes.
-The run's `control-scope.json` explicitly declines byte-equivalence to the
-missing archived dirty executable. This is a traceable initial committed-source
-control, requiring its own serving gate before a new alternating comparison.
-The initial source recognizes host-cache zero and has no decode-reuse policy
-switches; its baseline keeps the initial prompt-frequency/LRU behavior, while
-the candidate's reuse profile remains explicit.
+Mean prefill changes are −13.036% / −6.744%, and mean model-total changes are
+−27.815% / −11.409% for repeat/ordinary. Neither generation gap exceeds the
+initial control's spread. These averages therefore do not establish a stable
+cumulative generation win under the declared criterion. Keep the separate,
+controlled Stage 2b ordinary benefit; do not multiply earlier percentages.
 
-## Immediate next action
+The initial repeat delivery windows read 2053.935 / 3.740 MB physically, versus
+48.275 / 193.405 MB for the repaired candidate. Initial ordinary reads are
+399.835 / 0 MB, versus 0 / 2.777 MB. File cache remains approximately
+56.6–56.8 GiB. Fixed warmups do not guarantee complete source-page residency.
+The delivery windows can include lookahead and do not isolate executor phases.
+`analysis.json`, `decision.json`, raw observations and both reproduction scripts
+remain with the run. Its clean committed-source control is not asserted to be
+byte-equivalent to the missing archived dirty Stage 0 executable.
 
-Continue with **Stage 8**, using frozen Stage 2b as the accepted plain serving
-reference. Stage 7 was performed before completing Stage 6 because the CPU-ready
-crossover has no qualified serving benefit: both grouped scalar recipes still
-differ from actual CUDA projections, and another native cache competes with
-Linux file cache. Keep CPU dispatch experimental and its numerical repair and
-warmed failure open. The independent capacity/accounting work now has qualified
-sources and recorded performance limits.
+### Stage 8 installed llama.cpp comparison — no matched-repeat win
 
-**Stage 7a** establishes a qualified owner-allocation bound and capacity increase,
-without an accepted speedup. **Stage 7b** repairs paired admission and residual
-scratch lifetimes, qualifies group 1, and completes its same-source comparison.
-Keep group 8: group 1 fails the primary generation bar and increases both
-fixtures' total latency. Preserve both candidates' exact sources and binaries;
-the repaired independent copies are hash-checked and the shared Cargo target is
-cleaned. `grouping-reservations-control` preserves repaired group 8 binaries;
-`startup-attention-inventory-control` preserves the complete Stage 7c candidate.
-Stage 2b remains the accepted serving reference.
+**`20261020T004046Z-stage8-llama-comparison-46aa04`** completes all 24 declared
+requests in A/B/B/A order with the thermal gate passing and a maximum observed
+GPU temperature of 49°C. Every response is valid and matches its own engine's
+qualification. Repeat has identical text, input tokens and 64-output usage
+across engines. Both native launches select the qualified native configurations;
+the installed llama.cpp executable/shared-library inventory remains unchanged.
 
-**Stage 7c's declared source-miss and bounded-retention experiments are now
-disposed.** Preserve qualified complete candidate `7a0a1f30` experimentally;
-Stage 2b remains the accepted plain reference. The 33 GiB profile qualifies but
-fails both warm generation bars while retaining 15.190 GiB and displacing file
-cache. It does not establish prevention of costly misses. Do not run another
-cap sweep or select a flag-only `NOREUSE` patch for the reviewed buffered path.
-Use the existing upload/service evidence before proposing another transfer
-change, and retain the earlier asynchronous-batching rejection.
+| Matched repeat | llama.cpp | Magnitude |
+| --- | ---: | ---: |
+| Mean reported prefill | 4238.444 ms | 4686.980 ms |
+| Mean reported generation | 5329.299 ms | 5316.386 ms |
+| Generation spread | 0.658 ms | 2667.360 ms |
+| Mean reported model total | 9567.743 ms | 10003.366 ms |
+| Physical delivery-window reads, two passes | 0.188 / 0.184 MB | 2311.643 / 560.124 MB |
 
-**Stage 8** has a passing repaired 262K-capacity / 260137-input retrieval, in
-addition to fresh placed serving/lifecycle gates on exact repaired build
-`82763130`. Its direct comparison with Stage 2b clears ordinary generation's
-bar, with no stable repeat-generation win. The repaired smaller-model path now
-passes serving/lifecycle and its paired preservation criterion. Compare with initial/reference implementations in
-alternating sessions. Do not multiply separate-session improvements. Keep RAM
-retention, MTP, packing and CPU dispatch outside the consolidated default unless
-their own declared gates pass. The capacity candidate's earlier repeat regression
-remains a limitation to resolve or explicitly reject in that comparison.
+The generation mean changes **−0.242%**, and mean model total changes **+4.553%**.
+Neither supports a speed verdict beyond the declared bar and variability.
+Client completion means are 9572.523 / 9900.790 ms for llama.cpp / Magnitude;
+client times remain serving observations, not substitutes for engine counters.
+There is **no matched-repeat generation win over this llama.cpp configuration**.
 
-Before resuming Stage 6 timing, repair and qualify affected serving behavior.
-Account for cache hit rate, import cost, file-cache displacement, worker contention
-and activation/result publication. Keep original router choices, per-expert
-rounding and slot-order accumulation, with actual routed work and normal
-numerical/greedy, tool and lifecycle gates. Preserve the 30-second tuning budget
-and ordinary admission for additional CPU configurations. Two-miss work and
-other weight formats remain follow-ups, not established crossovers.
+Ordinary uses the same 396 input tokens but different prose and stopping work:
+llama.cpp emits 64 tokens and Magnitude stops at 60. Mean reported model totals
+are 7603.603 / 6892.020 ms, and client completion means 7607.498 / 6913.250 ms.
+These are descriptive serving latencies, not ordinary execution-speed evidence.
+Different operators, KV codecs and reported token-rate conventions remain
+explicit. No output-token path or independent distributional quality is inferred
+from matching text/usage.
 
-The serving cache must share one host budget across both owners and
-protect ordinary runtime reserves. In-flight read leases retain their charges;
-dropping a cache entry cannot release its accounting while a tensor handle or
-submitted consumer still retains the storage. Publish only complete packed
-triples and bypass insertion when retained leases leave no capacity. Packing
-and source-storage ownership need a bounded handoff after ordinary readiness,
-with its overlap measured rather than assumed.
+Native endpoints have 56.619–56.750 GiB cached and 0.402–0.513 GiB free. The
+native processes report zero swapped pages at these endpoints. System-wide
+swap counters nevertheless record small transfers, including 9.679 MB swapped
+out in the slower native repeat window; the counters do not attribute that
+traffic to the engine. The llama.cpp processes also have swapped private pages.
+Retain both physical source reads and swap observations. Neither high available
+memory nor process RSS alone describes source residency or the critical path.
+Logical read counters are not comparable measures of memory traffic between
+llama.cpp's mapped CPU weights and native buffered source reads.
 
-The experimental exchange supplies activation publication without waiting for
-the whole queued graph. Serving must make eligibility explicit, look up CPU
-retention before reserving GPU slots, and bypass GPU conversion/computation for
-the CPU-served choice. Keep all original expert IDs, router coefficients and
-the original GPU slot-order fold, including shared and residual-stream joins.
-Do not add a CPU contribution after the completed routed sum. Include mapped
-exchange buffers, CPU programs and bounded import staging in the load plan and
-host census. Canonical CPU preparation and any further tuning must fit the
-existing load allowance; no second CPU tuning budget is permitted.
+**Reporting failure and recovery:** The original job exits **1** after all 24
+measurements because postprocessing looks for `magnitude-A-0.log` instead of the
+llama.cpp adapter's log. Original `failure.json`, logs and `reproduce.py` remain
+unchanged. `postprocess.py` uses saved observations and correct adapter log
+names, verifies all responses, native choices and module hashes, and writes the
+recovered summary. `postprocess-recovery.json` retains the original exit code.
+No measurement was repeated or omitted. `analysis.json`, `decision.json` and
+`analyze.py` report the recovered data and its limits.
 
-Keep Stage 4's causal-head MTP and Stage 5's fragment-packing sources as separate
-experimental controls. Neither met its ordinary primary generation bar; do not
-claim their cumulative performance without a combined qualification and benchmark.
-The four-warp Stage 5 experiment requires unchanged unrelated execution choices
-before it can isolate conversion. Preserve the fixed tuning budget and ordinary
-precision/greedy gates.
+## Final configuration and dispositions
 
-Stage 7's startup-peak/placement audit and the one derived-cap experiment now
-have recorded dispositions. Complete Stage 8's affected context and single-GPU
-qualification and cumulative/reference comparison. Stage 3's repeated-miss candidate is
-rejected; a differently conditioned predictor remains deferred. Full CUDA graph
-attribution is still unavailable.
+The declared Stage 0–8 research sequence now has recorded outcomes. This closes
+the staged comparison with the limits above; it does not establish a general
+speedup, repaired CPU-expert serving, or complete CUDA critical-path attribution.
+
+| Setting / component | Final disposition |
+| --- | --- |
+| Qualified consolidated source | `82763130`, branch `two-gpu-context-capacity-experimental`; later documentation-only commits preserve its inference bytes |
+| Accepted earlier plain control | Frozen Stage 2b binaries, inference-source-equivalent to published `d2b3b935` |
+| Generation | Plain; lookahead on; group 8; same 30-second tuning allowance |
+| Placement | GPU `7b902106-9df7-52c2-1ffa-10dc7bcf25b2`, blocks 0–23; GPU `d400d4e4-2709-0deb-ec52-5847a21b5ad6`, blocks 24–47 |
+| Context | 1024 in short timings; repaired 262144 declaration passes actual 260137-input + 37-output retrieval; no long-context speed claim |
+| Reuse seeds / victims | Explicit optional profile: both `MAGNITUDE_EXPERT_SEED_POLICY` and `MAGNITUDE_EXPERT_REPLACEMENT_POLICY` set to `decode-reuse`; prompt-frequency/LRU defaults preserved |
+| Managed host expert cache | Off in final comparisons (`MAGNITUDE_HOST_EXPERT_CACHE_BYTES=0`); retain opt-in support, no larger-cap sweep or default promotion |
+| MTP / packing / CPU dispatch | Separate experimental branches; excluded from the consolidated plain candidate |
+| Smaller-model preservation | Qwen3.5 4B Q4 on GPU0 passes serving/lifecycle and the paired 3%/spread preservation criterion; no useful new speedup or all-model coverage claimed |
+| Default promotion | No broad performance/default promotion. Retain the qualified source and limited ordinary-profile benefit, with source-page variability explicit |
+
+The source/provenance-verified candidate copies are in
+`~/.cache/magnitude-evaluation/context-capacity-control/`. Engine SHA-256 is
+`a0663f6931b21626f3d849d112b125f559d2edad05e1a62446a21ba96737187d`;
+harness SHA-256 is
+`cbc8d5a4dffcf4bf5244f99685b57d0b61d5794e65347c4c93156f678884af9d`.
+Do not substitute the shared Cargo target, which was reused for the initial
+control. The main research branch also retains experimental diagnostics; the
+qualified consolidated engine source is the separate branch named above.
+
+### Reproduction and evidence
+
+Each serving/timing result directory under `inference/evaluation/results/` retains its fixture
+requests, catalog artifacts, exact rendered inputs, options, build identities,
+source/binary proofs, commands, raw stream observations, thermal data and copied
+scripts. These are ignored local artifacts, not bundled results in every clone.
+A different machine must rebuild source and acquire the pinned catalog artifacts;
+it cannot reuse this host's executable identity as its own proof.
+
+For the final timing records, inspect `comparison.json`, `timing-summary.json`,
+`analysis.json` and `decision.json` in:
+
+- `20261019T235658Z-stage8-consolidated-comparison-29712b` — Stage 2b control.
+- `20261020T001030Z-stage8-consolidated-small-comparison-dcc3b4` — one-GPU preservation.
+- `20261020T003132Z-stage8-initial-comparison-9c97fa` — rebuilt initial control.
+- `20261020T004046Z-stage8-llama-comparison-46aa04` — installed llama.cpp;
+  also inspect the original failure and reporting recovery described above.
+
+The copied `launch.py` records the evaluation-flow job, lock, thermal gate,
+source trees, exact binary paths, environment and maximum hold. `reproduce.py`
+records the fixture-level requests and comparisons. The launcher retains its
+original local helper paths; restore those from the copied scripts before
+rerunning. The llama.cpp report can be regenerated without another model run:
+
+```bash
+python3 postprocess.py /absolute/path/to/the/llama-comparison-result
+python3 analyze.py /absolute/path/to/the/llama-comparison-result
+```
+
+No unit or integration tests were added or run for this research sequence;
+reported model checks and benchmarks use the evaluation fixture flow.
+
+### Deferred work, with the gate needed before resuming
+
+- **Useful source-page retention:** physical misses still accompany slow native
+  requests while RAM already holds file pages. Investigate selection, storage
+  overlap, copies, uploads and conversion using the retained traces. A future
+  retention change needs a bounded shared host budget and demonstrated reduction
+  of source stalls without greater file-cache displacement. The 33 GiB trial did
+  not establish slow-request prevention; do not select another cap by sweeping.
+- **Selective CPU experts:** repair arithmetic compatibility and the warmed
+  serving failure before timing. Preserve original routing, per-expert rounding,
+  slot-order folding and shared/residual joins. Retained handles and submitted
+  consumers keep their host-budget charges; publish only complete packed triples
+  and use a bounded import handoff. Count CPU programs, mapped exchange buffers,
+  activation/result publication and staging in the host census. Keep one shared
+  budget across both owners and the original tuning allowance.
+- **MTP and packing:** preserve their qualified experimental controls and failed
+  ordinary primary bars. A combined candidate needs its own qualification and
+  matched comparison; separate-session gains cannot establish that result.
+- **Other prediction / four-warp conversion:** repeated-miss prefetch is rejected;
+  other conditioning is deferred. Isolate unrelated execution choices before
+  reconsidering the confounded conversion declaration.
+- **Broader coverage:** full CUDA graph attribution, independent distributional
+  quality, more model/hardware families, concurrency, long-context speed and
+  stronger repeatability bounds remain unmeasured. Existing checked retrieval,
+  semantic and lifecycle behavior must keep passing when their paths change.
