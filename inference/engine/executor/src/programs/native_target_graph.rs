@@ -3495,9 +3495,6 @@ pub(crate) fn checked_target_range_with_boundary(
     limits: ResourceLimits,
     owned: std::ops::Range<usize>,
 ) -> Result<(CheckedGraphResources, PlannedSealedGraphs, Vec<u64>, u64), GraphError> {
-    if load.residual_conditioning().is_some() {
-        return Err("range boundary assessment requires plain target execution".into());
-    }
     certify_target_family_in_range(backend, load, geometry, state, plan, limits, owned)
         .map(|c| (c.resources, c.sealed, c.upload_regions, c.boundary_bytes))
 }
@@ -3886,8 +3883,9 @@ fn certify_target_family_in_range(
         .and_then(|bytes| bytes.checked_add(token_rows))
         .ok_or("target binding charge overflows")?;
     // The physical handoff carries the checked first block's input plus the
-    // same kept rows the source family exposes. Residual conditioning is
-    // excluded by range admission; no second numerical shape recipe is used.
+    // same kept rows the source family exposes. Raw head conditioning is
+    // exported only by the decoder's final block, never at an internal range
+    // boundary; its return transport is charged with the head's checked ports.
     let boundary_bytes = if owned.start == 0 {
         0
     } else {
