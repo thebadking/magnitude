@@ -301,7 +301,7 @@ impl<F: ProgramFamily> ExecutorDomain<F> {
                 // Existing residency is already charged; binding it cannot
                 // claim all of its weights a second time.
                 let imported = loader.resident_bytes().map_err(|e| DomainError::Input(e.into()))?
-                    .checked_sub(self.family.target_weight_bytes().map_err(DomainError::Input)?)
+                    .checked_sub(self.family.target_weight_bytes().map_err(|e| DomainError::Input(e.into()))?)
                     .ok_or_else(|| DomainError::Input("head residency omits target holdings".into()))?;
                 let remaining = self.execution.resources().bytes().head_weights
                     .checked_sub(imported)
