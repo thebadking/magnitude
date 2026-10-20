@@ -4190,3 +4190,103 @@ Parallel overrides are restricted to the measured `long` + MTP configuration. Fu
 Reproduction workers, original/final launcher snapshots and argument-check records are in `/home/dre/magnitude-benchmarks/20261020-mtp-parallel/`. The Job launcher is `/home/dre/magnitude-benchmarks/20261020-iq3/launch.py`; pass `--script context.py --profiles mtp262,mtp200,mtp200gpu --compare` or `--script parallel.py --profiles 1,2,4,8 --context 200192 --compare`, with the manifest path from the earlier IQ3 acquisition. Use absolute script paths. Actual run directories contain the exact copied workers, rendered prompts, requests, streams, observations, launch arguments and provenance.
 
 The new default also passed the tool fixture with active MTP in `20261020T151054Z-iq3-unsloth-qualification-cea5b8` (366 input tokens; valid tool call). This is a correctness qualification, not a gated timing comparison. Total new successful responses: 54 context + 128 concurrency + 1 tool = 183.
+
+
+---
+
+## Expert residency tuning with two concurrent requests — 2026-10-20
+
+Unpruned IQ3_S; Ryzen 5900X; 64 GB RAM; two RTX 3090 Ti. Installed Unsloth llama.cpp build 11541, not the native Magnitude engine. Fixed total context 200192, unified KV pool, f16 KV, MTP shared Q8_0 head with three proposals, CPU vision, CPU PLE, 12 threads, batch 8192 and microbatch 512. The task is to optimize expert placement while holding those settings fixed. Two concurrent requests are the requested service default.
+
+The model has 48 decoder layers and 512 routed experts per layer (10 selected per token). `--n-cpu-moe N` moves the first N layers' expert weights to CPU; this tuning changes whole layer groups, not individual hot experts. The old two-slot placement had 25 CPU expert layers and 23 GPU expert layers, split 36,13.
+
+### Capacity checks
+
+Evaluation Job flow, exclusive machine lease. These correctness/capacity checks are not thermally gated timing comparisons. Each successful arm checks two different short repeat conversations, two ordinary continuations, two longer repeat conversations, and a tool call, with real MTP drafts and prompt reuse disabled. Repeat outputs must be exact expected prefixes. Inputs use deterministic chat fixtures rendered by the runtime's template and tokenizer. The largest qualification prompt is approximately 6.6K tokens; successful 200K allocation is not a full-window ingestion claim.
+
+| CPU expert layers | GPU expert layers | Tensor split | Qualification |
+|---:|---:|---|---|
+| 23 | 25 | 35,14 | Passed: `20261020T153157Z-iq3-unsloth-qualification-02c4ec` |
+| 21 | 27 | 35,14 | Passed: `20261020T153421Z-iq3-unsloth-qualification-d33ead` |
+| 20 | 28 | 35,14 | Passed: `20261020T153610Z-iq3-unsloth-qualification-38fa24` |
+| 19 | 29 | 34,15 | Passed: `20261020T153831Z-iq3-unsloth-qualification-f29a6a` |
+| 18 | 30 | 34,15 | Failed CUDA0 allocation: `20261020T154031Z-iq3-unsloth-qualification-9dc366` |
+| 18 | 30 | 33,16 | Failed CUDA1 allocation: `20261020T154128Z-iq3-unsloth-qualification-89392c` |
+
+The first 18-CPU placement cannot allocate the target prefill compute buffer (~1271 MiB) on GPU0. Moving one layer boundary toward GPU0 frees GPU0 but prevents the MTP compute buffer from fitting on GPU1. For the fixed prefix CPU-offload strategy, the adjacent layer boundaries bracket the allocation limit: moving the boundary farther in either direction increases residency on the card that already fails. Lower CPU counts add further GPU weights. This establishes a whole-layer capacity boundary for this configuration, not a limit for tensor splitting within a layer, quantized KV, smaller context, other draft lengths or selective per-tensor CPU placement.
+
+### Timed comparison
+
+Passed: `20261020T154252Z-iq3-unsloth-comparison-80296a` (96 valid responses).
+
+Order: 25/36, 23/35, 21/35, 20/35, 20/34, 19/34, then reverse. Each launch runs a warmup and measured pair of short repeat requests (256 output tokens each), then ordinary prose (at most 256 each, EOS allowed). Same total context, slots and acquisition throughout. Results require valid responses, equal rendered token arrays across profiles, real MTP drafts, and zero prompt reuse. Repeat text/usage must match each profile's warmup and are checked across profiles in the final summary. Ordinary prose can change across placements and scheduling; its output and usage matching are reported, and rates remain descriptive when outputs differ. Only measured observations support performance claims.
+
+Workers, launch snapshots, hashes, prompts, requests, stream records, memory/I/O snapshots, thermal gate and process logs are retained. The acquisition/runtime manifest is `20261020T140006Z-iq3-unsloth-qualification-38122d/manifest.json`. Raw run folders are under `/home/dre/git/magnitude/inference/evaluation/results/`.
+
+#### Results
+
+The copy outputs and token usage match exactly across every timed placement. All prompts have equal rendered tokens across profiles; prefix reuse remains zero. Mean rates below average two measured launches, each with two concurrent requests. Ranges are the two launch means, not statistical confidence intervals.
+
+| CPU expert layers | GPU expert layers | Split | Copy generation tok/s per stream | Range | Copy prefill tok/s per stream |
+|---:|---:|---|---:|---|---:|
+| 25 | 23 | 36,13 | 26.15 | 25.79–26.51 | 136.27 |
+| 23 | 25 | 35,14 | 27.12 | 26.80–27.44 | 146.15 |
+| 21 | 27 | 35,14 | 29.74 | 29.64–29.84 | 155.07 |
+| 20 | 28 | 35,14 | 31.40 | 31.39–31.42 | 158.35 |
+| 20 | 28 | 34,15 | 31.51 | 31.51–31.51 | 159.74 |
+| 19 | 29 | 34,15 | 31.53 | 30.71–32.35 | 160.53 |
+
+Selected 20 CPU expert layers / split 35,14, with two slots. Against the old two-slot placement in this same comparison:
+
+- Generation throughput: 20.08% higher (26.151 → 31.402).
+- Prefill throughput: 16.20% higher (136.275 → 158.347).
+- Time to first token: 13.91% lower (5689.337 → 4897.898 ms).
+- Complete request latency: 15.70% lower (15443.385 → 13019.243 ms).
+- Aggregate output throughput including prefill: 18.60% higher (33.152 → 39.319).
+
+The sixth extra GPU expert layer and the alternate five-layer split differ from the selected placement by less than 0.5% in mean copy generation rate. That is below the 3% practical threshold, and the six-layer setting has substantially more run-to-run variation. No meaningful speed advantage is established for the maximum residency setting. The chosen five-layer split leaves more space on CUDA1 for MTP and about 1 GiB more total free VRAM than six layers. This is a measured placement choice, not a claim of a universal optimum across context lengths, kernels, draft lengths or workloads.
+
+Ordinary continuations pass fixture validation but can differ both across placements and between repeated runs of the same placement. Token counts, draft acceptance and generated text differ, so those rates cannot establish matched execution speedups or quality equivalence. They are retained in `waves.json`; the copy comparison supports the speed claim. The results do not establish a 20% general improvement for arbitrary prose or coding. MTP acceptance remains workload dependent.
+
+#### Checks of skipped CPU counts
+
+`20261020T155836Z-iq3-unsloth-comparison-e03c77` passed after its own thermal gate (24 valid copy responses). It brackets the two initially skipped CPU counts with the chosen reference: 20/35, 22/35, 24/36, then reverse. Only generation should be compared within this shorter repeat-only sequence; its warmup pattern differs from the main comparison. Copy text and usage are checked against the same fixtures.
+
+| CPU expert layers | Split | Generation tok/s per stream | Range |
+|---:|---|---:|---|
+| 20 | 35,14 | 31.23 | 31.01–31.46 |
+| 22 | 35,14 | 28.18 | 28.13–28.24 |
+| 24 | 36,13 | 26.95 | 26.87–27.02 |
+
+All CPU expert counts from 19 through 25 have now been measured with the indicated splits. These gap checks give no reason to change the selected 20-layer CPU setting. The 18-layer startup failures establish the adjacent whole-layer memory boundary.
+
+#### Sampled memory and I/O
+
+Snapshots are taken outside request timing. They are not continuous peaks. RSS includes reclaimable file mappings; nonzero physical reads are retained rather than treating every warmup as proof of a purely compute-limited workload.
+
+| Placement | Max sampled GPU0 used, MiB | Max sampled GPU1 used, MiB | Physical reads during measured requests, MiB |
+|---|---:|---:|---:|
+| c25s36 | 20918 | 21246 | 65.03 |
+| c23s35 | 21146 | 22946 | 4.36 |
+| c21s35 | 23114 | 22946 | 20.02 |
+| c20s35 | 23984 | 22956 | 12.41 |
+| c20s34 | 22922 | 24018 | 15.84 |
+| c19s34 | 23886 | 24018 | 38.51 |
+
+### Service selection
+
+`/home/dre/ai.service.sh` now defaults to 200192 tokens, MTP with three proposals, **two simultaneous requests**, 20 CPU expert layers, 28 GPU expert layers, tensor split 35,14, and CPU vision. This moves five additional layers' routed experts onto GPU compared with the old two-slot placement: 5 × 512 = 2560 additional per-layer expert instances. Six extra layers (3072 instances) fit the qualification fixtures, but the measured generation advantage over five is insignificant and memory headroom is worse.
+
+`AI_PROFILE=full` keeps its qualified 262144-token / 27-CPU-layer / one-slot configuration. `AI_PROFILE=fast` and plain decoding keep their qualified one-slot defaults. Explicit `AI_PARALLEL=1|4|8` on the long MTP profile uses the earlier 25-CPU-layer placement to retain those qualified slot configurations. The new tuned placement is used for `AI_PARALLEL=2`, which is now the default. Pool capacity remains shared between requests; two equally sized conversations have about 100K each including output, while an idle neighbor lets one use more.
+
+Shell syntax, eight valid argument combinations and four unsupported-configuration rejection checks pass. No service was restarted. The settings apply on the next start. Launcher snapshots and argument records accompany this report.
+
+### Larger concurrent prompt qualification and final checks
+
+`20261020T160621Z-iq3-unsloth-qualification-89df8e` passed with two simultaneous conversations of **19875 and 19622 input tokens**, 128 generated tokens each, on the chosen 20-CPU-layer / split 35,14 placement. Both outputs match the expected passage prefixes and use real drafts (94/97 accepted for each response); cache reuse is zero. Sampled GPU use after the requests was 23960 MiB on GPU0 and 22952 MiB on GPU1. No OOM occurred.
+
+This is a correctness/capacity check, not a gated speed comparison. Server generation rates for the two requests were 26.12 and 17.89 tok/s; one request began generation while the other was still prefilling. This illustrates prefill/decode interference and why the short-copy 31.4 tok/s result is not a promise for longer prompts. No matched baseline was run at this larger input length. Full 200K prompt ingestion and KV-pool saturation remain unqualified.
+
+Total successful responses in this tuning task: 28 initial qualification + 96 main comparison + 24 count checks + 2 larger-prompt qualification = **150**. The two 18-CPU-layer startup failures are separately recorded and are not counted as successful runs. Runtime executable/library SHA-256 values and projector SHA-256 match the earlier acquisition; model shard sizes and mtimes remain unchanged against the hashed manifest. Final identity checks, argument checks and original/final launcher snapshots are saved alongside this report. All model processes started by this task exited; the unrelated CPU Clef service remains running.
+
+The final setting is the fastest practical choice supported by these measured expert placements: the nominally higher-residency and alternate-split means differ by less than the practical threshold, while the selected placement leaves more memory for draft execution. Other CPU counts and draft lengths, KV precision, context lengths, within-layer tensor splitting or selective expert placement can have different optima. These experiments tune the installed Unsloth llama.cpp service; native Magnitude engine implementation is unchanged.
