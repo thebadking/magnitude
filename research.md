@@ -4098,3 +4098,95 @@ baseline. Repair selective CPU-expert arithmetic and preserve GPU attention;
 measure MTP verification and prefill costs separately, including ordinary prose.
 The earlier Q4 native results cannot be transferred to this quantization.
 P1M and its original-token-ID hashing support remain deferred by user request.
+
+
+---
+
+## Long-context MTP and parallel serving — 2026-10-20
+
+### Scope and method
+
+Unpruned IQ3_S on Ryzen 5900X, 64 GB RAM and two RTX 3090 Ti, installed Unsloth llama.cpp build 11541. These are llama.cpp serving measurements through Magnitude's evaluation adapters, not native Magnitude engine results. P1M remains deferred.
+
+All runs use the evaluation Job flow and machine lease; timed runs pass the thermal gate. Model/runtime identities reuse the hashed IQ3 manifest and check file size/mtime before execution. The CPU vision projector is loaded. MTP uses the shared Q8_0 head and three proposals. All configurations use GPU attention/recurrent work, CPU PLE, f16 KV, 12 threads, batch 8192 and microbatch 512. Prompt reuse is disabled and checked.
+
+### Context experiment
+
+Compare 262144 tokens / 27 CPU expert layers / split 37,12 against 200192 tokens with the same placement, then 200192 / 25 CPU expert layers / split 36,13. 200192 is approximately 200K aligned to the runtime's 256-token allocation granularity.
+
+Order A/B/C/C/B/A, two warmups and one measured pass per fixture per launch. Fixtures are deterministic conversations rendered by the runtime. Repeat and ordinary prose must pass intrinsic validation; repeat responses must match the expected text prefix. Each measured response must match its profile's first qualified response text and usage. Cross-profile matching is recorded separately. The largest prompt is 6647 tokens: context allocation is tested, not full-window ingestion or long-context answer quality.
+
+### Parallel experiment
+
+Use eight distinct fixture conversations and the same total context pool for all slot counts. Each wave submits up to N concurrent requests, processing all eight conversations. Report total output tokens divided by complete workload wall time, mean request time to first token, mean request completion time and server-reported generation rates. This distinguishes request latency from aggregate throughput. Unified KV matches Unsloth's parallel-serving behavior: an idle-slot request can use the pool, while live requests compete for its total capacity. Additional recurrent states and execution buffers can still increase memory with slot count.
+
+Both paired experiments passed. See completed results below.
+
+### Completed context results
+
+Evidence: `inference/evaluation/results/20261020T143923Z-iq3-unsloth-comparison-98ca3d` (passed, 54 valid responses).
+
+| Allocation / CPU expert layers | Short prefill tok/s | Short generation tok/s | Long prefill tok/s | Long generation tok/s |
+|---|---:|---:|---:|---:|
+| 262144 / 27 | 231.46 | 44.74 | 268.73 | 42.44 |
+| 200192 / 27 | 227.05 | 44.60 | 266.99 | 43.56 |
+| 200192 / 25 | 245.90 | 46.58 | 287.58 | 46.01 |
+
+Repeat output text and usage match across all three configurations. Ordinary prose differs after changing placement; its generation rates (27.08 / 27.24 / 27.74 tok/s) are descriptive, not matched execution speedups. MTP accepted all 95 draft tokens on the repeat tasks, versus 72/163 or 71/166 on ordinary prose.
+
+- repeat: prefill latency 5.87% lower; generation latency 3.94% lower; combined server prefill+generation latency 4.97% lower.
+- long-repeat: prefill latency 6.56% lower; generation latency 7.93% lower; combined server prefill+generation latency 6.70% lower.
+
+Lowering allocation without changing placement does not establish a useful speed advantage. The new default instead uses the freed VRAM for two additional GPU expert layers. Short-copy generation improves by about 4%, above its measured spreads. Long-copy generation has a noisy 262K control (40.65–44.22 tok/s); do not interpret its mean difference as a precise general speedup. The stable prefill and complete-request reductions support the default change. Only two measured repetitions per configuration/fixture were taken.
+
+The service launcher now defaults to MTP with 200192 tokens, 25 CPU expert layers, GPU split 36,13, and CPU vision. `AI_PROFILE=full` selects the qualified 262144 / 27 / 37,12 MTP configuration. `AI_SPECULATIVE=off` retains the earlier 262K plain-decoding placement (23 / 35,14); `AI_PROFILE=fast` retains the 8192 profile. Service is inactive; settings apply on its next start.
+
+### Completed concurrency results
+
+Evidence: `inference/evaluation/results/20261020T145431Z-iq3-unsloth-comparison-53fea0` (passed). Order 1/2/4/8/8/4/2/1 under one lease and thermal gate. Each launch runs an eight-request qualification/warmup and an eight-request measured workload. All 128 responses pass intrinsic validation and exactly match each conversation's serial output and usage. Prompts are 750–809 tokens; each answer is 128 tokens. These are copy tasks with favorable MTP acceptance, not representative ordinary prose or coding workloads.
+
+| Slots | Mean generation tok/s per request | Mean first token, s | Mean response, s | Aggregate output tok/s including prefill | Time for all 8, s |
+|---|---:|---:|---:|---:|---:|
+| 1 | 47.10 | 3.09 | 5.79 | 22.09 | 46.35 |
+| 2 | 26.39 | 6.07 | 10.88 | 23.50 | 43.60 |
+| 4 | 14.46 | 11.85 | 20.64 | 24.75 | 41.39 |
+| 8 | 7.03 | 24.71 | 42.77 | 23.90 | 42.87 |
+
+Throughput gains against one slot: 2 slots +6.4%, 4 slots +12.0%, 8 slots +8.2%. These modest gains do not multiply with concurrency. Four and eight have overlapping throughput ranges; do not claim a precise throughput winner between them. Four has much better per-request latency. Two is a reasonable interactive concurrency compromise. One remains the default for individual latency.
+
+The table's single-slot requests are submitted sequentially, not all queued at time zero. Thus its 5.8-second response time excludes queueing for eight simultaneously submitted requests. With one slot, simultaneous arrivals wait their turn; with multiple slots, active streams share the resources and each slows down. The workload wall time and total throughput are comparable across all cases. This is a bounded wave benchmark, not a sustained arrival-rate, fairness or tail-latency study.
+
+The pool is shared: approximately 100K/50K/25K tokens each if 2/4/8 requests divide 200K equally, including generated tokens. An individual request can use more while others use less. This does not demonstrate eight full 200K conversations or saturation of the KV pool. Only short concurrent conversations were qualified.
+
+Sampled memory and I/O (not continuous peaks):
+
+| Slots | Max process-tree RSS, GiB | Measured physical reads, MiB across both passes |
+|---|---:|---:|
+| 1 | 29.61 | 0.00 |
+| 2 | 30.07 | 183.89 |
+| 4 | 30.92 | 122.82 |
+| 8 | 32.71 | 94.01 |
+
+Mapped pages are included in RSS; it is not unreclaimable RAM. Nonzero physical reads mean parallel runs are not a pure no-I/O compute comparison. GPU, process and swap snapshots are preserved in `waves.json`. Eight slots left less GPU headroom; fitting these short requests does not establish safety for all prompt lengths or image inputs. CPU experts and the hybrid recurrent/MTP execution path share hardware across streams; attributing the measured scaling to a specific kernel requires profiling, which this experiment does not provide.
+
+### Launcher usage
+
+```bash
+## Default: ~200K, MTP, one slot
+/home/dre/ai.service.sh
+
+## Preserve the full 262K allocation with MTP, one slot
+AI_PROFILE=full /home/dre/ai.service.sh
+
+## Two concurrent requests, shared ~200K pool
+AI_PARALLEL=2 /home/dre/ai.service.sh
+
+## Four or eight concurrent requests are also qualified on short text fixtures
+AI_PARALLEL=4 /home/dre/ai.service.sh
+```
+
+Parallel overrides are restricted to the measured `long` + MTP configuration. Full/fast/plain profiles remain single-slot. Unsloth automatically adds `--kv-unified` above one slot; the benchmark explicitly uses that flag. Shell syntax, nine valid argument combinations and four unsupported-configuration rejection checks passed. No service was restarted: both system and user ai.service units were inactive.
+
+Reproduction workers, original/final launcher snapshots and argument-check records are in `/home/dre/magnitude-benchmarks/20261020-mtp-parallel/`. The Job launcher is `/home/dre/magnitude-benchmarks/20261020-iq3/launch.py`; pass `--script context.py --profiles mtp262,mtp200,mtp200gpu --compare` or `--script parallel.py --profiles 1,2,4,8 --context 200192 --compare`, with the manifest path from the earlier IQ3 acquisition. Use absolute script paths. Actual run directories contain the exact copied workers, rendered prompts, requests, streams, observations, launch arguments and provenance.
+
+The new default also passed the tool fixture with active MTP in `20261020T151054Z-iq3-unsloth-qualification-cea5b8` (366 input tokens; valid tool call). This is a correctness qualification, not a gated timing comparison. Total new successful responses: 54 context + 128 concurrency + 1 tool = 183.
