@@ -19,7 +19,17 @@ architecture authority and must be consulted before implementation changes.
 
 ## Current outcome
 
-- **New CPU-placement evidence:** selective CPU experts with GPU attention in
+- **Active research model switched to unpruned GSQ-RCO IQ3_S.** Requested model
+  cleanup is complete; previous Q4 measurements remain historical evidence.
+  P1M work is explicitly deferred by the user. No P1M runtime support or new
+  Magnitude-engine speedup is claimed.
+- **IQ3 Unsloth baseline:** one gated A/B/C/C/B/A run passes all 54 responses.
+  CPU experts with GPU attention improve matched generation by 2.812x/2.907x
+  (short/long repeat) versus whole-layer offload. MTP adds a 1.456x/1.590x
+  generation improvement on those predictable outputs but increases prefill
+  cost. Plain remains the service default. See **Unpruned IQ3 Unsloth baseline**.
+
+- **Earlier Q4 CPU-placement evidence:** selective CPU experts with GPU attention in
   llama.cpp reduce matched-repeat generation from 5.314 s to 1.915 s (2.775x),
   prefill by 11.666%, and total model time by 40.761%, in one ABBA session.
   This is a stronger comparison control, not a Magnitude speedup.
@@ -3980,3 +3990,111 @@ At 1.2 GiB free disk, evaluation job
 `20261020T124740Z-unified-stale-build-cleanup-197a6e` removed regenerable Cargo
 artifacts (10.0 GiB reported). Preserved executable identities, source, fixtures
 and run evidence remain available; subsequent free space was about 9.4 GiB.
+
+
+## Unpruned IQ3 Unsloth baseline, 2026-10-20
+
+### Target and method
+
+The active model is now the retained local
+`ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF/IQ3_S`, served by installed Unsloth
+llama.cpp build 11541 / `ce8c040212e544facc9eb9d2ee49dba7854eddb8`.
+This explicit local acquisition is not mislabeled as the catalog's deleted Q4
+artifact. Both IQ3 shards and the retained shared Q8_0 MTP head are hash-pinned
+in the run manifest. Runtime executable/library hashes remain unchanged.
+
+`20261020T140914Z-iq3-unsloth-comparison-b8fb80` passes the thermal gate and
+runs whole layers / CPU experts / MTP / MTP / CPU experts / whole layers under
+one exclusive lease. Each launch has two warmups per fixture and one measured
+pass. All 54 responses pass intrinsic validation and match their own qualified
+profile's text and usage. Prefix reuse is disabled and every `cache_n` is zero.
+Rendered token arrays agree across profiles.
+
+The common capacity is 8192, one slot, flash attention, f16 KV, batch 8192 and
+microbatch 512. The control uses 37 GPU layers and 24 CPU threads. CPU-expert
+profiles use all attention/recurrent layers on GPU, the first 12 expert layers
+on CPU, split 31,18, and 12 physical-core threads. PLE is on CPU and automatic
+fitting is off. A 24-thread CPU-expert qualification was slower and was not
+promoted. MTP uses the shared head with three proposals.
+
+### Warm results
+
+Rates are means of two measured server-reported rates per profile/fixture.
+
+| Profile | Short prefill tok/s | Short generation tok/s | Long prefill tok/s | Long generation tok/s |
+| --- | ---: | ---: | ---: | ---: |
+| Whole-layer control | 339.46 | 16.51 | 427.32 | 15.62 |
+| CPU experts, GPU attention | 411.60 | 46.42 | 486.88 | 45.42 |
+| CPU experts plus MTP | 381.38 | 68.01 | 466.85 | 72.20 |
+
+Short/long inputs contain 758/6647 tokens and both produce the same 128-token
+repeat output across profiles. CPU-expert placement improves generation latency
+by 2.812x/2.907x, prefill latency by 17.61%/12.23%, and total model time by
+53.90%/30.55%; these exceed 3% and both observed spreads.
+
+MTP improves generation by 1.456x/1.590x over plain CPU-expert execution but
+increases prefill latency by 7.92%/4.29%. Short-repeat total time improves 15.52%.
+Long-repeat total time improves only 2.75%, below the 3% promotion bar. Short
+MTP generation ranges from 62.54 to 73.49 tok/s; retain that variability and the
+two-observation limit.
+
+Ordinary prose produces different outputs and lengths (122/107/105 tokens).
+Its observed generation rates are 16.91/46.33/43.36 tok/s; these are descriptive
+serving results, not matched execution-speed or distributional-quality evidence.
+MTP accepts 95/95 proposals on each repeat, versus 60/135 on ordinary prose.
+Do not infer an unconditional MTP win from predictable text.
+
+Measured process-tree physical reads total zero for every profile. Largest
+sampled RSS is 13.89/13.82/15.05 GiB; mapped file pages are included. Warm IQ3
+working sets do not establish a disk bottleneck on these fixtures. This does not
+cover cold starts, image inference, concurrency or full 262K input ingestion.
+
+### Launcher and capacity checks
+
+`/home/dre/ai.service.sh` now retains deleted IDs 0–6 and 8 as commented paths,
+keeps model 7 unpruned, and uses explicit CPU-expert placement. Default context
+remains 262144 with 23 CPU expert layers and split 35,14. `AI_PROFILE=fast`
+selects the measured 8192 allocation with 12 CPU expert layers and split 31,18.
+
+`AI_SPECULATIVE=mtp` enables the retained shared head. It places the vision
+encoder on CPU to leave VRAM for CUDA graph capture; image encoding performance
+is not benchmarked. At 262144 it additionally uses 27 CPU expert layers and
+split 37,12. Plain decoding stays the default because MTP's benefit depends on
+the workload. Settings apply on the next service start.
+
+Four final profiles pass repeat, ordinary, long-repeat and tool checks with the
+projector loaded. These prove serving with the configured allocation, not full
+262K-prompt correctness. Readiness alone was insufficient: 262K MTP with 23 CPU
+expert layers failed CUDA1 graph instantiation during longer prefill; 8K MTP
+with GPU vision failed CUDA0 graph instantiation. Neither failed placement is
+exposed by the updated launcher.
+
+Evidence:
+
+- `20261020T140402Z-iq3-unsloth-qualification-79c32c`: control and CPU experts.
+- `20261020T140649Z-iq3-unsloth-qualification-c0b515`: 24 threads and MTP.
+- `20261020T142054Z-iq3-unsloth-qualification-4e24ff`: long plain passes all
+  fixtures; the subsequent long MTP arm fails. Its server log retains the OOM;
+  a telemetry access error initially obscured that cause in the job traceback.
+- `20261020T142350Z-iq3-unsloth-qualification-e18bb6`: fast plain with GPU vision
+  passes; the subsequent fast MTP/GPU-vision arm fails.
+- `20261020T142557Z-iq3-unsloth-qualification-ad7773`: fast MTP/CPU-vision and
+  long MTP/27-CPU-expert/CPU-vision pass all fixtures.
+- `/home/dre/magnitude-benchmarks/20261020-iq3/report.md`: complete report,
+  artifact hashes, profile selection, limitations and reproduction locations.
+  The adjacent service qualification JSON identifies successful arms without
+  treating partially failed jobs as globally successful.
+
+Shell syntax, four launcher argument expansions, model size/mtime preservation,
+and final executable/library hashes pass. The benchmark metadata reader uses
+Unsloth's bundled GGUF Python code because the evaluation environment's older
+reader rejects quantization type 42. No inference binary changed.
+
+### Next integration work
+
+Continue on the existing integrated branch. Qualify native Magnitude serving
+on this exact unpruned IQ3 target before comparing it to the stronger Unsloth
+baseline. Repair selective CPU-expert arithmetic and preserve GPU attention;
+measure MTP verification and prefill costs separately, including ordinary prose.
+The earlier Q4 native results cannot be transferred to this quantization.
+P1M and its original-token-ID hashing support remain deferred by user request.
